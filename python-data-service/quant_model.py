@@ -1,4 +1,4 @@
-﻿"""
+"""
 quant_model.py —— 量化分析模块
 基于技术指标 + 随机森林回归，对个股进行短期预测和信号生成。
 
@@ -12,6 +12,9 @@ import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
 import lightgbm as lgb
+from deep_models import MiniTransformer, DQNAgent
+import pickle
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +159,11 @@ class StockPredictor:
     """LightGBM ??????????????"""
 
     def __init__(self, window_days: int = None, label: str = "", seed: int = 42):
-        self.model = lgb.LGBMRegressor(n_estimators=80, max_depth=5, num_leaves=31, min_child_samples=10, learning_rate=0.05, reg_alpha=0.0, reg_lambda=1.0, verbose=-1, random_state=seed, n_jobs=-1)
+        if window_days and window_days <= 60: params = dict(n_estimators=100, max_depth=4, num_leaves=24, min_child_samples=12, learning_rate=0.03, reg_alpha=0.02, reg_lambda=0.5)
+        elif window_days and window_days <= 120: params = dict(n_estimators=120, max_depth=4, num_leaves=20, min_child_samples=15, learning_rate=0.03, reg_alpha=0.05, reg_lambda=1.5)
+        else: params = dict(n_estimators=150, max_depth=3, num_leaves=15, min_child_samples=25, learning_rate=0.02, reg_alpha=0.15, reg_lambda=2.5)
+        params.update(dict(verbose=-1, random_state=seed, n_jobs=-1))
+        self.model = lgb.LGBMRegressor(**params)
         self.seed = seed
         self.window_days = window_days
         self.label = label
@@ -236,10 +243,16 @@ class StockPredictor:
             logger.warning("训练数据不足")
             return False
 
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        # Temporal split: train on older 80%, validate on recent 20%
+        split_idx = int(len(X) * 0.8)
+        if split_idx < 10:
+            return False
+        X_train, X_test = X[:split_idx], X[split_idx:]
+        y_train, y_test = y[:split_idx], y[split_idx:]
         self.model.fit(X_train, y_train)
         self.trained = True
         self._feature_names = feature_cols
+        self._train_cutoff = split_idx
 
         train_score = self.model.score(X_train, y_train)
         test_score = self.model.score(X_test, y_test)
@@ -249,9 +262,7 @@ class StockPredictor:
     def predict(self, prices: list) -> Optional[dict]:
         """预测下一交易日涨跌幅"""
         if not self.trained:
-            # 如果未训练，自动训练
-            if not self.train(prices):
-                return None
+            return None
 
         # ?????????????????????????
         window_prices = prices[-self.window_days:] if self.window_days and len(prices) > self.window_days else prices
@@ -305,6 +316,12 @@ class MultiWindowPredictor:
             seed = days if days else 500
             self.predictors[label] = StockPredictor(window_days=days, label=label, seed=seed)
 
+    def train(self, prices: list):
+        """Train all window predictors."""
+        for label, pred in self.predictors.items():
+            window_prices = prices[-pred.window_days:] if pred.window_days and len(prices) > pred.window_days else prices
+            pred.train(list(window_prices))
+
     def predict(self, prices: list) -> dict:
         """Return predictions from all 3 windows + consensus signal"""
         results = {}
@@ -353,6 +370,191 @@ class MultiWindowPredictor:
             "confidence": confidence,
             "advice": advice,
         }
+
+# ==================== ???? ====================
+
+import time
+import threading
+
+_model_cache: dict = {}       # {symbol: {"models": {...}, "last_train": timestamp, "prices": [...], "prices_len": 0}}
+_cache_lock = threading.Lock()
+CACHE_TTL = 3600  # 1??????
+MODEL_DIR = Path(__file__).parent / 'models'
+MODEL_DIR.mkdir(exist_ok=True)
+DISK_MODEL_MAX_AGE = 6 * 3600  # Retrain if model older than 6 hours (covers daily market close at 15:00)
+
+
+def _try_load_disk(symbol: str, prices: list):
+    try:
+        multi = MultiWindowPredictor()
+        all_found = True
+        for label in ["short", "mid", "long"]:
+            path = MODEL_DIR / (symbol + "_lgb_" + label + ".pkl")
+            if path.exists():
+                with open(path, "rb") as f:
+                    multi.predictors[label] = pickle.load(f)
+            else:
+                all_found = False
+                break
+        if not all_found:
+            return None
+
+        # Check if model is stale (older than DISK_MODEL_MAX_AGE)
+        # This ensures auto-retrain after each trading day's market close (15:00 CST)
+        oldest_mtime = min(
+            (MODEL_DIR / (symbol + "_lgb_" + label + ".pkl")).stat().st_mtime
+            for label in ["short", "mid", "long"]
+        )
+        age_seconds = time.time() - oldest_mtime
+        if age_seconds > DISK_MODEL_MAX_AGE:
+            logger.info(
+                "Disk model for %s is %.1f hours old, will retrain",
+                symbol, age_seconds / 3600,
+            )
+            return None
+
+        lgb_pred = multi.predict(prices)
+
+        tf_result = None
+        tf_path = MODEL_DIR / (symbol + "_transformer.pkl")
+        if tf_path.exists():
+            tf = MiniTransformer.load(str(tf_path))
+            tf_prices = prices[-200:] if len(prices) > 200 else prices
+            p = StockPredictor()
+            X_tf, y_tf, _ = p._prepare_features(tf_prices)
+            if X_tf is not None and len(X_tf) >= tf.seq_len:
+                tf_pred_val = tf.predict(X_tf)
+                if tf_pred_val is not None:
+                    tf_result = {
+                        "predicted_change_pct": round(float(tf_pred_val * 100), 2),
+                        "note": "Transformer model loaded from disk",
+                    }
+
+        dqn_result = None
+        dqn_path = MODEL_DIR / (symbol + "_dqn.pkl")
+        if dqn_path.exists():
+            dqn = DQNAgent.load(str(dqn_path))
+            if dqn.trained:
+                dqn_result = dqn.get_strategy()
+
+        logger.info("Loaded models from disk for " + symbol)
+        return {
+            "prediction": lgb_pred,
+            "transformer": tf_result,
+            "rl_strategy": dqn_result,
+        }
+    except Exception as e:
+        logger.warning("Failed to load models from disk: " + str(e))
+        return None
+
+
+def _save_to_disk(symbol: str, multi: MultiWindowPredictor, tf, dqn):
+    try:
+        for label, predictor in multi.predictors.items():
+            if predictor.trained:
+                path = MODEL_DIR / (symbol + "_lgb_" + label + ".pkl")
+                with open(path, "wb") as f:
+                    pickle.dump(predictor, f)
+        if tf is not None and tf.trained:
+            tf.save(str(MODEL_DIR / (symbol + "_transformer.pkl")))
+        if dqn is not None and dqn.trained:
+            dqn.save(str(MODEL_DIR / (symbol + "_dqn.pkl")))
+        logger.info("Saved models to disk for " + symbol)
+    except Exception as e:
+        logger.warning("Failed to save models: " + str(e))
+
+
+def _get_cached_or_train(symbol: str, prices: list) -> dict:
+    """?????????????????"""
+    prices_key = len(prices)  # ?????????????
+
+    with _cache_lock:
+        cached = _model_cache.get(symbol)
+
+    if cached and cached["prices_len"] == prices_key:
+        elapsed = time.time() - cached["last_train"]
+        if elapsed < CACHE_TTL:
+            logger.info(f"Cache hit: {symbol} (trained {elapsed:.0f}s ago)")
+            return cached["models"]
+
+    # Try loading from disk first
+    disk_result = _try_load_disk(symbol, prices)
+    if disk_result is not None:
+        with _cache_lock:
+            _model_cache[symbol] = {
+                "models": disk_result,
+                "last_train": time.time(),
+                "prices_len": prices_key,
+            }
+        return disk_result
+
+    # ?????????????
+    logger.info(f"Training models for {symbol}...")
+    t0 = time.time()
+
+    # --- LightGBM ---
+    multi = MultiWindowPredictor()
+    multi.train(prices)
+    lgb_pred = multi.predict(prices)
+
+    # --- Transformer ---
+    try:
+        from deep_models import MiniTransformer
+        tf = MiniTransformer()
+        tf_prices = prices[-200:] if len(prices) > 200 else prices
+        p = StockPredictor()
+        X_tf, y_tf, _ = p._prepare_features(tf_prices)
+        if X_tf is not None and len(X_tf) >= 35:
+            tf.train(tf_prices, X_tf, y_tf, epochs=80, lr=0.005)
+            tf_pred_val = tf.predict(X_tf)
+            tf_result = {
+                "predicted_change_pct": round(float(tf_pred_val * 100), 2) if tf_pred_val else None,
+                "note": "Transformer??????????LightGBM??",
+            }
+        else:
+            tf_result = None
+    except Exception as e:
+        logger.warning(f"Transformer??: {e}")
+        tf_result = None
+
+    # --- DQN ---
+    try:
+        from deep_models import DQNAgent
+        dqn = DQNAgent()
+        dqn_prices = prices[-120:] if len(prices) > 120 else prices
+        p2 = StockPredictor()
+        X_dqn, y_dqn, _ = p2._prepare_features(dqn_prices)
+        if X_dqn is not None and len(dqn_prices) >= 60:
+            dqn.train(dqn_prices, X_dqn, y_dqn, episodes=120, lr=0.02)
+            dqn_result = dqn.get_strategy()
+        else:
+            dqn_result = None
+    except Exception as e:
+        logger.warning(f"DQN??: {e}")
+        dqn_result = None
+
+    models = {
+        "prediction": lgb_pred,
+        "transformer": tf_result,
+        "rl_strategy": dqn_result,
+    }
+
+    with _cache_lock:
+        _model_cache[symbol] = {
+            "models": models,
+            "last_train": time.time(),
+            "prices_len": prices_key,
+        }
+
+    # Save to disk for future fast loading
+    _save_to_disk(symbol, multi, tf, dqn)
+
+    elapsed = time.time() - t0
+    logger.info(f"Training complete for {symbol}: {elapsed:.1f}s")
+    return models
+
+
+
 def analyze_stock(prices: list, symbol: str = "") -> dict:
     """对一只股票进行完整量化分析
 
@@ -408,9 +610,12 @@ def analyze_stock(prices: list, symbol: str = "") -> dict:
         },
     }
 
-    # --- ML multi-window prediction (short 60d / mid 120d / long all) ---
-    multi = MultiWindowPredictor()
-    prediction = multi.predict(close)
+    # --- ML models (cached, 1h TTL) ---
+    cached = _get_cached_or_train(symbol, close)
+    prediction = cached["prediction"]
+    tf_result = cached.get("transformer")
+    dqn_result = cached.get("rl_strategy")
+
 
     result = {
         "symbol": symbol,
@@ -418,6 +623,8 @@ def analyze_stock(prices: list, symbol: str = "") -> dict:
         "signal": tech_signal,
         "indicators": indicators,
         "prediction": prediction,
+        "transformer": tf_result,
+        "rl_strategy": dqn_result,
     }
 
     return result

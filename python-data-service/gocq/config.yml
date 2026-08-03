@@ -46,6 +46,7 @@ database:
 servers:
   - ws:
       host: 127.0.0.1
-      port: 8080
+      port: 3003
       middlewares:
         *middlewares
+

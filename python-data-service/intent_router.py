@@ -1,8 +1,15 @@
-"""
-intent_router.py —— 意图识别
+﻿"""
+intent_router.py —— 意图识别（已弃用，保留供参考和测试）
 
-简单的规则 + 关键词匹配，覆盖 80% 场景。
-复杂的兜底交给 LLM 自由回答（chat 场景）。
+⚠️ 此模块已被 LLM-first 架构替代。
+    qq_handler.py 现在直接使用 llm_service.parse_intent() 做意图识别，
+    仅保留规则匹配的绑定/解绑/帮助/搜历史在 handler 内部处理。
+
+本模块保留以下功能供参考：
+- Intent 数据结构定义
+- 意图类型常量
+- 帮助菜单文本
+- 股票代码/名称提取工具函数
 """
 import logging
 import re
@@ -33,9 +40,8 @@ class Intent:
     confidence: float = 1.0
 
 
-# 常见股票名/代码词典（精简版，够用起步）
+# 常见股票名/代码词典（供参考，LLM 模式下不再需要此词典）
 STOCK_KEYWORDS = {
-    # 简称 → 可能的代码（akshare 会自动识别）
     "茅台": "sh600519",
     "贵州茅台": "sh600519",
     "宁王": "sz300750",
@@ -59,16 +65,9 @@ STOCK_KEYWORDS = {
 
 def parse(message: str) -> Intent:
     """
-    解析用户消息，返回意图
-
-    Examples:
-        "茅台"          → quote, 茅台
-        "600519"        → quote, 600519
-        "海康威视"      → quote, 海康威视  (词典外也能识别)
-        "宁德能买吗"    → analyze, 宁德
-        "我的自选"      → watchlist
-        "绑定 123456"   → bind, code=123456
-        "你好"          → chat
+    （已弃用）基于规则的意图解析。
+    新代码请使用 llm_service.parse_intent()。
+    保留此函数仅供测试兼容。
     """
     msg = message.strip()
     if not msg:
@@ -103,17 +102,14 @@ def parse(message: str) -> Intent:
     symbol = _extract_symbol(msg)
     keyword = _extract_keyword(msg) if not symbol else None
 
-    # ========== 4.5 兜底：含中文但词典查不到，认为是股票名（让 handler 解析） ==========
-    # 解决 "海康威视"/"科大讯飞" 等词典外的中文股被误判为 chat
-    # 但要排除常见问候语/动词，避免 "你好"/"谢谢" 被误当股票
+    # ========== 4.5 兜底：含中文但词典查不到，认为是股票名 ==========
     CHAT_PHRASES = {"你好", "您好", "hi", "hello", "在吗", "在么", "谢谢", "感谢",
                     "再见", "拜拜", "晚安", "早安", "早上好", "下午好", "晚上好",
                     "你是谁", "你是什么", "你能做什么", "帮助", "help", "菜单", "怎么用"}
     if not symbol and not keyword and _contains_chinese(msg) and msg_lower not in CHAT_PHRASES:
-        # 短词（1-2 字）很可能是问候，跳过
         chinese_chars = sum(1 for ch in msg if '\u4e00' <= ch <= '\u9fff')
         if chinese_chars >= 2:
-            keyword = msg  # 整条消息当股票名
+            keyword = msg
 
     # ========== 5. 根据关键词判断意图 ==========
     analyze_keywords = ["能买", "能卖", "怎么看", "分析", "建议", "走势", "该不该", "怎么样", "好不好", "如何", "趋势"]
@@ -127,7 +123,6 @@ def parse(message: str) -> Intent:
             return Intent(type=INTENT_HISTORY, symbol=symbol, keyword=keyword, confidence=0.9)
         if is_analyze or is_history:
             return Intent(type=INTENT_ANALYZE, symbol=symbol, keyword=keyword, confidence=0.9)
-        # 默认纯代码/名称 → 行情
         return Intent(type=INTENT_QUOTE, symbol=symbol, keyword=keyword, confidence=0.9)
 
     # ========== 6. 兜底：闲聊 ==========
@@ -144,15 +139,12 @@ def _contains_chinese(text: str) -> bool:
 
 def _extract_symbol(msg: str) -> Optional[str]:
     """提取 6 位数字股票代码（A股）或 字母+数字（美股/港股）"""
-    # 优先：带前缀的代码 sh600519 / sz000001（大小写都接受）
     m = re.search(r"((?:sh|sz|hk|bj)\d{6})", msg, re.IGNORECASE)
     if m:
         return m.group(1).upper()
-    # A股 6 位（前面不能是字母，避免 "sh600519" 中重复匹配 "600519"）
     m = re.search(r"(?<![a-zA-Z])(\d{6})(?![a-zA-Z])", msg)
     if m:
         return m.group(1)
-    # 美股 1-5 个大写字母
     m = re.search(r"\b([A-Z]{1,5})\b", msg)
     if m:
         return m.group(1)
@@ -161,7 +153,6 @@ def _extract_symbol(msg: str) -> Optional[str]:
 
 def _extract_keyword(msg: str) -> Optional[str]:
     """提取中文股票名（按长度优先匹配）"""
-    # 按名字长度从长到短匹配
     for name in sorted(STOCK_KEYWORDS.keys(), key=len, reverse=True):
         if name in msg:
             return name
@@ -169,7 +160,7 @@ def _extract_keyword(msg: str) -> Optional[str]:
 
 
 def reply_for_help() -> str:
-    """帮助菜单"""
+    """帮助菜单（供外部使用）"""
     return (
         "🤖 股小盯 · 命令菜单\n"
         "\n"

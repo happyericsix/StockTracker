@@ -5,15 +5,16 @@ llm_service.py —— LLM 客户端（DeepSeek）
 - 加载 prompts 模板
 - 调用 DeepSeek Chat API（兼容 OpenAI 协议）
 - 拼装 system + user prompt，调用 LLM 生成回复
+- parse_intent: LLM 意图识别，把用户消息解析成 JSON 操作计划
 
 环境变量（优先级：系统 env > .env 文件）：
 - DEEPSEEK_API_KEY: 必填
 - DEEPSEEK_BASE_URL: 默认 https://api.deepseek.com
-- DEEPSeek_MODEL: 默认 deepseek-chat
+- DEEPSEEK_MODEL: 默认 deepseek-chat
 """
+import json
 import logging
 import os
-import re
 from pathlib import Path
 from typing import Optional
 
@@ -35,7 +36,7 @@ def _load_dotenv():
                 continue
             key, _, value = line.partition("=")
             key = key.strip()
-            value = value.strip().strip('"').strip("'")
+            value = value.strip().strip("\"'").strip("'")
             # 系统环境变量优先（已设的不覆盖）
             if key and key not in os.environ:
                 os.environ[key] = value
@@ -73,12 +74,109 @@ def _is_available() -> bool:
     return bool(API_KEY) and API_KEY != "your-api-key-here"
 
 
+# ===== LLM 意图识别 =====
+
+def parse_intent(message: str, history: Optional[list[dict]] = None) -> dict:
+    """
+    用 LLM 解析用户意图，返回结构化操作计划 dict。
+
+    对于非系统命令（绑定/解绑/帮助之外），让 LLM 做"意图识别 + 实体提取"，
+    替代传统的规则关键词匹配。
+
+    Args:
+        message: 用户当前消息
+        history: 可选，最近对话历史 [{"role":"user","content":"..."}, ...]
+
+    Returns:
+        {
+            "action": "get_quote" | "analyze" | "history" |
+                      "watchlist" | "search_history" | "compare" | "chat",
+            ...action 特定字段
+        }
+        失败时返回 {"action": "chat", "reply": "..."}
+    """
+    if not _is_available():
+        return {"action": "chat", "reply": "AI 服务暂不可用，请稍后再试"}
+
+    # 构建带上下文的消息列表
+    messages = [{"role": "system", "content": _INTENT_SYSTEM_PROMPT}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": f'用户消息: "{message}"\n只返回 JSON。'})
+
+    try:
+        url = f"{BASE_URL}/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {API_KEY}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": MODEL,
+            "messages": messages,
+            "temperature": 0.1,
+            "max_tokens": 300,
+        }
+        resp = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"].strip()
+        logger.info(f"parse_intent LLM 原始返回: {content[:200]}")
+
+        # 清理 markdown 代码块
+        if content.startswith("```"):
+            content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        result = json.loads(content)
+        if isinstance(result, dict) and "action" in result:
+            return result
+        return {"action": "chat", "reply": "我没理解，请重新说一下"}
+
+    except json.JSONDecodeError as e:
+        logger.error(f"parse_intent JSON 解析失败: {e}, content={content[:200]}")
+        return {"action": "chat", "reply": "意图识别失败，请换个说法试试"}
+    except requests.exceptions.Timeout:
+        logger.error("parse_intent LLM 调用超时")
+        return {"action": "chat", "reply": "AI 响应超时，请稍后再试"}
+    except Exception as e:
+        logger.error(f"parse_intent 失败: {e}")
+        return {"action": "chat", "reply": f"意图识别失败: {str(e)[:50]}"}
+
+
+# intent 解析的 system prompt（复用，不每次拼字符串）
+_INTENT_SYSTEM_PROMPT = """你是股小盯的意图识别器。把用户消息解析成 JSON 操作计划。
+
+## 支持的操作
+1. get_quote - 查股票行情
+   {"action": "get_quote", "symbols": ["茅台", "宁德"]}
+2. analyze - 技术分析
+   {"action": "analyze", "symbol": "海康威视", "question": "能不能买"}
+3. history - K线/历史
+   {"action": "history", "symbol": "比亚迪", "days": 30}
+4. watchlist - 自选股
+   {"action": "watchlist"}
+5. search_history - 搜历史对话
+   {"action": "search_history", "query": "新能源股"}
+6. compare - 对比多只股票
+   {"action": "compare", "symbols": ["茅台", "五粮液"], "aspects": ["price", "trend"]}
+7. chat - 闲聊或追问（不知道用户要什么时）
+   {"action": "chat", "reply": "你好呀"}
+
+## 规则
+- 只返回 JSON，不要任何解释
+- symbols 用用户原文（"茅台" 不要转 "sh600519"）
+- 多个股票都提取，按出现顺序
+- 用户说"对比 X 和 Y"用 compare
+- 用户问"能买吗/怎么看/分析/建议/推荐"用 analyze
+- 纯数字6位代码视为股票代码，查行情
+- 如果用户追问前面的内容（如"简单解释""再说一遍""什么意思"），用 chat
+- **重要**：当前消息没提股票名时，从上面的对话历史里找最近讨论的股票名填入 symbol"""
+
+
 # ===== 核心调用 =====
 
 def chat(
     user_message: str,
     scenario: str = "stock_analyst",
     context: Optional[dict] = None,
+    history: Optional[list[dict]] = None,
     temperature: float = 0.6,
     max_tokens: int = 800,
 ) -> str:
@@ -89,6 +187,7 @@ def chat(
         user_message: 用户的原始问题
         scenario: prompt 场景名 (stock_analyst / chat)
         context: 上下文数据 (symbol, name, quote, indicators, prediction...)
+        history: 可选，最近对话历史 [{"role":"user","content":"..."}, ...]
         temperature: 温度参数 (0-1)，越低越确定
         max_tokens: 最大输出 token
 
@@ -105,6 +204,12 @@ def chat(
     # 拼装 user prompt：context 数据 + 原始问题
     user_prompt = _build_user_prompt(user_message, context or {})
 
+    # 构造消息列表（含历史上下文）
+    messages = [{"role": "system", "content": system_prompt}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": user_prompt})
+
     # 构造请求
     url = f"{BASE_URL}/v1/chat/completions"
     headers = {
@@ -113,10 +218,7 @@ def chat(
     }
     payload = {
         "model": MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
+        "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "stream": False,
@@ -128,6 +230,18 @@ def chat(
         data = resp.json()
         content = data["choices"][0]["message"]["content"].strip()
         logger.info(f"LLM 调用成功: scenario={scenario}, tokens={data.get('usage', {}).get('total_tokens', '?')}")
+        # Enforce short responses for stock_analyst
+        if scenario == "stock_analyst" and len(content) > 1000:
+            reply_lines = content.strip().split("\n")
+            short_lines = []
+            char_count = 0
+            for line in reply_lines:
+                if char_count + len(line) > 150:
+                    break
+                short_lines.append(line)
+                char_count += len(line) + 1
+            content = "\n".join(short_lines)
+
         return content
     except requests.exceptions.Timeout:
         logger.error("LLM 调用超时")
@@ -138,6 +252,7 @@ def chat(
     except Exception as e:
         logger.error(f"LLM 调用异常: {e}")
         return _fallback_reply(user_message, context, reason="LLM 调用失败")
+
 
 
 def _build_user_prompt(user_message: str, context: dict) -> str:
@@ -240,3 +355,4 @@ def split_for_qq(text: str, max_len: int = 400) -> list[str]:
     if remaining:
         chunks.append(remaining)
     return chunks
+

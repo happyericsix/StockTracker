@@ -1,10 +1,11 @@
-"""
+﻿"""
 数据客户端
-- 实时行情/概况：腾讯单股 API（快速）
+- 实时行情/概况：腾讯单股 API（快速，带 15s TTL 缓存）
 - K线历史：腾讯 ifzq API
 - 批量/分析数据：akshare（后续 LLM 使用）
 """
 import logging
+import time
 from typing import Optional
 import requests
 import threading
@@ -46,6 +47,17 @@ NAME_TO_CODE = {
     "美的": "000333", "格力": "000651", "海尔": "600690",
     "恒瑞": "600276", "药明": "603259", "迈瑞": "300760",
     "隆基": "601012", "宁王转债": "123224",
+    "海康": "002415", "海康威视": "002415",
+    "科大讯飞": "002230", "中兴": "000063", "中兴通讯": "000063",
+    "京东方": "000725", "立讯": "002475", "立讯精密": "002475",
+    "韦尔": "603501", "韦尔股份": "603501",
+    "三一": "600031", "三一重工": "600031",
+    "万科": "000002", "保利": "600048",
+    "药明康德": "603259", "片仔癀": "600436",
+    "紫金": "601899", "紫金矿业": "601899",
+    "牧原": "002714", "牧原股份": "002714",
+    "阳光": "300274", "阳光电源": "300274",
+    "中免": "601888", "中国中免": "601888",
 }
 
 
@@ -86,11 +98,29 @@ def resolve_symbol(symbol_or_keyword: str) -> Optional[str]:
     return None
 
 
+# ==================== 行情缓存（15s TTL） ====================
+
+_quote_cache: dict[str, tuple[float, dict]] = {}
+_quote_cache_lock = threading.Lock()
+QUOTE_CACHE_TTL = 15  # 秒
+
+
 def get_quote(symbol: str) -> Optional[dict]:
-    """获取实时行情（腾讯单股 API，毫秒级）。
+    """获取实时行情（腾讯单股 API，毫秒级），带 15s 缓存。
 
     支持: 数字代码 (600519) / 带前缀 (sh600519) / 中文名 (茅台) / 美股 (AAPL)
     """
+    # 1. 检查缓存
+    now = time.time()
+    with _quote_cache_lock:
+        if symbol in _quote_cache:
+            ts, cached = _quote_cache[symbol]
+            if now - ts < QUOTE_CACHE_TTL:
+                return cached
+            # 过期了删掉
+            del _quote_cache[symbol]
+
+    # 2. 请求行情
     try:
         resolved = resolve_symbol(symbol)
         if not resolved:
@@ -109,7 +139,7 @@ def get_quote(symbol: str) -> Optional[dict]:
             logger.warning("腾讯行情格式异常: %s (parts=%d)", symbol, len(parts))
             return None
 
-        return {
+        result = {
             "代码": parts[2],
             "名称": parts[1],
             "最新价": parts[3],
@@ -125,6 +155,12 @@ def get_quote(symbol: str) -> Optional[dict]:
             "流通市值": parts[44] if len(parts) > 44 else "0",
             "市盈率-动态": parts[39] if len(parts) > 39 else "0",
         }
+
+        # 3. 写入缓存
+        with _quote_cache_lock:
+            _quote_cache[symbol] = (now, result)
+
+        return result
     except Exception as e:
         logger.error("get_quote 异常: %s -> %s", symbol, e)
         return None
