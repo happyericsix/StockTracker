@@ -4,6 +4,7 @@ FastAPI 入口 —— 为 Java 后端提供 RESTful 接口，替代原有的 Cho
 
 import logging
 import asyncio
+import os
 from datetime import date, timedelta
 
 from fastapi import FastAPI, Query, Request
@@ -160,16 +161,45 @@ def stock_indicators(symbol: str):
 
 import requests
 import qq_handler
-NAPCAT_API = "http://localhost:8081"
+
+# NapCat HTTP API 配置（OneBot v11 协议）
+# 配置见 napcat/config/onebot11_1121460169.json
+NAPCAT_API = os.getenv("NAPCAT_API", "http://localhost:3000")
+NAPCAT_TOKEN = os.getenv("NAPCAT_TOKEN", "")  # 如果 NapCat 配了 access_token
+
 
 def send_qq(user_id, text):
+    """
+    通过 NapCat HTTP API 发送私聊消息 (OneBot v11 协议)
+
+    协议: POST /
+    Body: {
+        "action": "send_private_msg",
+        "params": {"user_id": int, "message": [{"type": "text", "data": {"text": "..."}}]},
+        "echo": "..."
+    }
+    """
     try:
-        requests.post(f"{NAPCAT_API}/", json={
-            "user_id": user_id,
-            "message": text
-        }, timeout=5)
+        headers = {"Content-Type": "application/json"}
+        if NAPCAT_TOKEN:
+            headers["Authorization"] = f"Bearer {NAPCAT_TOKEN}"
+
+        resp = requests.post(
+            NAPCAT_API + "/",
+            json={
+                "action": "send_private_msg",
+                "params": {
+                    "user_id": int(user_id),
+                    "message": [{"type": "text", "data": {"text": text}}],
+                },
+            },
+            headers=headers,
+            timeout=5,
+        )
+        if resp.status_code != 200:
+            logger.warning(f"NapCat 返回非 200: {resp.status_code} {resp.text[:200]}")
     except Exception as e:
-        print(f"QQ 发送失败: {e}")
+        logger.error(f"QQ 发送失败: {e}")
 
 @app.post("/qq_msg")
 async def qq_webhook(req: Request):
