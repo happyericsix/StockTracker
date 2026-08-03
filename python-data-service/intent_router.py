@@ -63,6 +63,7 @@ def parse(message: str) -> Intent:
     Examples:
         "茅台"          → quote, 茅台
         "600519"        → quote, 600519
+        "海康威视"      → quote, 海康威视  (词典外也能识别)
         "宁德能买吗"    → analyze, 宁德
         "我的自选"      → watchlist
         "绑定 123456"   → bind, code=123456
@@ -96,6 +97,18 @@ def parse(message: str) -> Intent:
     symbol = _extract_symbol(msg)
     keyword = _extract_keyword(msg) if not symbol else None
 
+    # ========== 4.5 兜底：含中文但词典查不到，认为是股票名（让 handler 解析） ==========
+    # 解决 "海康威视"/"科大讯飞" 等词典外的中文股被误判为 chat
+    # 但要排除常见问候语/动词，避免 "你好"/"谢谢" 被误当股票
+    CHAT_PHRASES = {"你好", "您好", "hi", "hello", "在吗", "在么", "谢谢", "感谢",
+                    "再见", "拜拜", "晚安", "早安", "早上好", "下午好", "晚上好",
+                    "你是谁", "你是什么", "你能做什么", "帮助", "help", "菜单", "怎么用"}
+    if not symbol and not keyword and _contains_chinese(msg) and msg_lower not in CHAT_PHRASES:
+        # 短词（1-2 字）很可能是问候，跳过
+        chinese_chars = sum(1 for ch in msg if '\u4e00' <= ch <= '\u9fff')
+        if chinese_chars >= 2:
+            keyword = msg  # 整条消息当股票名
+
     # ========== 5. 根据关键词判断意图 ==========
     analyze_keywords = ["能买", "能卖", "怎么看", "分析", "建议", "走势", "该不该", "怎么样", "好不好", "如何", "趋势"]
     history_keywords = ["k线", "历史", "走势", "几天", "一个月", "半年", "周线", "月线"]
@@ -113,6 +126,14 @@ def parse(message: str) -> Intent:
 
     # ========== 6. 兜底：闲聊 ==========
     return Intent(type=INTENT_CHAT, confidence=0.5)
+
+
+def _contains_chinese(text: str) -> bool:
+    """判断字符串是否含中文字符"""
+    for ch in text:
+        if '\u4e00' <= ch <= '\u9fff':
+            return True
+    return False
 
 
 def _extract_symbol(msg: str) -> Optional[str]:
