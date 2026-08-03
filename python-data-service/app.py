@@ -159,75 +159,37 @@ def stock_indicators(symbol: str):
 
 # ==================== QQ Bot 接口 ====================
 
-import requests
 import qq_handler
 
-# NapCat HTTP API 配置（OneBot v11 协议）
-# 配置见 napcat/config/onebot11_1121460169.json
-NAPCAT_API = os.getenv("NAPCAT_API", "http://localhost:3000")
-NAPCAT_TOKEN = os.getenv("NAPCAT_TOKEN", "")  # 如果 NapCat 配了 access_token
-
-
-def send_qq(user_id, text):
-    """
-    通过 NapCat HTTP API 发送私聊消息 (OneBot v11 协议)
-
-    协议: POST /
-    Body: {
-        "action": "send_private_msg",
-        "params": {"user_id": int, "message": [{"type": "text", "data": {"text": "..."}}]},
-        "echo": "..."
-    }
-    """
-    try:
-        headers = {"Content-Type": "application/json"}
-        if NAPCAT_TOKEN:
-            headers["Authorization"] = f"Bearer {NAPCAT_TOKEN}"
-
-        resp = requests.post(
-            NAPCAT_API + "/",
-            json={
-                "action": "send_private_msg",
-                "params": {
-                    "user_id": int(user_id),
-                    "message": [{"type": "text", "data": {"text": text}}],
-                },
-            },
-            headers=headers,
-            timeout=5,
-        )
-        if resp.status_code != 200:
-            logger.warning(f"NapCat 返回非 200: {resp.status_code} {resp.text[:200]}")
-    except Exception as e:
-        logger.error(f"QQ 发送失败: {e}")
 
 @app.post("/qq_msg")
 async def qq_webhook(req: Request):
     """
-    NapCat QQ 消息 webhook
+    接收 qq_standalone.py 转发的 QQ 消息
 
-    NapCat 推送的消息格式通常是:
-    {
-        "user_id": "12345678",
-        "message": "用户消息内容"
-    }
+    数据流向:
+      NapCat → qq_standalone.py (3003) → 本接口 → qq_handler 处理 → 返回 replies
+
+    Request:
+      {"user_id": "12345678", "message": "用户消息"}
+
+    Response:
+      {"replies": ["回复1", "回复2", ...]}
+
+    qq_standalone 拿到 replies 后逐条 send_private_msg 发回 QQ
     """
     data = await req.json()
     user_id = str(data.get("user_id", "")).strip()
     message = data.get("message", "").strip()
-    print(f"QQ 消息 [{user_id}]: {message}")
+    logger.info(f"QQ webhook [{user_id}]: {message[:80]}")
 
     if not message or not user_id:
-        return {"status": "ok"}
+        return {"replies": []}
 
     try:
-        # 路由到 handler 处理
+        # 路由到 handler 处理（同步跑在线程池里，避免阻塞 event loop）
         replies = await asyncio.to_thread(qq_handler.handle_message, user_id, message)
-        # 多条消息按顺序发送
-        for r in replies:
-            await asyncio.to_thread(send_qq, user_id, r)
+        return {"replies": replies}
     except Exception as e:
         logger.error(f"QQ 消息处理异常: {e}", exc_info=True)
-        await asyncio.to_thread(send_qq, user_id, "⚠️ 处理出错了，稍后再试")
-
-    return {"status": "ok"}
+        return {"replies": ["⚠️ 处理出错了，稍后再试"]}

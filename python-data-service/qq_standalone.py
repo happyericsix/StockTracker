@@ -7,7 +7,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-YOUR_WEBHOOK = "http://localhost:8000/qq_msg"
+YOUR_WEBHOOK = os.environ.get("APP_WEBHOOK", "http://localhost:8000/qq_msg")
+APP_TIMEOUT = int(os.environ.get("APP_TIMEOUT", "30"))  # LLM 调用可能需要 20-30s
 bot = CQHttp()
 send_queues = defaultdict(list)
 
@@ -168,9 +169,31 @@ async def handle_msg(event):
         await bot.send_private_msg(user_id=user_id, message="✅ 日报推送完成")
         return
     try:
-        await asyncio.to_thread(requests.post, YOUR_WEBHOOK, json={"user_id": user_id, "message": text}, timeout=3)
+        # 同步等待 app.py 处理并返回回复列表
+        resp = await asyncio.to_thread(
+            requests.post,
+            YOUR_WEBHOOK,
+            json={"user_id": str(user_id), "message": text},
+            timeout=APP_TIMEOUT,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            replies = data.get("replies") or [data.get("message", "✅ 已处理")]
+            for reply in replies:
+                if reply:
+                    await bot.send_private_msg(user_id=user_id, message=reply)
+                    logger.info(f"已回复 [{user_id}]: {reply[:50]}")
+        else:
+            logger.error(f"app.py 返回 {resp.status_code}: {resp.text[:200]}")
+            await bot.send_private_msg(user_id=user_id, message=f"⚠️ 服务异常 ({resp.status_code})")
+    except requests.exceptions.Timeout:
+        logger.error("app.py 响应超时")
+        await bot.send_private_msg(user_id=user_id, message="⏰ 响应超时，稍后再试")
     except Exception as e:
         logger.error(f"转发失败: {e}")
+        await bot.send_private_msg(user_id=user_id, message=f"⚠️ 处理失败: {e}")
+
+    # 主动推送队列（如日报）继续发
     my_queue = send_queues.get(user_id, [])
     while my_queue:
         item = my_queue.pop(0)
