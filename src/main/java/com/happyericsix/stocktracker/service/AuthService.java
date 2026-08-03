@@ -39,7 +39,7 @@ public class AuthService {
                 .username(request.getUsername())
                 .password(passwordEncoder.encode(request.getPassword()))
                 .email(request.getEmail() != null ? request.getEmail() : request.getUsername() + "@qq.com")
-                .qqNumber(request.getUsername())
+                .qqNumber(null)  // QQ 号需用户登录后单独绑定，不再与 username 绑定
                 .role(Role.USER)
                 .build();
 

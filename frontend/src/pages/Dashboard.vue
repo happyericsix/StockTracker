@@ -90,6 +90,8 @@ const logout = () => {
   router.push('/login')
 }
 
+const goBindQq = () => router.push('/bind-qq')
+
 onMounted(loadFavorites)
 </script>
 
@@ -97,7 +99,10 @@ onMounted(loadFavorites)
   <div class="app-layout">
     <header>
       <h1>Stock Tracker</h1>
-      <button class="logout-btn" @click="logout">退出</button>
+      <div class="header-actions">
+        <button class="bind-btn" @click="goBindQq">🔗 绑定QQ</button>
+        <button class="logout-btn" @click="logout">退出</button>
+      </div>
     </header>
     <main>
       <section class="search-section">
@@ -142,6 +147,9 @@ onMounted(loadFavorites)
 .app-layout { min-height: 100vh; background: #f0f2f5; }
 header { background: #1a1a2e; color: white; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }
 header h1 { margin: 0; font-size: 20px; }
+.header-actions { display: flex; gap: 12px; }
+.bind-btn { background: #722ed1; border: none; color: white; padding: 6px 16px; border-radius: 4px; cursor: pointer; }
+.bind-btn:hover { background: #9254de; }
 .logout-btn { background: transparent; border: 1px solid white; color: white; padding: 6px 16px; border-radius: 4px; cursor: pointer; }
 main { max-width: 640px; margin: 0 auto; padding: 24px 16px; }
 

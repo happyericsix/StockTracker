@@ -37,7 +37,12 @@ app.add_middleware(
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    import llm_service
+    return {
+        "status": "ok",
+        "llm_available": llm_service._is_available(),
+        "llm_model": llm_service.MODEL,
+    }
 
 
 # ==================== 股票搜索（Autocomplete） ====================
@@ -154,6 +159,7 @@ def stock_indicators(symbol: str):
 # ==================== QQ Bot 接口 ====================
 
 import requests
+import qq_handler
 NAPCAT_API = "http://localhost:8081"
 
 def send_qq(user_id, text):
@@ -167,28 +173,31 @@ def send_qq(user_id, text):
 
 @app.post("/qq_msg")
 async def qq_webhook(req: Request):
+    """
+    NapCat QQ 消息 webhook
+
+    NapCat 推送的消息格式通常是:
+    {
+        "user_id": "12345678",
+        "message": "用户消息内容"
+    }
+    """
     data = await req.json()
-    user_id = data.get("user_id")
+    user_id = str(data.get("user_id", "")).strip()
     message = data.get("message", "").strip()
     print(f"QQ 消息 [{user_id}]: {message}")
 
-    if not message:
+    if not message or not user_id:
         return {"status": "ok"}
 
-    for kw in ["行情", "股价", "价格"]:
-        if kw in message:
-            symbol = message.replace(kw, "").strip()
-            data = await asyncio.to_thread(get_quote, symbol)
-            if data:
-                reply = f'📈 {data.get("名称", symbol)}({symbol})\n最新价: {data.get("最新价", "N/A")}\n涨跌幅: {data.get("涨跌幅", "N/A")}%'
-            else:
-                reply = f"查询 {symbol} 失败"
-            await asyncio.to_thread(send_qq, user_id, reply)
-            return {"status": "ok"}
+    try:
+        # 路由到 handler 处理
+        replies = await asyncio.to_thread(qq_handler.handle_message, user_id, message)
+        # 多条消息按顺序发送
+        for r in replies:
+            await asyncio.to_thread(send_qq, user_id, r)
+    except Exception as e:
+        logger.error(f"QQ 消息处理异常: {e}", exc_info=True)
+        await asyncio.to_thread(send_qq, user_id, "⚠️ 处理出错了，稍后再试")
 
-    if message in ["/help", "帮助", "菜单"]:
-        await asyncio.to_thread(send_qq, user_id, "🤖 命令：\n600519 行情\n000001 股价")
-        return {"status": "ok"}
-
-    await asyncio.to_thread(send_qq, user_id, f"收到: {message}")
     return {"status": "ok"}

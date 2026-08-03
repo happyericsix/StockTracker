@@ -42,6 +42,7 @@ public class SecurityConfig {
                         session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/api/v1/auth/login", "/api/v1/auth/register").permitAll()
+                        .requestMatchers("/api/v1/internal/**").permitAll()  // 内部接口用 X-Internal-Token 鉴权
                         .requestMatchers("/api/v1/stocks/**").authenticated()
                         .anyRequest().authenticated()
                 )
