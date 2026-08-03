@@ -21,6 +21,7 @@ INTENT_BIND = "bind"                  # 绑定
 INTENT_UNBIND = "unbind"              # 解绑
 INTENT_HELP = "help"                  # 帮助
 INTENT_CHAT = "chat"                  # 闲聊/兜底
+INTENT_SEARCH_HISTORY = "search_history"  # 搜历史对话（向量检索）
 
 
 @dataclass
@@ -82,6 +83,11 @@ def parse(message: str) -> Intent:
 
     if msg in ["解绑", "解绑qq", "unbind"]:
         return Intent(type=INTENT_UNBIND, confidence=1.0)
+
+    # ========== 1.5 搜历史对话 ==========
+    search_patterns = ["之前问过", "以前问过", "我之前问", "我以前问", "我问过的", "之前聊过", "上次问过", "历史对话", "历史记录"]
+    if any(p in msg for p in search_patterns):
+        return Intent(type=INTENT_SEARCH_HISTORY, confidence=0.95)
 
     # ========== 2. 帮助 ==========
     if msg in ["帮助", "help", "?", "？", "菜单", "help me", "怎么用"]:

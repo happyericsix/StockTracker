@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import List, Optional
 
 import chromadb
-from chromadb.config import Settings as ChromaSettings
 
 import embedding_helper
 
@@ -58,7 +57,6 @@ class VectorStore:
 
         self.client = chromadb.PersistentClient(
             path=self.data_dir,
-            settings=ChromaSettings(anonymized_telemetry=False),
         )
 
         # 用智谱 Embedding（如果 key 没配，会在这里报错）

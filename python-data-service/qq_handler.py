@@ -9,8 +9,11 @@ qq_handler.py —— QQ 消息处理核心
 - bind/unbind: 绑定/解绑流程
 - help: 帮助菜单
 - chat: 闲聊（LLM 兜底）
+- search_history: 搜历史对话（向量数据库）
 """
 import logging
+import threading
+import time
 from typing import Optional
 
 import intent_router
@@ -19,7 +22,7 @@ import user_context
 from akshare_client import get_quote, get_history, search_stocks
 from quant_model import analyze_stock
 from intent_router import INTENT_QUOTE, INTENT_ANALYZE, INTENT_HISTORY, INTENT_WATCHLIST, \
-    INTENT_BIND, INTENT_UNBIND, INTENT_HELP, INTENT_CHAT
+    INTENT_BIND, INTENT_UNBIND, INTENT_HELP, INTENT_CHAT, INTENT_SEARCH_HISTORY
 
 logger = logging.getLogger(__name__)
 
@@ -38,39 +41,132 @@ def handle_message(qq_id: str, message: str) -> list[str]:
     intent = intent_router.parse(message)
     logger.info(f"QQ [{qq_id}] '{message[:30]}' → intent={intent.type}, symbol={intent.symbol}, keyword={intent.keyword}")
 
+    # 搜历史对话（在主流程前判断，因为不需要走数据查询）
+    if intent.type == INTENT_SEARCH_HISTORY:
+        replies = _handle_search_history(qq_id, message)
+        _save_to_vector_db(qq_id, message, replies)
+        return replies
+
     # 1. 绑定流程（不需要先绑定）
     if intent.type == INTENT_BIND:
-        return _handle_bind(qq_id, intent.code)
+        replies = _handle_bind(qq_id, intent.code)
+        _save_to_vector_db(qq_id, message, replies)
+        return replies
 
     # 2. 绑定后才能用的功能：watchlist、analyze、history（需要拿 user 自选股等）
     # 其他不需要绑定：quote, help, chat, unbind
 
     # 3. 解绑
     if intent.type == INTENT_UNBIND:
-        return _handle_unbind(qq_id)
+        replies = _handle_unbind(qq_id)
+        _save_to_vector_db(qq_id, message, replies)
+        return replies
 
     # 4. 帮助
     if intent.type == INTENT_HELP:
-        return [intent_router.reply_for_help()]
+        replies = [intent_router.reply_for_help()]
+        _save_to_vector_db(qq_id, message, replies)
+        return replies
 
     # 5. 查行情（不需要绑定）
     if intent.type == INTENT_QUOTE:
-        return _handle_quote(qq_id, intent)
+        replies = _handle_quote(qq_id, intent)
+        _save_to_vector_db(qq_id, message, replies)
+        return replies
 
     # 6. 自选股（需要绑定）
     if intent.type == INTENT_WATCHLIST:
-        return _handle_watchlist(qq_id)
+        replies = _handle_watchlist(qq_id)
+        _save_to_vector_db(qq_id, message, replies)
+        return replies
 
     # 7. 技术分析（需要绑定，因为要给个性化建议）
     if intent.type == INTENT_ANALYZE:
-        return _handle_analyze(qq_id, intent)
+        replies = _handle_analyze(qq_id, intent)
+        _save_to_vector_db(qq_id, message, replies)
+        return replies
 
     # 8. 历史K线
     if intent.type == INTENT_HISTORY:
-        return _handle_history(qq_id, intent)
+        replies = _handle_history(qq_id, intent)
+        _save_to_vector_db(qq_id, message, replies)
+        return replies
 
     # 9. 兜底：闲聊
-    return _handle_chat(qq_id, message)
+    replies = _handle_chat(qq_id, message)
+    _save_to_vector_db(qq_id, message, replies)
+    return replies
+
+
+# ==================== 向量数据库：自动存储 + 搜索 ====================
+
+def _save_to_vector_db(qq_id: str, user_msg: str, replies: list[str]):
+    """异步把对话存到向量数据库（不阻塞回复）"""
+    def _do_save():
+        try:
+            import vector_store
+            store = vector_store.get_store("chat_history")
+            ts = int(time.time())
+            # 存用户消息
+            store.add(
+                doc_id=f"{qq_id}-u-{ts}",
+                text=user_msg,
+                metadata={"qq_id": qq_id, "role": "user", "ts": ts, "ts_human": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))},
+            )
+            # 存机器人回复（多条合并）
+            if replies:
+                store.add(
+                    doc_id=f"{qq_id}-a-{ts}",
+                    text=" || ".join(replies),
+                    metadata={"qq_id": qq_id, "role": "assistant", "ts": ts, "ts_human": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))},
+                )
+            logger.debug(f"已存入向量库: qq={qq_id}, user_msg={user_msg[:30]}")
+        except Exception as e:
+            logger.error(f"存向量库失败: {e}")
+
+    # 用后台线程跑，不阻塞主流程
+    threading.Thread(target=_do_save, daemon=True).start()
+
+
+def _handle_search_history(qq_id: str, original_msg: str) -> list[str]:
+    """搜历史对话"""
+    # 提取搜索关键词
+    keyword = original_msg
+    for p in ["之前问过", "以前问过", "我之前问", "我以前问", "我问过的", "之前聊过", "上次问过", "历史对话", "历史记录", "我", "什么", "哪些"]:
+        keyword = keyword.replace(p, "")
+    keyword = keyword.strip().replace("?", "").replace("？", "").replace("。", "").replace("？", "")
+    if not keyword:
+        keyword = "股票"  # 默认搜股票相关
+
+    try:
+        import vector_store
+        store = vector_store.get_store("chat_history")
+        # 只搜这个用户的
+        results = store.search(
+            query=keyword,
+            top_k=5,
+            where={"qq_id": qq_id},
+        )
+    except Exception as e:
+        logger.error(f"搜历史失败: {e}")
+        return ["⚠️ 向量数据库暂时不可用"]
+
+    if not results:
+        return [f"📭 没找到你关于「{keyword}」的历史对话"]
+
+    lines = [f"🔍 你之前关于「{keyword}」的对话："]
+    for i, r in enumerate(results, 1):
+        meta = r.get("metadata", {})
+        role = meta.get("role", "?")
+        ts = meta.get("ts_human", "")
+        icon = "👤 你" if role == "user" else "🤖 机器人"
+        text = r.get("text", "").replace(" || ", " | ")
+        # 控制单条长度
+        if len(text) > 80:
+            text = text[:80] + "..."
+        lines.append(f"{i}. {icon} ({ts})")
+        lines.append(f"   {text}")
+    return lines
 
 
 # ==================== 各意图的具体处理 ====================

@@ -14,11 +14,34 @@ embedding_helper.py —— 智谱 Embedding API 封装
 """
 import logging
 import os
+from pathlib import Path
 from typing import List
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+# ===== 加载 .env 文件 (兜底逻辑，避免 llm_service 没先 import 时读不到) =====
+def _load_dotenv():
+    env_path = Path(__file__).parent / ".env"
+    if not env_path.exists():
+        return
+    try:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except Exception as e:
+        logger.warning(f"加载 .env 失败: {e}")
+
+
+_load_dotenv()
 
 ZHIPU_API_KEY = os.getenv("ZHIPU_API_KEY", "").strip()
 ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
