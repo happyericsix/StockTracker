@@ -59,6 +59,11 @@ pip-delete-this-directory.txt
 .env.local
 .env.*.local
 
+### Vector DB (ChromaDB) ###
+python-data-service/chroma_data/
+python-data-service/chroma_test/
+python-data-service/chroma_test_zh/
+
 ### Frontend (Vue / Vite) ###
 frontend/node_modules/
 frontend/dist/

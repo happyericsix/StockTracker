@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
+import lightgbm as lgb
 
 logger = logging.getLogger(__name__)
 
@@ -152,50 +153,85 @@ def generate_signal(prices: list) -> dict:
 # ==================== 机器学习预测 ====================
 
 class StockPredictor:
-    """基于随机森林回归的短期价格预测"""
+    """LightGBM ??????????????"""
 
-    def __init__(self):
-        self.model = RandomForestRegressor(
-            n_estimators=100,
-            max_depth=10,
-            min_samples_split=5,
-            random_state=42,
-            n_jobs=-1,
-        )
+    def __init__(self, window_days: int = None, label: str = "", seed: int = 42):
+        self.model = lgb.LGBMRegressor(n_estimators=80, max_depth=5, num_leaves=31, min_child_samples=10, learning_rate=0.05, reg_alpha=0.0, reg_lambda=1.0, verbose=-1, random_state=seed, n_jobs=-1)
+        self.seed = seed
+        self.window_days = window_days
+        self.label = label
         self.trained = False
 
     def _prepare_features(self, prices: list) -> tuple:
-        """从价格序列构建特征矩阵"""
+        """Build feature matrix. Uses window-appropriate indicator lookback periods.
+        short window -> fast indicators, long window -> slow indicators."""
         df = pd.DataFrame({"close": pd.Series(prices, dtype=float)})
+        close_diff = df["close"].diff()
 
-        # 基础特征: 过去N日收益率
+        # Determine indicator lookback based on window
+        if self.window_days is None:
+            ma_fast, ma_slow = 20, 60
+            rsi_period = 28
+            macd_fast, macd_slow, macd_signal = 24, 52, 18
+            boll_period = 40
+        elif self.window_days >= 120:
+            ma_fast, ma_slow = 10, 30
+            rsi_period = 21
+            macd_fast, macd_slow, macd_signal = 16, 32, 12
+            boll_period = 30
+        elif self.window_days >= 60:
+            ma_fast, ma_slow = 5, 20
+            rsi_period = 14
+            macd_fast, macd_slow, macd_signal = 12, 26, 9
+            boll_period = 20
+        else:
+            ma_fast, ma_slow = 3, 10
+            rsi_period = 7
+            macd_fast, macd_slow, macd_signal = 6, 13, 5
+            boll_period = 10
+
+        # ===== Basic features: rolling returns =====
         for lag in [1, 2, 3, 5, 10]:
             df[f"ret_{lag}"] = df["close"].pct_change(lag)
 
-        # 技术指标特征
-        df["ma5"] = ma(df["close"].tolist(), 5)
-        df["ma20"] = ma(df["close"].tolist(), 20)
-        df["rsi"] = rsi(df["close"].tolist(), 14)
-        boll = bollinger(df["close"].tolist())
+        # ===== Technical indicators (window-adaptive) =====
+        df["ma_fast"] = ma(df["close"].tolist(), ma_fast)
+        df["ma_slow"] = ma(df["close"].tolist(), ma_slow)
+        df["rsi"] = rsi(df["close"].tolist(), rsi_period)
+        boll = bollinger(df["close"].tolist(), boll_period)
         df["boll_pos"] = (df["close"] - pd.Series(boll["lower"])) / (pd.Series(boll["upper"]) - pd.Series(boll["lower"])).replace(0, 1)
+        macd_vals = macd(df["close"].tolist(), macd_fast, macd_slow, macd_signal)
+        df["macd_hist"] = macd_vals["hist"]
 
-        # 目标: 下一日收益率
+        # ===== Process features =====
+        df["consecutive_up"] = (close_diff > 0).rolling(5, min_periods=1).sum()
+        df["ret_5d"] = df["close"].pct_change(5)
+        df["ret_10d"] = df["close"].pct_change(10)
+        df["acceleration"] = df["ret_5d"] - df["ret_10d"]
+        df["vol_5d"] = df["close"].pct_change().rolling(5, min_periods=3).std()
+        df["vol_20d"] = df["close"].pct_change().rolling(20, min_periods=10).std()
+        df["vol_regime"] = df["vol_5d"] / (df["vol_20d"] + 1e-9)
+        df["max_up_5d"] = close_diff.rolling(5, min_periods=1).max()
+        df["max_down_5d"] = close_diff.rolling(5, min_periods=1).min()
+        df["ma_divergence"] = (df["ma_fast"] - df["ma_slow"]) / (df["ma_slow"] + 1e-9)
+        df["price_range"] = (df["close"].rolling(5).max() - df["close"].rolling(5).min()) / (df["close"] + 1e-9)
+        df["close_position"] = (df["close"] - df["close"].rolling(20).min()) / (df["close"].rolling(20).max() - df["close"].rolling(20).min() + 1e-9)
+
+        # Target: next day return
         df["target"] = df["close"].pct_change(1).shift(-1)
-
-        # 删除NaN
         df = df.dropna()
 
         if len(df) < 20:
-            return None, None
+            return None, None, None
 
         feature_cols = [c for c in df.columns if c != "close" and c != "target"]
         X = df[feature_cols].values
         y = df["target"].values
-        return X, y
+        return X, y, feature_cols
 
     def train(self, prices: list) -> bool:
         """训练模型"""
-        X, y = self._prepare_features(prices)
+        X, y, feature_cols = self._prepare_features(prices)
         if X is None or len(X) < 20:
             logger.warning("训练数据不足")
             return False
@@ -203,6 +239,7 @@ class StockPredictor:
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
         self.model.fit(X_train, y_train)
         self.trained = True
+        self._feature_names = feature_cols
 
         train_score = self.model.score(X_train, y_train)
         test_score = self.model.score(X_test, y_test)
@@ -216,7 +253,12 @@ class StockPredictor:
             if not self.train(prices):
                 return None
 
-        X, _ = self._prepare_features(prices)
+        # ?????????????????????????
+        window_prices = prices[-self.window_days:] if self.window_days and len(prices) > self.window_days else prices
+        result = self._prepare_features(window_prices)
+        if result is None or result[0] is None:
+            return None
+        X, _, feature_cols = result
         if X is None or len(X) == 0:
             return None
 
@@ -224,19 +266,20 @@ class StockPredictor:
         latest_features = X[-1].reshape(1, -1)
         pred_return = self.model.predict(latest_features)[0]
 
-        # 特征重要性
+        # ?????
         importance = {}
-        feature_names = [c for c in pd.DataFrame({"close": prices}).columns.tolist()
-                         if c != "close"]
         for name, imp in zip(
-            ["ret_1", "ret_2", "ret_3", "ret_5", "ret_10", "ma5", "ma20", "rsi", "boll_pos"],
+            feature_cols,
             self.model.feature_importances_,
         ):
             importance[name] = float(round(imp, 4))
 
+        # ????
+        direction = "bullish" if pred_return > 0.005 else "bearish" if pred_return < -0.005 else "neutral"
+
         return {
             "predicted_change_pct": round(float(pred_return * 100), 2),
-            "confidence": float(round(self.model.score(X, np.zeros(len(X))) + 0.5, 2)),  # 近似置信度
+            "direction": direction,
             "feature_importance": importance,
         }
 
@@ -244,6 +287,72 @@ class StockPredictor:
 # ==================== 主分析函数 ====================
 
 
+
+# ==================== ?????? ====================
+
+class MultiWindowPredictor:
+    """Three-window predictor: short(60d), mid(120d), long(all)"""
+
+    WINDOWS = [
+        (60, "short"),
+        (120, "mid"),
+        (None, "long"),
+    ]
+
+    def __init__(self):
+        self.predictors = {}
+        for days, label in self.WINDOWS:
+            seed = days if days else 500
+            self.predictors[label] = StockPredictor(window_days=days, label=label, seed=seed)
+
+    def predict(self, prices: list) -> dict:
+        """Return predictions from all 3 windows + consensus signal"""
+        results = {}
+        directions = []
+
+        for label, pred in self.predictors.items():
+            r = pred.predict(list(prices))
+            if r is None:
+                results[label] = {"error": "insufficient data"}
+                continue
+
+            results[label] = {
+                "predicted_change_pct": r["predicted_change_pct"],
+                "direction": r["direction"],
+                "top_features": sorted(
+                    r["feature_importance"].items(),
+                    key=lambda x: x[1], reverse=True
+                )[:3],
+            }
+            directions.append(r["direction"])
+
+        # Consensus logic
+        if len(directions) >= 2 and len(set(directions)) == 1:
+            consensus = directions[0]
+            confidence = "high"
+            advice = "All windows agree, signal reliable"
+        elif len(directions) >= 2:
+            from collections import Counter
+            c = Counter(directions)
+            consensus = c.most_common(1)[0][0]
+            if c.most_common(1)[0][1] >= 2:
+                confidence = "medium"
+                advice = "Majority windows agree, take as reference"
+            else:
+                confidence = "low"
+                consensus = "neutral"
+                advice = "Windows disagree, suggest wait"
+        else:
+            confidence = "low"
+            consensus = "neutral"
+            advice = "Insufficient data"
+
+        return {
+            "windows": results,
+            "consensus": consensus,
+            "confidence": confidence,
+            "advice": advice,
+        }
 def analyze_stock(prices: list, symbol: str = "") -> dict:
     """对一只股票进行完整量化分析
 
@@ -299,9 +408,9 @@ def analyze_stock(prices: list, symbol: str = "") -> dict:
         },
     }
 
-    # --- ML 预测 ---
-    predictor = StockPredictor()
-    prediction = predictor.predict(close)
+    # --- ML multi-window prediction (short 60d / mid 120d / long all) ---
+    multi = MultiWindowPredictor()
+    prediction = multi.predict(close)
 
     result = {
         "symbol": symbol,
