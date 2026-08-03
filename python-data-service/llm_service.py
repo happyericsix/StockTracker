@@ -6,7 +6,7 @@ llm_service.py —— LLM 客户端（DeepSeek）
 - 调用 DeepSeek Chat API（兼容 OpenAI 协议）
 - 拼装 system + user prompt，调用 LLM 生成回复
 
-环境变量：
+环境变量（优先级：系统 env > .env 文件）：
 - DEEPSEEK_API_KEY: 必填
 - DEEPSEEK_BASE_URL: 默认 https://api.deepseek.com
 - DEEPSeek_MODEL: 默认 deepseek-chat
@@ -20,6 +20,30 @@ from typing import Optional
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+# ===== 加载 .env 文件（stdlib 实现，不需要 python-dotenv） =====
+def _load_dotenv():
+    """从项目根的 .env 文件加载环境变量（仅当系统 env 还没有时）"""
+    env_path = Path(__file__).parent / ".env"
+    if not env_path.exists():
+        return
+    try:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            # 系统环境变量优先（已设的不覆盖）
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except Exception as e:
+        logger.warning(f"加载 .env 失败: {e}")
+
+
+_load_dotenv()
 
 # ===== 配置 =====
 API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
