@@ -1,10 +1,18 @@
 ﻿HELP.md
 target/
-.mvn/wrapper/maven-wrapper.jar
+!**/mvnw
+!**/mvnw.cmd
+!**/.mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
 
-### STS ###
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+### Eclipse ###
 .apt_generated
 .classpath
 .factorypath
@@ -12,12 +20,6 @@ target/
 .settings
 .springBeans
 .sts4-cache
-
-### IntelliJ IDEA ###
-.idea
-*.iws
-*.iml
-*.ipr
 
 ### NetBeans ###
 /nbproject/private/
@@ -32,43 +34,42 @@ build/
 ### VS Code ###
 .vscode/
 
-### Frontend ###
-frontend/node_modules/
-frontend/dist/
-*.local
+### Mac OS system files ###
+.DS_Store
+
+### Backend (Spring Boot) ###
+application-local.properties
+application-local.yml
 
 ### Python ###
-python-data-service/venv/
-python-data-service/__pycache__/
-**/__pycache__/
-*.pyc
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.python-version
+pip-log.txt
+pip-delete-this-directory.txt
 
-python-data-service/.venv/
+### Python env / secrets ###
+.env
+.env.local
+.env.*.local
 
-### .NET / C# build outputs (Lagrange.OneBot etc.) ###
-**/bin/
-**/obj/
-**/publish/
-**/Release/
-*.exe
-*.dll
+### Frontend (Vue / Vite) ###
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.env.local
+frontend/.env.*.local
 
+### NapCat / gocq ###
+python-data-service/gocq/data/
+python-data-service/gocq/logs/
+python-data-service/lagrange/Lagrange.OneBot/bin/Release/
 
-### ====== Sensitive & Runtime Data ======
-# JWT RSA Keys
-src/main/resources/app.key
-src/main/resources/app.pub
-
-# QQ Bot runtime data & logs
-python-data-service/gocq/
-python-data-service/device.json
-
-# Project notes with sensitive info
-jindu.txt
-
-# NapCat config with QQ number
-napcat/config/napcat_1121460169.json
-napcat/config/napcat_protocol_1121460169.json
-napcat/config/onebot11_1121460169.json
-
-### ====== End Sensitive ======
+### Backups / temporary ###
+_backup_*/

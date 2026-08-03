@@ -1,0 +1,60 @@
+﻿========================================
+   Stock Tracker - QQ Bot 项目进度
+   更新时间: 2026-07-19
+========================================
+
+=== 已完成 ===
+
+1. 架构设计
+   - QQ用户 → NapCat(Docker) → qq_standalone.py → app.py → 腾讯行情API
+   - 完全独立的 Python 方案，不依赖 AstrBot
+   - 分离出独立 Git 仓库（github.com/happyericsix/stock-tracker）
+
+2. 文件结构（python-data-service/）
+   - qq_standalone.py  # QQ消息收发器（WebSocket桥梁，端口3003+8081）
+   - app.py           # FastAPI 业务核心（股票查询，端口8000）
+   - akshare_client.py # 腾讯行情API客户端
+   - models.py         # 数据模型
+
+3. 消息流转
+   - 接收: NapCat → WebSocket → qq_standalone → POST → app.py
+   - 回复: app.py → POST 8081 → send_queues[user_id] → bot.send → NapCat → QQ
+   - 每个用户独立队列，不会串消息
+
+4. 已修复问题
+   - 股票代码前缀: 添加bj支持(920xxx北交所股票)
+   - 同步阻塞: requests改为 asyncio.to_thread 线程池执行
+   - 全局队列: 改为 defaultdict(list) 按用户分组
+
+5. NapCat配置
+   - Docker容器运行，QQ账号1121460169已登录
+   - WebSocket连接: ws://host.docker.internal:3003/ws
+   - 配置文件: napcat/config/onebot11_1121460169.json
+
+=== 启动方式 ===
+
+需要3个终端：
+  终端1: docker start napcat
+  终端2: cd python-data-service && .venv\Scripts\python.exe -m uvicorn app:app --host 0.0.0.0 --port 8000
+  终端3: cd python-data-service && python qq_standalone.py
+
+=== 待完成 ===
+
+1. LLM接入（DeepSeek/OpenAI API）
+2. SQLite数据库（对话历史+用户偏好）
+3. 股票自选股和价格提醒
+4. Docker化打包
+
+=== 架构图 ===
+
+QQ用户
+   ↓ ↑
+腾讯服务器
+   ↓ ↑
+NapCat (Docker, 端口3000/3001)
+   ↓ ↑  WebSocket :3003/ws
+qq_standalone.py (端口3003接收, 8081发送)
+   ↓ ↑  HTTP POST
+app.py (端口8000)
+   ↓
+akshare_client.py → 腾讯行情API
