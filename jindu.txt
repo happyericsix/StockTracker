@@ -1,60 +1,116 @@
 ﻿========================================
    Stock Tracker - QQ Bot 项目进度
-   更新时间: 2026-07-19
+   更新时间: 2026-08-03
 ========================================
 
 === 已完成 ===
 
-1. 架构设计
-   - QQ用户 → NapCat(Docker) → qq_standalone.py → app.py → 腾讯行情API
-   - 完全独立的 Python 方案，不依赖 AstrBot
-   - 分离出独立 Git 仓库（github.com/happyericsix/stock-tracker）
+1. 架构设计（v2 - 2026-08-03 重构）
+   - QQ用户 → NapCat → HTTP webhook → app.py → 行情API / LLM
+   - 中间层 qq_standalone.py 已废弃，NapCat 直接推 webhook
+   - 不依赖 AstrBot，完全独立方案
 
 2. 文件结构（python-data-service/）
-   - qq_standalone.py  # QQ消息收发器（WebSocket桥梁，端口3003+8081）
-   - app.py           # FastAPI 业务核心（股票查询，端口8000）
-   - akshare_client.py # 腾讯行情API客户端
-   - models.py         # 数据模型
+   - app.py                  # FastAPI 业务核心 + QQ webhook (端口 8000)
+   - llm_service.py          # DeepSeek LLM 客户端 (含 .env 自动加载)
+   - intent_router.py        # 规则+关键词意图识别 (15/15 单测通过)
+   - qq_handler.py           # 按意图路由处理 (绑定/行情/分析/自选/闲聊)
+   - user_context.py         # 调后端 internal API 查 user
+   - quant_model.py          # 技术指标 + 随机森林预测
+   - akshare_client.py       # 行情 API 客户端
+   - prompts/                # LLM prompt 模板
+   - .env                    # 本地配置 (不入 git)
+   - start.ps1               # 一键启动脚本
+   - qq_standalone.py.deprecated  # 老架构中间层，已废弃
 
-3. 消息流转
-   - 接收: NapCat → WebSocket → qq_standalone → POST → app.py
-   - 回复: app.py → POST 8081 → send_queues[user_id] → bot.send → NapCat → QQ
-   - 每个用户独立队列，不会串消息
+3. QQ 消息流转
+   - 接收: NapCat → HTTP POST /qq_msg → qq_handler.handle_message()
+   - 意图识别 → 调 akshare / quant_model / LLM
+   - 回复: 多条 send_qq() 调用 NapCat HTTP API
 
-4. 已修复问题
-   - 股票代码前缀: 添加bj支持(920xxx北交所股票)
-   - 同步阻塞: requests改为 asyncio.to_thread 线程池执行
-   - 全局队列: 改为 defaultdict(list) 按用户分组
+4. 后端 (Spring Boot)
+   - User 表已有 qq_number 字段
+   - UserService: 生成/验证 QQ 绑定验证码 (Redis 5min TTL)
+   - UserController: 4 个公开接口 + 3 个 internal 接口
+   - 内部鉴权: X-Internal-Token (env: INTERNAL_API_TOKEN)
+   - 修改 AuthService: 注册时不再把 username 写到 qq_number
 
-5. NapCat配置
-   - Docker容器运行，QQ账号1121460169已登录
-   - WebSocket连接: ws://host.docker.internal:3003/ws
-   - 配置文件: napcat/config/onebot11_1121460169.json
+5. 前端 (Vue 3)
+   - BindQQ.vue: 绑定页面 (生成验证码 + 步骤说明)
+   - Dashboard: 头部加「🔗 绑定QQ」按钮
+   - api/user.js: 绑定相关 API
+
+6. LLM 集成
+   - DeepSeek API (deepseek-chat)
+   - .env 文件管理 API key (gitignore 保护)
+   - 系统 env > .env 优先级
+   - 降级回复: 没配 key 时自动用模板
+
+7. 已修复问题
+   - 股票代码前缀: 添加 bj 支持 (920xxx 北交所)
+   - IDEA 运行配置: 修正 com.abhinav → com.happyericsix
+   - 意图识别: 修复 sh600519 这种带前缀代码的匹配
+   - 验证码反查: 用 Redis SCAN 不用 KEYS (避免阻塞)
 
 === 启动方式 ===
 
-需要3个终端：
-  终端1: docker start napcat
-  终端2: cd python-data-service && .venv\Scripts\python.exe -m uvicorn app:app --host 0.0.0.0 --port 8000
-  终端3: cd python-data-service && python qq_standalone.py
+需要 4 个进程：
+
+  # 1. MySQL + Redis (一次性)
+  docker run -d --name stock-mysql -p 3306:3306 \
+    -e MYSQL_ROOT_PASSWORD=123456 -e MYSQL_DATABASE=stockdb mysql:8
+  docker run -d --name stock-redis -p 6379:6379 redis:7-alpine
+
+  # 2. Spring Boot (IDEA 启动 StocktrackerApplication)
+  #    或命令行: cd stock-tracker && $env:INTERNAL_API_TOKEN="..."; .\mvnw.cmd spring-boot:run
+
+  # 3. Python (双击 start.ps1 或 .\start.ps1)
+
+  # 4. 前端
+  cd frontend && npm install && npm run dev
+
+  # 5. (可选) NapCat - 接真 QQ 才需要
+  docker start napcat
+
+=== 端到端测试 ===
+
+1. 浏览器 http://localhost:5173 → 注册 → 登录
+2. 点「🔗 绑定QQ」→ 生成验证码 (如 888888)
+3. 模拟 NapCat 发 webhook:
+   curl -X POST http://localhost:8000/qq_msg \
+     -H "Content-Type: application/json" \
+     -d '{"user_id":"12345678","message":"绑定 888888"}'
+4. 验证数据库:
+   docker exec stock-mysql mysql -uroot -p123456 stockdb \
+     -e "SELECT username, qq_number FROM users;"
 
 === 待完成 ===
 
-1. LLM接入（DeepSeek/OpenAI API）
-2. SQLite数据库（对话历史+用户偏好）
-3. 股票自选股和价格提醒
-4. Docker化打包
+1. 自选股在 QQ 里查 (后端 favorites internal 接口未实现)
+2. LLM 限流
+3. 多轮对话
+4. 接入 FinRL 量化模型
+5. 自动周报 / 财报情绪分析
+6. Docker Compose 整合所有服务
+7. 更新 README 反映新架构
 
-=== 架构图 ===
+=== 架构图 (v2) ===
 
 QQ用户
    ↓ ↑
 腾讯服务器
    ↓ ↑
-NapCat (Docker, 端口3000/3001)
-   ↓ ↑  WebSocket :3003/ws
-qq_standalone.py (端口3003接收, 8081发送)
-   ↓ ↑  HTTP POST
-app.py (端口8000)
+NapCat (Docker, 端口 3000/3001)
+   ↓ ↑  HTTP POST /qq_msg (新)
+   ↓ ↑  WebSocket :3003/ws (老，已废弃)
+app.py (端口 8000)
+   ├── intent_router      → 解析意图
+   ├── qq_handler         → 按意图处理
+   │   ├── akshare_client → 行情
+   │   ├── quant_model    → 技术分析
+   │   ├── user_context   → 调 Spring Boot internal API
+   │   └── llm_service    → DeepSeek API
    ↓
-akshare_client.py → 腾讯行情API
+Spring Boot (端口 8080) - /api/v1/internal/**
+   ↓
+MySQL + Redis
