@@ -50,7 +50,7 @@ def handle_message(qq_id: str, message: str) -> list[str]:
     # 1. 绑定流程（不需要先绑定）
     if intent.type == INTENT_BIND:
         replies = _handle_bind(qq_id, intent.code)
-        _save_to_vector_db(qq_id, message, replies)
+        if _should_save(replies): _save_to_vector_db(qq_id, message, replies)
         return replies
 
     # 2. 绑定后才能用的功能：watchlist、analyze、history（需要拿 user 自选股等）
@@ -59,43 +59,54 @@ def handle_message(qq_id: str, message: str) -> list[str]:
     # 3. 解绑
     if intent.type == INTENT_UNBIND:
         replies = _handle_unbind(qq_id)
-        _save_to_vector_db(qq_id, message, replies)
+        if _should_save(replies): _save_to_vector_db(qq_id, message, replies)
         return replies
 
     # 4. 帮助
     if intent.type == INTENT_HELP:
         replies = [intent_router.reply_for_help()]
-        _save_to_vector_db(qq_id, message, replies)
+        if _should_save(replies): _save_to_vector_db(qq_id, message, replies)
         return replies
 
     # 5. 查行情（不需要绑定）
     if intent.type == INTENT_QUOTE:
         replies = _handle_quote(qq_id, intent)
-        _save_to_vector_db(qq_id, message, replies)
+        if _should_save(replies): _save_to_vector_db(qq_id, message, replies)
         return replies
 
     # 6. 自选股（需要绑定）
     if intent.type == INTENT_WATCHLIST:
         replies = _handle_watchlist(qq_id)
-        _save_to_vector_db(qq_id, message, replies)
+        if _should_save(replies): _save_to_vector_db(qq_id, message, replies)
         return replies
 
     # 7. 技术分析（需要绑定，因为要给个性化建议）
     if intent.type == INTENT_ANALYZE:
         replies = _handle_analyze(qq_id, intent)
-        _save_to_vector_db(qq_id, message, replies)
+        if _should_save(replies): _save_to_vector_db(qq_id, message, replies)
         return replies
 
     # 8. 历史K线
     if intent.type == INTENT_HISTORY:
         replies = _handle_history(qq_id, intent)
-        _save_to_vector_db(qq_id, message, replies)
+        if _should_save(replies): _save_to_vector_db(qq_id, message, replies)
         return replies
 
     # 9. 兜底：闲聊
     replies = _handle_chat(qq_id, message)
-    _save_to_vector_db(qq_id, message, replies)
+    if _should_save(replies): _save_to_vector_db(qq_id, message, replies)
     return replies
+
+
+# 修复: 给所有 handler 加错误过滤，避免存错误回复
+def _should_save(replies: list[str]) -> bool:
+    """判断是否要存这次的对话（不要存错误回复）"""
+    if not replies:
+        return False
+    text = " ".join(replies)
+    # 不要存错误/空回复
+    bad_patterns = ["⚠️", "❌", "📭", "ERROR", "暂时不可用", "网络错误", "处理失败"]
+    return not any(p in text for p in bad_patterns)
 
 
 # ==================== 向量数据库：自动存储 + 搜索 ====================
@@ -148,8 +159,8 @@ def _handle_search_history(qq_id: str, original_msg: str) -> list[str]:
             where={"qq_id": qq_id},
         )
     except Exception as e:
-        logger.error(f"搜历史失败: {e}")
-        return ["⚠️ 向量数据库暂时不可用"]
+        logger.error(f"搜历史失败: {e}", exc_info=True)
+        return [f"⚠️ 向量数据库错误: {str(e)[:100]}"]
 
     if not results:
         return [f"📭 没找到你关于「{keyword}」的历史对话"]
