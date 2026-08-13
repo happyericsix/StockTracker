@@ -10,17 +10,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
-/**
- * 用户管理：QQ 绑定/解绑/状态查询
- *
- * 公开接口（需 JWT）：
- * - POST /api/v1/user/bind-qq/code         生成验证码
- * - GET  /api/v1/user/bind-status          查询绑定状态
- * - POST /api/v1/user/unbind-qq            解绑
- *
- * 内部接口（需 X-Internal-Token）：
- * - POST /api/v1/internal/user/bind-qq     Python webhook 验证 + 绑定
- */
+import java.util.Map;
+
 @RestController
 @RequiredArgsConstructor
 public class UserController {
@@ -30,7 +21,7 @@ public class UserController {
     @Value("${internal.api.token:}")
     private String internalToken;
 
-    // ==================== 公开接口（需 JWT） ====================
+    // ==================== 公开接口（需 JWT）====================
 
     @PostMapping("/api/v1/user/bind-qq/code")
     public Result<String> generateCode(Authentication authentication) {
@@ -50,7 +41,34 @@ public class UserController {
         return Result.success("解绑成功", result);
     }
 
-    // ==================== 内部接口（Python webhook 调用） ====================
+    // ==================== 个人信息 ====================
+
+    @GetMapping("/api/v1/user/profile")
+    public Result<Map<String, Object>> getProfile(Authentication authentication) {
+        return Result.success(userService.getProfile(authentication.getName()));
+    }
+
+    @PutMapping("/api/v1/user/profile")
+    public Result<Map<String, Object>> updateProfile(
+            @RequestBody Map<String, Object> updates,
+            Authentication authentication) {
+        return Result.success(userService.updateProfile(authentication.getName(), updates));
+    }
+
+    @PostMapping("/api/v1/user/change-password")
+    public Result<String> changePassword(
+            @RequestBody Map<String, String> body,
+            Authentication authentication) {
+        String oldPassword = body.get("oldPassword");
+        String newPassword = body.get("newPassword");
+        if (oldPassword == null || newPassword == null) {
+            return Result.error(400, "缺少参数");
+        }
+        userService.changePassword(authentication.getName(), oldPassword, newPassword);
+        return Result.success("密码修改成功");
+    }
+
+    // ==================== 内部接口（Python webhook 调用）====================
 
     @PostMapping("/api/v1/internal/user/bind-qq")
     public ResponseEntity<Result<BindQqResponse>> internalBindQq(
@@ -67,13 +85,13 @@ public class UserController {
     }
 
     @GetMapping("/api/v1/internal/user/lookup-qq")
-    public ResponseEntity<Result<java.util.Map<String, Object>>> internalLookupByQq(
+    public ResponseEntity<Result<Map<String, Object>>> internalLookupByQq(
             @RequestHeader(value = "X-Internal-Token", required = false) String token,
             @RequestParam("qqId") String qqId) {
         if (!isValidInternal(token)) {
             return ResponseEntity.status(401).body(Result.error(401, "Invalid internal token"));
         }
-        java.util.Map<String, Object> data = userService.lookupByQqId(qqId);
+        Map<String, Object> data = userService.lookupByQqId(qqId);
         if (data == null) {
             return ResponseEntity.status(404).body(Result.error(404, "QQ 未绑定任何用户"));
         }
@@ -81,7 +99,7 @@ public class UserController {
     }
 
     @GetMapping("/api/v1/internal/user/favorites")
-    public ResponseEntity<Result<java.util.List<java.util.Map<String, Object>>>> internalFavorites(
+    public ResponseEntity<Result<java.util.List<Map<String, Object>>>> internalFavorites(
             @RequestHeader(value = "X-Internal-Token", required = false) String token,
             @RequestParam("username") String username) {
         if (!isValidInternal(token)) {

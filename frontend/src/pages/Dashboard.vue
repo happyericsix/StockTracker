@@ -1,4 +1,4 @@
-<script setup>
+﻿<script setup>
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { getStock, getFavorites, addFavorite, deleteFavorite } from '../api/stock.js'
@@ -25,7 +25,6 @@ const search = async () => {
   try {
     const res = await getStock(query.toUpperCase())
     stockData.value = res.data
-    // 记录到搜索历史（仅记录代码，名称由 autocomplete 选择时带）
     searchInputRef.value?.recordSearch(query.toUpperCase(), query.toUpperCase())
   } catch (e) {
     error.value = '查询失败，请检查股票代码'
@@ -85,12 +84,8 @@ const remove = async (sym) => {
 
 const goDetail = (sym) => router.push('/stock/' + sym)
 
-const logout = () => {
-  localStorage.removeItem('token')
-  router.push('/login')
-}
-
-const goBindQq = () => router.push('/bind-qq')
+const goAlerts = () => router.push('/alerts')
+const goProfile = () => router.push('/profile')
 
 onMounted(loadFavorites)
 </script>
@@ -100,8 +95,8 @@ onMounted(loadFavorites)
     <header>
       <h1>Stock Tracker</h1>
       <div class="header-actions">
-        <button class="bind-btn" @click="goBindQq">🔗 绑定QQ</button>
-        <button class="logout-btn" @click="logout">退出</button>
+        <button class="nav-btn" @click="goAlerts">预警</button>
+        <button class="nav-btn" @click="goProfile">我的</button>
       </div>
     </header>
     <main>
@@ -147,10 +142,9 @@ onMounted(loadFavorites)
 .app-layout { min-height: 100vh; background: #f0f2f5; }
 header { background: #1a1a2e; color: white; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }
 header h1 { margin: 0; font-size: 20px; }
-.header-actions { display: flex; gap: 12px; }
-.bind-btn { background: #722ed1; border: none; color: white; padding: 6px 16px; border-radius: 4px; cursor: pointer; }
-.bind-btn:hover { background: #9254de; }
-.logout-btn { background: transparent; border: 1px solid white; color: white; padding: 6px 16px; border-radius: 4px; cursor: pointer; }
+.header-actions { display: flex; gap: 8px; }
+.nav-btn { background: rgba(255,255,255,0.15); border: none; color: white; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; transition: background 0.2s; }
+.nav-btn:hover { background: rgba(255,255,255,0.25); }
 main { max-width: 640px; margin: 0 auto; padding: 24px 16px; }
 
 .search-section { display: flex; gap: 8px; margin-bottom: 20px; align-items: flex-start; }

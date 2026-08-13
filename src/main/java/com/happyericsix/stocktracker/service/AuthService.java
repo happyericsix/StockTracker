@@ -38,8 +38,10 @@ public class AuthService {
         User user = User.builder()
                 .username(request.getUsername())
                 .password(passwordEncoder.encode(request.getPassword()))
-                .email(request.getEmail() != null ? request.getEmail() : request.getUsername() + "@qq.com")
-                .qqNumber(null)  // QQ 号需用户登录后单独绑定，不再与 username 绑定
+                .email(request.getEmail() != null && !request.getEmail().isBlank()
+                        ? request.getEmail() : request.getUsername() + "@stocktracker.local")
+                .phone(request.getPhone())
+                .qqNumber(null)
                 .role(Role.USER)
                 .build();
 
@@ -64,5 +66,4 @@ public class AuthService {
 
         return new AuthResponse(token, user.getUsername(), user.getEmail(), "登录成功");
     }
-
 }

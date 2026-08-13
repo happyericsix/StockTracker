@@ -1,17 +1,12 @@
 package com.happyericsix.stocktracker.controller;
 
-import com.happyericsix.stocktracker.dto.DailyStockResponse;
-import com.happyericsix.stocktracker.dto.FavoriteStockRequest;
-import com.happyericsix.stocktracker.dto.PagedResponse;
-import com.happyericsix.stocktracker.dto.Result;
-import com.happyericsix.stocktracker.dto.StockOverviewResponse;
-import com.happyericsix.stocktracker.dto.StockResponse;
-import com.happyericsix.stocktracker.dto.StockSearchResponse;
+import com.happyericsix.stocktracker.dto.*;
 import com.happyericsix.stocktracker.entity.FavoriteStock;
+import com.happyericsix.stocktracker.service.AlertService;
 import com.happyericsix.stocktracker.service.StockService;
+import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
@@ -19,16 +14,13 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 
 @RestController
+@RequiredArgsConstructor
 @RequestMapping("/api/v1/stocks")
 public class StockController {
-
     private final StockService stockService;
-    private static final Logger log = LoggerFactory.getLogger(StockController.class);
+    private final AlertService alertService;
 
-    @Autowired
-    public StockController(StockService stockService) {
-        this.stockService = stockService;
-    }
+    private static final Logger log = LoggerFactory.getLogger(StockController.class);
 
     // ==================== 股票搜索 (Autocomplete) ====================
 
@@ -41,7 +33,7 @@ public class StockController {
         return Result.success(response);
     }
 
-    // ==================== 股票详情 ====================
+    // ==================== 实时行情 ====================
 
     @GetMapping("/{stockSymbol}")
     public StockResponse getStock(@PathVariable("stockSymbol") String stockSymbol) {
@@ -73,8 +65,14 @@ public class StockController {
     public ResponseEntity<FavoriteStock> saveFavoriteStock(
             @RequestBody FavoriteStockRequest request,
             Authentication authentication) {
-        final FavoriteStock saved = stockService.addFavorite(request.getSymbol(), authentication.getName(), request.getBuyPrice(), request.getQuantity());
+
+        final FavoriteStock saved = stockService.addFavorite(request.getSymbol(),
+                authentication.getName(),
+                request.getBuyPrice(),
+                request.getQuantity());
+
         return ResponseEntity.ok().body(saved);
+
     }
 
     @GetMapping("/favorites")
@@ -92,6 +90,7 @@ public class StockController {
             Authentication authentication) {
         boolean deleted = stockService.deleteFavorite(symbol.toUpperCase(), authentication.getName());
         if (deleted) {
+            alertService.deleteByUserAndSymbol(authentication.getName(), symbol);
             return Result.success("Favorite deleted successfully", symbol.toUpperCase());
         } else {
             return Result.error(404, "Favorite not found: " + symbol.toUpperCase());

@@ -21,10 +21,12 @@ public class User {
     private String username;
 
     @Column(nullable = false)
-    private String password; // BCrypt 加密后存储
+    private String password;
 
     @Column(nullable = false, unique = true)
     private String email;
+
+    private String phone;
 
     @Enumerated(EnumType.STRING)
     private Role role;
