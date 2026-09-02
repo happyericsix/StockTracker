@@ -282,6 +282,82 @@ def models_summary(symbol: str = Query(default=None, description="可选：按�
         return {"error": str(e)}
 
 
+# ==================== Agent 与策略接口 ====================
+
+
+@app.post("/api/v1/agent/chat")
+async def agent_chat(req: Request):
+    try:
+        import agent.react_agent as react_agent
+        data = await req.json()
+        user_id = str(data.get("user_id", "")).strip()
+        message = data.get("message", "").strip()
+        if not user_id or not message:
+            return {"replies": [], "strategy_json": None}
+        result = await asyncio.to_thread(react_agent.run_agent, user_id, message)
+        return result
+    except Exception as e:
+        logger.error(f"agent chat error: {e}", exc_info=True)
+        return {"replies": ["⚠️ 处理出错了，稍后再试"], "strategy_json": None}
+
+
+@app.post("/api/v1/strategies/validate")
+async def validate_strategy_endpoint(req: Request):
+    from agent.strategy_schema import validate_strategy_config
+    try:
+        data = await req.json()
+        strategy_json = data.get("strategy_json", {})
+        if not isinstance(strategy_json, dict):
+            return {"valid": False, "error": "strategy_json must be an object", "normalized": None}
+        cfg, err = validate_strategy_config(strategy_json)
+        return {"valid": err is None, "error": err, "normalized": cfg.model_dump() if cfg else None}
+    except Exception as e:
+        logger.error(f"strategy validation error: {e}", exc_info=True)
+        return {"valid": False, "error": str(e), "normalized": None}
+
+
+@app.post("/api/v1/strategies/backtest")
+async def backtest_strategy_endpoint(req: Request):
+    from agent.strategy_schema import validate_strategy_config
+    from agent.strategy_engine import run_backtest
+    from akshare_client import get_history
+    try:
+        data = await req.json()
+        cfg_json = data.get("strategy_json", {})
+        cfg, err = validate_strategy_config(cfg_json)
+        if err:
+            return {"valid": False, "error": err}
+        records = get_history(cfg.symbol)
+        return {"valid": True, "backtest": run_backtest(cfg_json, records or [])}
+    except Exception as e:
+        logger.error(f"strategy backtest error: {e}", exc_info=True)
+        return {"valid": False, "error": str(e)}
+
+
+@app.post("/api/v1/strategies/evaluate-bar")
+async def evaluate_bar_endpoint(req: Request):
+    from agent.strategy_schema import validate_strategy_config
+    from agent.strategy_engine import evaluate_bar
+    from akshare_client import get_history
+    try:
+        data = await req.json()
+        cfg, err = validate_strategy_config(data.get("strategy_json", {}))
+        if err:
+            return {"valid": False, "error": err}
+        symbol = data.get("symbol") or cfg.symbol
+        records = get_history(symbol)
+        if not records:
+            return {"error": "insufficient history data", "signal": "hold", "matched_conditions": []}
+        position = data.get("position")
+        if isinstance(position, dict) and "quantity" in position and "shares" not in position:
+            position = dict(position)
+            position["shares"] = position["quantity"]
+        return evaluate_bar(cfg.model_dump(), records, data.get("date", ""), position)
+    except Exception as e:
+        logger.error(f"strategy evaluate-bar error: {e}", exc_info=True)
+        return {"error": str(e), "signal": "hold", "matched_conditions": []}
+
+
 # ==================== 聊天助手接口 ====================
 
 # 注意:chat_handler 改成 lazy import,避免它的依赖缺失导致整个 app 挂掉
