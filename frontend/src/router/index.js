@@ -1,4 +1,4 @@
-﻿import { createRouter, createWebHistory } from 'vue-router'
+import { createRouter, createWebHistory } from 'vue-router'
 import Login from '../pages/Login.vue'
 import Dashboard from '../pages/Dashboard.vue'
 import KLineChart from '../pages/KLineChart.vue'
@@ -6,6 +6,8 @@ import Alerts from '../pages/Alerts.vue'
 import Assistant from '../pages/Assistant.vue'
 import Messages from '../pages/Messages.vue'
 import Profile from '../pages/Profile.vue'
+import Strategies from '../pages/Strategies.vue'
+import StrategyDetail from '../pages/StrategyDetail.vue'
 
 const routes = [
   { path: '/', redirect: '/dashboard' },
@@ -16,6 +18,8 @@ const routes = [
   { path: '/assistant', component: Assistant, meta: { requiresAuth: true } },
   { path: '/messages', component: Messages, meta: { requiresAuth: true } },
   { path: '/profile', component: Profile, meta: { requiresAuth: true } },
+  { path: '/strategies', component: Strategies, meta: { requiresAuth: true } },
+  { path: '/strategies/:id', component: StrategyDetail, meta: { requiresAuth: true } },
 ]
 
 const router = createRouter({

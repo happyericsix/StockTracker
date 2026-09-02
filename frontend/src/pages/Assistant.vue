@@ -51,6 +51,16 @@ const onBusMessage = (msg) => {
   }
 }
 
+const hasStrategyContent = (content) => {
+  if (!content || typeof content !== 'string') return false
+  const hasSchema = content.includes('"schema_version"')
+  const hasJsonFence = content.includes('```json') || content.includes('```')
+  const hasEntryExit = content.includes('"entry"') || content.includes('"exit"')
+  return hasSchema && (hasJsonFence || hasEntryExit)
+}
+
+const goStrategies = () => router.push('/strategies')
+
 const send = async () => {
   const text = input.value.trim()
   if (!text || sending.value) return
@@ -120,6 +130,9 @@ onUnmounted(() => {
         <div class="bubble-wrap">
           <div class="bubble">{{ m.content }}</div>
           <div class="time">{{ formatTime(m.createdAt) }}</div>
+          <div v-if="m.type !== 'CHAT_USER' && hasStrategyContent(m.content)" class="strategy-action">
+            <button class="strategy-btn" @click="goStrategies">查看策略库</button>
+          </div>
         </div>
         <div v-if="m.type === 'CHAT_USER'" class="avatar mine-avatar">我</div>
       </div>
@@ -245,6 +258,18 @@ onUnmounted(() => {
 }
 .time { font-size: 10px; color: #bbb; }
 .msg-row.mine .time { text-align: right; }
+
+.strategy-action { margin-top: 4px; }
+.strategy-btn {
+  background: #f6ffed;
+  color: #389e0d;
+  border: 1px solid #b7eb8f;
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.strategy-btn:hover { background: #d9f7be; }
 
 .typing-bubble { display: flex; align-items: center; gap: 4px; }
 .typing-bubble span {
