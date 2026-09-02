@@ -24,7 +24,7 @@ import java.util.Set;
 @ConditionalOnProperty(name = "spring.cache.type", havingValue = "redis")
 public class RedisCacheConfig {
 
-    public static final Set<String> CACHE_NAMES = Set.of("stocks", "stockOverviews", "stockSearch");
+    public static final Set<String> CACHE_NAMES = Set.of("stocks", "stockOverviews", "stockSearch", "stockIndicators");
 
     @Bean
     public com.github.benmanes.caffeine.cache.Cache<Object, Object> caffeineCache() {
@@ -58,9 +58,23 @@ public class RedisCacheConfig {
                         RedisSerializationContext.SerializationPair.fromSerializer(
                                 new JdkSerializationRedisSerializer()));
 
+        // stockIndicators 5 分钟 TTL，跟 StockPriceRefreshJob 5 分钟刷新周期对齐
+        // 防止每次评估都穿透到 Python 服务（akshare 算一次指标要十几秒）
+        RedisCacheConfiguration indicatorConfig = RedisCacheConfiguration.defaultCacheConfig()
+                .entryTtl(Duration.ofMinutes(5))
+                .disableCachingNullValues()
+                .serializeKeysWith(
+                        RedisSerializationContext.SerializationPair.fromSerializer(
+                                new StringRedisSerializer()))
+                .serializeValuesWith(
+                        RedisSerializationContext.SerializationPair.fromSerializer(
+                                new JdkSerializationRedisSerializer()));
+
         return RedisCacheManager.builder(factory)
                 .cacheDefaults(defaultConfig)
-                .withInitialCacheConfigurations(Map.of("stockSearch", searchConfig))
+                .withInitialCacheConfigurations(Map.of(
+                        "stockSearch", searchConfig,
+                        "stockIndicators", indicatorConfig))
                 .initialCacheNames(CACHE_NAMES)
                 .build();
     }

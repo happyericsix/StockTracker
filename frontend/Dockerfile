@@ -1,7 +1,7 @@
 ﻿FROM node:24-alpine AS build
 WORKDIR /app
 COPY frontend/package*.json ./
-RUN npm install
+RUN npm install --registry=https://registry.npmmirror.com
 COPY frontend/ .
 RUN npm run build
 

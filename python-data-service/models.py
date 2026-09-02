@@ -1,4 +1,4 @@
-﻿"""
+"""
 Pydantic models matching Java DTO exact JSON structure.
 Java side uses Jackson @JsonProperty, so field names must match exactly.
 """
@@ -12,6 +12,7 @@ class GlobalQuote(BaseModel):
     symbol: str = Field(default="", alias="01. symbol")
     price: Optional[str] = Field(default=None, alias="05. price")
     lastTradingDay: str = Field(default="", alias="07. latest trading day")
+    name: str = Field(default="")
 
     model_config = {"populate_by_name": True}
 

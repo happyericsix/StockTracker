@@ -16,4 +16,7 @@ public interface FavoriteStockRepository extends JpaRepository<FavoriteStock, Lo
     void deleteByStockSymbolAndUserId(String stockSymbol, Long userId);
     boolean existsByStockSymbolAndUserId(String stockSymbol, Long userId);
 
+    /** 用于 PnlPercentEvaluator 取某用户对某股票的买入价 */
+    List<FavoriteStock> findByUserIdAndStockSymbol(Long userId, String stockSymbol);
+
 }

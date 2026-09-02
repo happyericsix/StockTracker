@@ -1,10 +1,12 @@
-﻿<script setup>
+<script setup>
 import { ref, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { getStock, getFavorites, addFavorite, deleteFavorite } from '../api/stock.js'
 import StockSearchInput from '../components/StockSearchInput.vue'
+import { messageBus } from '../composables/messageBus.js'
 
 const router = useRouter()
+const route = useRoute()
 const symbol = ref('')
 const stockData = ref(null)
 const favorites = ref([])
@@ -25,7 +27,7 @@ const search = async () => {
   try {
     const res = await getStock(query.toUpperCase())
     stockData.value = res.data
-    searchInputRef.value?.recordSearch(query.toUpperCase(), query.toUpperCase())
+    searchInputRef.value?.recordSearch(query.toUpperCase(), res.data?.name || query.toUpperCase())
   } catch (e) {
     error.value = '查询失败，请检查股票代码'
     stockData.value = null
@@ -82,12 +84,19 @@ const remove = async (sym) => {
   }
 }
 
-const goDetail = (sym) => router.push('/stock/' + sym)
+const goDetail = (sym) => router.push('/chart/' + sym)
 
+const goAssistant = () => router.push('/assistant')
+const goMessages = () => router.push('/messages')
 const goAlerts = () => router.push('/alerts')
+const goAddAlert = (sym) => router.push({ path: '/alerts', query: { symbol: sym, new: '1' } })
 const goProfile = () => router.push('/profile')
 
-onMounted(loadFavorites)
+onMounted(() => {
+  loadFavorites()
+  messageBus.connect()
+  messageBus.refreshUnread()
+})
 </script>
 
 <template>
@@ -95,6 +104,11 @@ onMounted(loadFavorites)
     <header>
       <h1>Stock Tracker</h1>
       <div class="header-actions">
+        <button class="nav-btn" @click="goAssistant">💬 助手</button>
+        <button class="nav-btn badge-btn" @click="goMessages">
+          消息
+          <span v-if="messageBus.unread > 0" class="unread-badge">{{ messageBus.unread > 99 ? '99+' : messageBus.unread }}</span>
+        </button>
         <button class="nav-btn" @click="goAlerts">预警</button>
         <button class="nav-btn" @click="goProfile">我的</button>
       </div>
@@ -109,7 +123,7 @@ onMounted(loadFavorites)
 
       <div v-if="stockData" class="stock-card">
         <div class="price-main">
-          <span class="symbol">{{ stockData.symbol || symbol.toUpperCase() }}</span>
+          <span class="symbol">{{ stockData.name || stockData.symbol || symbol.toUpperCase() }}<small class="symbol-code">{{ stockData.name ? stockData.symbol : "" }}</small></span>
           <span class="price">${{ stockData.price || "N/A" }}</span>
         </div>
         <p class="update-time">更新: {{ stockData.lastUpdated || 'N/A' }}</p>
@@ -127,11 +141,14 @@ onMounted(loadFavorites)
         <div v-if="!favoritesLoaded" class="empty">加载中...</div>
         <div v-else-if="favorites.length === 0" class="empty">暂无自选股</div>
         <div v-for="item in favorites" :key="item.symbol" class="fav-item" @click="goDetail(item.symbol)">
-          <div>
-            <strong>{{ item.symbol }}</strong>
+          <div class="fav-info">
+            <strong>{{ item.name || item.symbol }}<small class="symbol-code">{{ item.name ? item.symbol : "" }}</small></strong>
             <span class="fav-price">${{ item.price || "N/A" }}</span>
           </div>
-          <button class="del-btn" @click.stop="remove(item.symbol)">删除</button>
+          <div class="fav-actions">
+            <button class="alert-btn" @click.stop="goAddAlert(item.symbol)" title="为 {{ item.name || item.symbol }} 添加预警">+ 预警</button>
+            <button class="del-btn" @click.stop="remove(item.symbol)">删除</button>
+          </div>
         </div>
       </section>
     </main>
@@ -145,13 +162,27 @@ header h1 { margin: 0; font-size: 20px; }
 .header-actions { display: flex; gap: 8px; }
 .nav-btn { background: rgba(255,255,255,0.15); border: none; color: white; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; transition: background 0.2s; }
 .nav-btn:hover { background: rgba(255,255,255,0.25); }
+.badge-btn { position: relative; }
+.unread-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  background: #ff4d4f;
+  color: white;
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: 9px;
+  min-width: 16px;
+  text-align: center;
+}
 main { max-width: 640px; margin: 0 auto; padding: 24px 16px; }
 
 .search-section { display: flex; gap: 8px; margin-bottom: 20px; align-items: flex-start; }
 .search-section button { padding: 10px 20px; background: #1677ff; color: white; border: none; border-radius: 4px; cursor: pointer; white-space: nowrap; flex-shrink: 0; }
 .stock-card { background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.1); }
 .price-main { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
-.symbol { font-size: 24px; font-weight: bold; }
+.symbol { font-size: 24px; font-weight: bold; display: flex; align-items: baseline; gap: 8px; }
 .price { font-size: 28px; font-weight: bold; color: #52c41a; }
 .update-time { color: #888; font-size: 13px; margin-bottom: 12px; }
 .buy-inputs { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
@@ -162,7 +193,13 @@ main { max-width: 640px; margin: 0 auto; padding: 24px 16px; }
 .favorites h2 { font-size: 18px; margin-bottom: 12px; }
 .empty { color: #999; text-align: center; padding: 32px; }
 .fav-item { background: white; border-radius: 6px; padding: 12px 16px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 1px 4px rgba(0,0,0,0.08); cursor: pointer; }
+.fav-info { display: flex; align-items: center; }
+.fav-info strong { display: flex; align-items: baseline; gap: 8px; }
+.symbol-code { font-size: 13px; color: #999; font-weight: normal; }
+.fav-actions { display: flex; gap: 8px; }
 .fav-price { margin-left: 12px; color: #52c41a; font-weight: bold; }
+.alert-btn { padding: 4px 12px; background: #fa8c16; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
+.alert-btn:hover { background: #ffa940; }
 .del-btn { padding: 4px 12px; background: #ff4d4f; color: white; border: none; border-radius: 4px; cursor: pointer; }
 .error { color: #ff4d4f; margin-bottom: 12px; }
 </style>

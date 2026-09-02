@@ -41,7 +41,6 @@ public class AuthService {
                 .email(request.getEmail() != null && !request.getEmail().isBlank()
                         ? request.getEmail() : request.getUsername() + "@stocktracker.local")
                 .phone(request.getPhone())
-                .qqNumber(null)
                 .role(Role.USER)
                 .build();
 

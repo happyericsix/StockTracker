@@ -1,4 +1,4 @@
-﻿package com.happyericsix.stocktracker.dto;
+package com.happyericsix.stocktracker.dto;
 
 public class FavoriteStockRequest {
     private String symbol;

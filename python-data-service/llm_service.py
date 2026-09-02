@@ -80,7 +80,7 @@ def parse_intent(message: str, history: Optional[list[dict]] = None) -> dict:
     """
     用 LLM 解析用户意图，返回结构化操作计划 dict。
 
-    对于非系统命令（绑定/解绑/帮助之外），让 LLM 做"意图识别 + 实体提取"，
+    对于非系统命令（帮助之外），让 LLM 做"意图识别 + 实体提取"，
     替代传统的规则关键词匹配。
 
     Args:
@@ -90,7 +90,7 @@ def parse_intent(message: str, history: Optional[list[dict]] = None) -> dict:
     Returns:
         {
             "action": "get_quote" | "analyze" | "history" |
-                      "watchlist" | "search_history" | "compare" | "chat",
+                      "watchlist" | "compare" | "chat",
             ...action 特定字段
         }
         失败时返回 {"action": "chat", "reply": "..."}
@@ -152,11 +152,9 @@ _INTENT_SYSTEM_PROMPT = """你是股小盯的意图识别器。把用户消息�
    {"action": "history", "symbol": "比亚迪", "days": 30}
 4. watchlist - 自选股
    {"action": "watchlist"}
-5. search_history - 搜历史对话
-   {"action": "search_history", "query": "新能源股"}
-6. compare - 对比多只股票
+5. compare - 对比多只股票
    {"action": "compare", "symbols": ["茅台", "五粮液"], "aspects": ["price", "trend"]}
-7. chat - 闲聊或追问（不知道用户要什么时）
+6. chat - 闲聊或追问（不知道用户要什么时）
    {"action": "chat", "reply": "你好呀"}
 
 ## 规则
@@ -324,15 +322,15 @@ def _simple_greet(msg: str) -> str:
     if "你是" in msg or "你是什么" in msg:
         return "我是股小盯，一个股票对话机器人，可以帮你查行情、做技术分析"
     if "帮助" in msg or "help" in msg.lower() or "?" in msg:
-        return "试试这些：\n📌 茅台行情\n📌 600519 技术分析\n📌 我的自选股\n📌 绑定 888888（绑定 QQ）"
+        return "试试这些：\n📌 茅台行情\n📌 600519 技术分析\n📌 我的自选股"
     return "收到～可以试试问「茅台行情」「宁德时代能买吗」"
 
 
 # ===== 工具方法：消息切分 =====
 
-def split_for_qq(text: str, max_len: int = 400) -> list[str]:
+def split_replies(text: str, max_len: int = 400) -> list[str]:
     """
-    把长文本切成 QQ 单条消息（默认 400 字/条）
+    把长文本切分成多条回复（默认 400 字/条）
 
     优先在换行处切，其次在句号处切
     """
@@ -355,4 +353,3 @@ def split_for_qq(text: str, max_len: int = 400) -> list[str]:
     if remaining:
         chunks.append(remaining)
     return chunks
-

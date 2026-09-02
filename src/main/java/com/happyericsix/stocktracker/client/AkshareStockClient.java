@@ -1,5 +1,6 @@
 package com.happyericsix.stocktracker.client;
 
+import com.happyericsix.stocktracker.dto.DailyStockResponse;
 import com.happyericsix.stocktracker.dto.StockHistoryResponse;
 import com.happyericsix.stocktracker.dto.StockOverviewResponse;
 import com.happyericsix.stocktracker.dto.StockQuoteResponse;
@@ -96,7 +97,7 @@ public class AkshareStockClient {
 
     private StockQuoteResponse emptyQuote(String symbol) {
         return new StockQuoteResponse(
-                new StockQuoteResponse.GlobalQuote(symbol, null, java.time.LocalDate.now().toString()),
+                new StockQuoteResponse.GlobalQuote(symbol, null, java.time.LocalDate.now().toString(), symbol),
                 null
         );
     }
@@ -126,18 +127,52 @@ public class AkshareStockClient {
     // ==================== 历史 K 线 ====================
 
     public StockHistoryResponse getStockHistory(String symbol) {
+        return getStockHistory(symbol, "day");
+    }
+
+    /**
+     * @param period day / week / month
+     */
+    public StockHistoryResponse getStockHistory(String symbol, String period) {
         try {
+            final String p = (period == null || period.isBlank()) ? "day" : period;
             return webClient.get()
-                    .uri("/api/v1/history/{symbol}", symbol)
+                    .uri(uriBuilder -> uriBuilder.path("/api/v1/history/{symbol}")
+                            .queryParam("period", p)
+                            .build(symbol))
                     .retrieve()
                     .bodyToMono(StockHistoryResponse.class)
                     .block();
         } catch (WebClientResponseException e) {
-            log.warn("akshare history error for {}: HTTP {} {}", symbol, e.getStatusCode(), e.getResponseBodyAsString());
+            log.warn("akshare history error for {} (period={}): HTTP {} {}", symbol, period, e.getStatusCode(), e.getResponseBodyAsString());
             return emptyHistory(symbol);
         } catch (Exception e) {
-            log.warn("akshare history exception for {}: {}", symbol, e.getMessage());
+            log.warn("akshare history exception for {} (period={}): {}", symbol, period, e.getMessage());
             return emptyHistory(symbol);
+        }
+    }
+
+    /**
+     * 分钟 K 线（仅 A 股），akshare 数据源
+     * @param period 1 / 5 / 15 / 30 / 60
+     */
+    public List<DailyStockResponse> getStockMinuteHistory(String symbol, int period) {
+        try {
+            List<DailyStockResponse> data = webClient.get()
+                    .uri(uriBuilder -> uriBuilder.path("/api/v1/minute/{symbol}")
+                            .queryParam("period", period)
+                            .build(symbol))
+                    .retrieve()
+                    .bodyToFlux(DailyStockResponse.class)
+                    .collectList()
+                    .block();
+            return data == null ? List.of() : data;
+        } catch (WebClientResponseException e) {
+            log.warn("akshare minute error for {} (period={}): HTTP {} {}", symbol, period, e.getStatusCode(), e.getResponseBodyAsString());
+            return List.of();
+        } catch (Exception e) {
+            log.warn("akshare minute exception for {} (period={}): {}", symbol, period, e.getMessage());
+            return List.of();
         }
     }
 
@@ -146,5 +181,29 @@ public class AkshareStockClient {
                 new StockHistoryResponse.MetaData(symbol),
                 java.util.Map.of()
         );
+    }
+
+    // ==================== 技术指标（RSI / MACD / 布林带）====================
+
+    /**
+     * 调 Python 服务 /api/v1/indicators/{symbol} 拿量化分析结果
+     * 返回 Map 含: indicators.rsi, indicators.macd.{dif,dea,hist}, indicators.bollinger 等
+     * 失败时返回 null，由调用方处理降级（指标类预警不触发即可）
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> getStockIndicators(String symbol) {
+        try {
+            return webClient.get()
+                    .uri("/api/v1/indicators/{symbol}", symbol)
+                    .retrieve()
+                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                    .block();
+        } catch (WebClientResponseException e) {
+            log.warn("akshare indicators error for {}: HTTP {} {}", symbol, e.getStatusCode(), e.getResponseBodyAsString());
+            return null;
+        } catch (Exception e) {
+            log.warn("akshare indicators exception for {}: {}", symbol, e.getMessage());
+            return null;
+        }
     }
 }

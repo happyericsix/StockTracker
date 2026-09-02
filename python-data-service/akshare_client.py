@@ -26,6 +26,9 @@ def normalize_symbol(symbol: str) -> str:
         return f"sz{s}"
     elif s.startswith("8") or s.startswith("4") or s.startswith("92"):
         return f"bj{s}"
+    elif s.isalpha() and s.isascii():
+        # 美股代码（纯字母，如 AAPL/TSLA）→ 腾讯 API 需要 us 前缀
+        return f"us{s.lower()}"
     return s
 
 
@@ -105,6 +108,14 @@ _quote_cache_lock = threading.Lock()
 QUOTE_CACHE_TTL = 15  # 秒
 
 
+# ==================== K线历史缓存（1h TTL） ====================
+# K线历史是收盘价，白天几乎不变；分钟 K 单独 30s TTL（盘中要近实时）
+_history_cache: dict[tuple, tuple[float, list[dict]]] = {}
+_history_cache_lock = threading.Lock()
+HISTORY_CACHE_TTL = 3600  # 日/周/月 K：1 小时
+MINUTE_CACHE_TTL = 30     # 分钟 K：30 秒
+
+
 def get_quote(symbol: str) -> Optional[dict]:
     """获取实时行情（腾讯单股 API，毫秒级），带 15s 缓存。
 
@@ -166,11 +177,28 @@ def get_quote(symbol: str) -> Optional[dict]:
         return None
 
 
-def get_history(symbol: str, start_date: str = "", end_date: str = "") -> Optional[list[dict]]:
-    """获取日线 K 线历史（腾讯 ifzq API）。
+def get_history(symbol: str, start_date: str = "", end_date: str = "", period: str = "day") -> Optional[list[dict]]:
+    """获取 K 线历史（腾讯 ifzq API），带 1 小时缓存。
 
-    支持: 数字代码 / 带前缀 / 中文名 / 美股（A 股和港股，美股没数据会返回 None）
+    Args:
+        symbol: 股票代码/名称
+        period: 周期，可选 day / week / month（默认 day）
     """
+    period = (period or "day").lower()
+    if period not in ("day", "week", "month"):
+        logger.warning("不支持的 period: %s，回退为 day", period)
+        period = "day"
+
+    # 1. 查缓存
+    cache_key = (symbol, period)
+    now = time.time()
+    with _history_cache_lock:
+        if cache_key in _history_cache:
+            ts, cached = _history_cache[cache_key]
+            if now - ts < HISTORY_CACHE_TTL:
+                return cached
+            del _history_cache[cache_key]
+
     try:
         resolved = resolve_symbol(symbol)
         if not resolved:
@@ -178,7 +206,7 @@ def get_history(symbol: str, start_date: str = "", end_date: str = "") -> Option
             return None
         code = normalize_symbol(resolved)
         url = "http://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-        params = {"param": f"{code},day,,,500,qfq"}
+        params = {"param": f"{code},{period},,,500,qfq"}
         r = requests.get(url, params=params, headers=HEADERS, timeout=15)
         data = r.json()
 
@@ -186,10 +214,10 @@ def get_history(symbol: str, start_date: str = "", end_date: str = "") -> Option
         klines = None
         if code_key in data.get("data", {}):
             day_data = data["data"][code_key]
-            klines = day_data.get("qfqday") or day_data.get("day")
+            klines = day_data.get(f"qfq{period}") or day_data.get(period)
 
         if not klines:
-            logger.warning("历史数据为空: %s (resolved=%s)", symbol, code)
+            logger.warning("历史数据为空: %s (period=%s, code=%s)", symbol, period, code)
             return None
 
         records = []
@@ -198,9 +226,71 @@ def get_history(symbol: str, start_date: str = "", end_date: str = "") -> Option
                 "date": str(k[0]), "open": str(k[1]), "close": str(k[2]),
                 "high": str(k[3]), "low": str(k[4]), "volume": str(k[5]),
             })
+
+        # 2. 写缓存
+        with _history_cache_lock:
+            _history_cache[cache_key] = (now, records)
         return records
     except Exception as e:
-        logger.error("get_history 异常: %s -> %s", symbol, e)
+        logger.error("get_history 异常: %s (period=%s) -> %s", symbol, period, e)
+        return None
+
+
+def get_minute_kline(symbol: str, period: int = 5) -> Optional[list[dict]]:
+    """获取分钟 K 线（akshare），带 30 秒缓存。
+
+    Args:
+        symbol: 股票代码（如 600519 / sh600519 / 茅台）
+        period: 分钟周期，可选 1 / 5 / 15 / 30 / 60
+    """
+    if period not in (1, 5, 15, 30, 60):
+        logger.warning("不支持的分钟周期: %s，回退为 5", period)
+        period = 5
+
+    # 1. 查缓存
+    cache_key = (symbol, f"m{period}")
+    now = time.time()
+    with _history_cache_lock:
+        if cache_key in _history_cache:
+            ts, cached = _history_cache[cache_key]
+            if now - ts < MINUTE_CACHE_TTL:
+                return cached
+            del _history_cache[cache_key]
+
+    try:
+        resolved = resolve_symbol(symbol)
+        if not resolved:
+            logger.warning("无法识别股票代码/名称: %s", symbol)
+            return None
+        # akshare minute kline (sina source) requires exchange prefix, e.g. sh600519 / sz000001 / bj430047
+        code = normalize_symbol(resolved).lower()
+        if not (code.startswith(("sh", "sz", "bj")) and len(code) == 8 and code[2:].isdigit()):
+            logger.warning("分钟 K 仅支持 A 股: %s", symbol)
+            return None
+
+        # use raw prices: qfq merge makes today's unfinished bars NaN, hiding the current price
+        df = akshare.stock_zh_a_minute(symbol=code, period=str(period), adjust="")
+        if df is None or df.empty:
+            logger.warning("分钟 K 数据为空: %s (period=%s)", symbol, period)
+            return None
+
+        records = []
+        for _, row in df.iterrows():
+            records.append({
+                "date": str(row["day"]),
+                "open": str(row["open"]),
+                "close": str(row["close"]),
+                "high": str(row["high"]),
+                "low": str(row["low"]),
+                "volume": str(row.get("volume", 0)),
+            })
+
+        # 2. 写缓存
+        with _history_cache_lock:
+            _history_cache[cache_key] = (now, records)
+        return records
+    except Exception as e:
+        logger.error("get_minute_kline 异常: %s (period=%s) -> %s", symbol, period, e)
         return None
 
 

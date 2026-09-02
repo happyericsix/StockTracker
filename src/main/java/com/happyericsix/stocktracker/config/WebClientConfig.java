@@ -14,4 +14,12 @@ public class WebClientConfig {
     public WebClient.Builder akshareWebClientBuilder() {
         return WebClient.builder();
     }
+
+    /** 站内聊天机器人：调用 Python LLM 服务（/api/v1/chat） */
+    @Bean
+    public WebClient llmWebClient() {
+        return WebClient.builder()
+                .baseUrl("http://localhost:8000")
+                .build();
+    }
 }

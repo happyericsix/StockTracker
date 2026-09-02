@@ -109,7 +109,7 @@ const selectItem = (item) => {
   emit('update:modelValue', item.code)
   addToHistory(item.code, item.name)
   showDropdown.value = false
-  router.push('/stock/' + item.code)
+  router.push('/chart/' + item.code)
 }
 
 const selectRecent = (item) => selectItem(item)

@@ -10,8 +10,10 @@ from datetime import date, timedelta
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from akshare_client import get_quote, get_history, get_overview, search_stocks
-from quant_model import analyze_stock
+from akshare_client import get_quote, get_history, get_minute_kline, get_overview, search_stocks
+# 注意:quant_model(用了 sklearn) 改成 lazy import,
+# 避免启动时因 sklearn 缺失导致整个 app 挂掉
+# 真正的 import 在用到 analyze_stock 的 endpoint 函数里
 from models import StockQuoteResponse, GlobalQuote, StockHistoryResponse, MetaData, DailyPrice, StockOverviewResponse
 
 logging.basicConfig(
@@ -68,7 +70,8 @@ def stock_quote(symbol: str):
     today_str = str(date.today())
 
     return StockQuoteResponse(
-        globalQuote=GlobalQuote(symbol=symbol, price=price, lastTradingDay=today_str),
+        globalQuote=GlobalQuote(symbol=symbol, price=price, lastTradingDay=today_str,
+                                name=data.get("名称", symbol)),
     )
 
 
@@ -79,8 +82,9 @@ def stock_history(
     symbol: str,
     start_date: str = Query(default="", description="起始日期 yyyyMMdd"),
     end_date: str = Query(default="", description="结束日期 yyyyMMdd"),
+    period: str = Query(default="day", description="周期：day / week / month"),
 ):
-    records = get_history(symbol, start_date=start_date, end_date=end_date)
+    records = get_history(symbol, start_date=start_date, end_date=end_date, period=period)
     if records is None:
         return StockHistoryResponse(metaData=MetaData(symbol=symbol), timeSeries={})
 
@@ -94,6 +98,34 @@ def stock_history(
         )
 
     return StockHistoryResponse(metaData=MetaData(symbol=symbol), timeSeries=time_series)
+
+
+# ==================== 分钟 K 线（A 股）====================
+
+@app.get("/api/v1/minute/{symbol}")
+def stock_minute(
+    symbol: str,
+    period: int = Query(default=5, description="分钟周期：1 / 5 / 15 / 30 / 60"),
+):
+    """返回 A 股分钟 K 线（akshare 数据源）。仅支持 A 股。直接返回 list，兼容 DailyStockResponse。"""
+    records = get_minute_kline(symbol, period=period)
+    if records is None:
+        return []
+    out = []
+    for r in records:
+        try:
+            out.append({
+                "date": r.get("date", ""),
+                # 保留数据源原始小数位（如 "1296.300"），转 float 会丢尾零
+                "open": str(r.get("open", "0")),
+                "close": str(r.get("close", "0")),
+                "high": str(r.get("high", "0")),
+                "low": str(r.get("low", "0")),
+                "volume": int(float(r.get("volume", 0))),
+            })
+        except (ValueError, TypeError):
+            continue
+    return out
 
 
 # ==================== 基本面概况 ====================
@@ -122,6 +154,8 @@ def stock_overview(symbol: str):
 def stock_indicators(symbol: str):
     """量化指标分析 + ML 预测"""
     try:
+        # lazy import:避免启动时因 sklearn 缺失导致整个 app 挂掉
+        from quant_model import analyze_stock
         records = get_history(symbol)
         if records is None or len(records) < 20:
             return {"symbol": symbol, "error": "历史数据不足 20 条"}
@@ -160,6 +194,8 @@ def run_backtest_endpoint(
     """
     try:
         from backtest import run_comprehensive_backtest, BacktestEngine
+        # lazy import:同上,analyze_stock 也可能缺依赖
+        from quant_model import analyze_stock
 
         records = get_history(symbol)
         if not records or len(records) < 20:
@@ -246,30 +282,34 @@ def models_summary(symbol: str = Query(default=None, description="可选：按�
         return {"error": str(e)}
 
 
-# ==================== QQ Bot 接口 ====================
+# ==================== 聊天助手接口 ====================
 
-import qq_handler
+# 注意:chat_handler 改成 lazy import,避免它的依赖缺失导致整个 app 挂掉
+# 真正用到它的地方在 chat_webhook 函数内部
 
 
-@app.post("/qq_msg")
-async def qq_webhook(req: Request):
+@app.post("/api/v1/chat")
+async def chat_webhook(req: Request):
     """
-    接收 qq_standalone.py 转发的 QQ 消息
+    站内聊天助手入口
 
     数据流向:
-      NapCat → qq_standalone.py (3003) → 本接口 → qq_handler 处理 → 返回 replies
+      前端 Assistant → Spring Boot ChatService → 本接口 → chat_handler 处理 → 返回 replies
     """
+    # lazy import:只在这个 endpoint 被调用时才加载 chat_handler
+    import chat_handler
+
     data = await req.json()
     user_id = str(data.get("user_id", "")).strip()
     message = data.get("message", "").strip()
-    logger.info(f"QQ webhook [{user_id}]: {message[:80]}")
+    logger.info(f"chat webhook [{user_id}]: {message[:80]}")
 
     if not message or not user_id:
         return {"replies": []}
 
     try:
-        replies = await asyncio.to_thread(qq_handler.handle_message, user_id, message)
+        replies = await asyncio.to_thread(chat_handler.handle_message, user_id, message)
         return {"replies": replies}
     except Exception as e:
-        logger.error(f"QQ 消息处理异常: {e}", exc_info=True)
+        logger.error(f"聊天处理异常: {e}", exc_info=True)
         return {"replies": ["⚠️ 处理出错了，稍后再试"]}

@@ -57,8 +57,20 @@ public class StockController {
     public PagedResponse<DailyStockResponse> getStockHistory(
             @PathVariable String stockSymbol,
             @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "30") int size) {
-        return stockService.getHistoryPaged(stockSymbol.toUpperCase(), page, size);
+            @RequestParam(defaultValue = "30") int size,
+            @RequestParam(defaultValue = "day") String period) {
+        return stockService.getHistoryPaged(stockSymbol.toUpperCase(), page, size, period);
+    }
+
+    /**
+     * 分钟 K 线（仅 A 股）
+     * @param period 1 / 5 / 15 / 30 / 60
+     */
+    @GetMapping("/{stockSymbol}/minute")
+    public List<DailyStockResponse> getStockMinuteKline(
+            @PathVariable String stockSymbol,
+            @RequestParam(defaultValue = "5") int period) {
+        return stockService.getMinuteKline(stockSymbol.toUpperCase(), period);
     }
 
     @PostMapping("/favorites")

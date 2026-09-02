@@ -1,0 +1,659 @@
+<script setup>
+import { ref, onMounted, onUnmounted, nextTick, watch, computed } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { getHistory, getMinuteKline, getStock } from '../api/stock.js'
+import * as echarts from 'echarts'
+
+const route = useRoute()
+const router = useRouter()
+
+// ============ 状态 ============
+const symbol = ref((route.params.symbol || '600519').toUpperCase())
+
+// 周期：day / week / month / minute
+const period = ref('day')
+const periods = [
+  { label: '日K', value: 'day' },
+  { label: '周K', value: 'week' },
+  { label: '月K', value: 'month' },
+  { label: '分时', value: 'minute' }
+]
+
+// 分钟 K 周期：1/5/15/30/60
+const minutePeriod = ref(5)
+const minuteOptions = [
+  { label: '1分', value: 1 },
+  { label: '5分', value: 5 },
+  { label: '15分', value: 15 },
+  { label: '30分', value: 30 },
+  { label: '60分', value: 60 }
+]
+
+// K 线显示根数（不同周期给不同默认）
+const range = ref(180)
+const ranges = computed(() => {
+  if (period.value === 'day') return [
+    { label: '1月', value: 30 }, { label: '3月', value: 90 },
+    { label: '6月', value: 180 }, { label: '1年', value: 365 },
+    { label: '2年', value: 730 }, { label: '全部', value: 1000 }
+  ]
+  if (period.value === 'week') return [
+    { label: '半年', value: 26 }, { label: '1年', value: 52 },
+    { label: '3年', value: 156 }, { label: '5年', value: 260 },
+    { label: '10年', value: 520 }, { label: '全部', value: 1000 }
+  ]
+  if (period.value === 'month') return [
+    { label: '1年', value: 12 }, { label: '3年', value: 36 },
+    { label: '5年', value: 60 }, { label: '10年', value: 120 },
+    { label: '20年', value: 240 }, { label: '全部', value: 1000 }
+  ]
+  // minute
+  return [
+    { label: '1天', value: 48 }, { label: '2天', value: 96 },
+    { label: '5天', value: 240 }, { label: '1周', value: 480 }
+  ]
+})
+
+// 图表类型：candlestick / line / ohlc
+const chartType = ref('candlestick')
+const chartTypes = [
+  { label: '蜡烛', value: 'candlestick' },
+  { label: '折线', value: 'line' },
+  { label: 'OHLC', value: 'ohlc' }
+]
+
+// 技术指标摘要（不画历史曲线，只显示当前值）
+const indicators = ref(null)
+
+const loading = ref(false)
+const error = ref('')
+const stockInfo = ref(null)
+const lastUpdate = ref('')
+
+const chartRef = ref(null)
+let chart = null
+
+const handleResize = () => chart?.resize()
+
+const disposeChart = () => {
+  if (chart) {
+    chart.dispose()
+    chart = null
+  }
+  window.removeEventListener('resize', handleResize)
+}
+
+// ============ 工具函数 ============
+const calcMA = (data, n) => {
+  const result = []
+  for (let i = 0; i < data.length; i++) {
+    if (i < n - 1) result.push('-')
+    else {
+      let sum = 0
+      for (let j = i - n + 1; j <= i; j++) sum += +data[j].close
+      result.push(+(sum / n).toFixed(2))
+    }
+  }
+  return result
+}
+
+// 简易技术指标计算（基于已有 K 线，不调新接口）
+const calcIndicators = (data) => {
+  if (data.length < 20) return null
+  const closes = data.map(d => +d.close)
+
+  // RSI(14)
+  const rsi = (() => {
+    let gains = 0, losses = 0
+    for (let i = closes.length - 14; i < closes.length; i++) {
+      const diff = closes[i] - closes[i - 1]
+      if (diff > 0) gains += diff
+      else losses -= diff
+    }
+    if (gains + losses === 0) return 50
+    const rs = gains / 14 / (losses / 14 || 1e-9)
+    return +(100 - 100 / (1 + rs)).toFixed(2)
+  })()
+
+  // MACD(12, 26, 9)
+  const ema = (arr, n) => {
+    const k = 2 / (n + 1)
+    const out = [arr[0]]
+    for (let i = 1; i < arr.length; i++) out.push(arr[i] * k + out[i - 1] * (1 - k))
+    return out
+  }
+  const ema12 = ema(closes, 12)
+  const ema26 = ema(closes, 26)
+  const dif = +(ema12[ema12.length - 1] - ema26[ema26.length - 1]).toFixed(3)
+  // 简化：DIF/DEA 用最近 9 个 DIF 的 EMA 近似
+  const difArr = ema12.map((v, i) => v - ema26[i])
+  const deaArr = ema(difArr, 9)
+  const dea = +deaArr[deaArr.length - 1].toFixed(3)
+  const hist = +((dif - dea) * 2).toFixed(3)
+
+  // 布林带(20, 2)
+  const n = 20
+  const slice = closes.slice(-n)
+  const ma = slice.reduce((a, b) => a + b, 0) / n
+  const variance = slice.reduce((a, b) => a + (b - ma) ** 2, 0) / n
+  const std = Math.sqrt(variance)
+  const upper = +(ma + 2 * std).toFixed(2)
+  const middle = +ma.toFixed(2)
+  const lower = +(ma - 2 * std).toFixed(2)
+
+  return { rsi, macd: { dif, dea, hist }, bollinger: { upper, middle, lower } }
+}
+
+// ============ 数据加载 ============
+const loadData = async (sym) => {
+  error.value = ''
+  loading.value = true
+  stockInfo.value = null
+  indicators.value = null
+  lastUpdate.value = ''
+  disposeChart()
+
+  try {
+    // 行情：分钟模式下用最近一个数据点的 close
+    const stockRes = await getStock(sym).catch(() => null)
+    stockInfo.value = stockRes?.data ?? null
+
+    let list = []
+    if (period.value === 'minute') {
+      const res = await getMinuteKline(sym, minutePeriod.value).catch(() => null)
+      // 后端返回的是 List<DailyStockResponse>，res.data 直接是 list
+      const data = Array.isArray(res?.data) ? res.data : (Array.isArray(res) ? res : [])
+      list = data.map(r => ({
+        date: r.date, open: r.open, close: r.close, high: r.high, low: r.low, volume: r.volume
+      }))
+    } else {
+      // 拉 size=1000 让前端按 range 切；分页 size 给 1000 一次性拉够
+      const historyRes = await getHistory(sym, 0, 1000, period.value).catch(() => null)
+      list = historyRes?.data?.content || []
+    }
+
+    if (list.length === 0) {
+      error.value = period.value === 'minute'
+        ? '暂无分钟K线数据（仅支持 A 股，分钟 K 由 akshare 提供）'
+        : '暂无 K 线数据，请检查股票代码或稍后重试'
+      loading.value = false
+      return
+    }
+
+    // 后端返回正序（旧->新），直接取最近 range 根
+    const data = list.slice(-range.value)
+
+    // 分钟 K 模式下没有实时 quote，stockInfo 拿不到 close
+    if (period.value === 'minute' && data.length > 0) {
+      const last = data[data.length - 1]
+      stockInfo.value = stockInfo.value || {}
+      stockInfo.value.price = last.close
+    }
+
+    indicators.value = calcIndicators(data)
+    lastUpdate.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+
+    await nextTick()
+    if (!chartRef.value) return
+
+    chart = echarts.init(chartRef.value)
+    renderChart(sym, data)
+    window.addEventListener('resize', handleResize)
+  } catch (e) {
+    error.value = '加载失败：' + (e?.message || '未知错误')
+  } finally {
+    loading.value = false
+  }
+}
+
+// ============ 图表渲染 ============
+const renderChart = (sym, data) => {
+  const dates = data.map(d => d.date)
+  const isMinute = period.value === 'minute'
+
+  // series 数据准备
+  const series = []
+  const legend = []
+
+  if (chartType.value === 'candlestick') {
+    const kline = data.map(d => [+d.open, +d.close, +d.low, +d.high])
+    series.push({
+      name: 'K线', type: 'candlestick', data: kline,
+      tooltip: { valueFormatter: (v) => v.map(x => (+x).toFixed(3)).join(' / ') },
+      itemStyle: {
+        color: '#ff4d4f', color0: '#52c41a',
+        borderColor: '#ff4d4f', borderColor0: '#52c41a'
+      }
+    })
+    legend.push('K线')
+  } else if (chartType.value === 'line') {
+    const closes = data.map(d => +d.close)
+    // 分时/分钟K的 close 就是该时间点的最新成交价（当时的价格）
+    const lineName = isMinute ? '价格' : '收盘价'
+    series.push({
+      name: lineName, type: 'line', data: closes,
+      tooltip: { valueFormatter: (v) => (+v).toFixed(3) },
+      smooth: true, showSymbol: false,
+      lineStyle: { width: 2, color: '#1677ff' },
+      areaStyle: { color: 'rgba(22,119,255,0.08)' }
+    })
+    legend.push(lineName)
+  } else { // ohlc
+    const ohlc = data.map(d => [+d.open, +d.close, +d.low, +d.high])
+    series.push({
+      name: 'OHLC', type: 'candlestick', data: ohlc,
+      tooltip: { valueFormatter: (v) => v.map(x => (+x).toFixed(3)).join(' / ') },
+      renderItem: (params, api) => {
+        const open = api.value(0)
+        const close = api.value(1)
+        const low = api.value(2)
+        const high = api.value(3)
+        const halfWidth = Math.max(2, api.size([1, 0])[0] * 0.3)
+        const isUp = close >= open
+        const color = isUp ? '#ff4d4f' : '#52c41a'
+        return {
+          type: 'group',
+          children: [
+            // 高低竖线
+            { type: 'line', shape: { x1: api.coord([api.value(0), low])[0], y1: api.coord([api.value(0), low])[1],
+                                       x2: api.coord([api.value(0), high])[0], y2: api.coord([api.value(0), high])[1] },
+              style: { stroke: color, lineWidth: 1 } },
+            // open 水平线（左）
+            { type: 'line', shape: { x1: api.coord([api.value(0), open])[0] - halfWidth, y1: api.coord([api.value(0), open])[1],
+                                       x2: api.coord([api.value(0), open])[0], y2: api.coord([api.value(0), open])[1] },
+              style: { stroke: color, lineWidth: 1 } },
+            // close 水平线（右）
+            { type: 'line', shape: { x1: api.coord([api.value(0), close])[0], y1: api.coord([api.value(0), close])[1],
+                                       x2: api.coord([api.value(0), close])[0] + halfWidth, y2: api.coord([api.value(0), close])[1] },
+              style: { stroke: color, lineWidth: 1 } }
+          ]
+        }
+      }
+    })
+    legend.push('OHLC')
+  }
+
+  // 均线（仅日/周/月 K 显示，分钟 K 噪点多意义不大）
+  if (!isMinute && data.length >= 5) {
+    const ma5 = calcMA(data, 5)
+    const ma10 = calcMA(data, 10)
+    const ma20 = calcMA(data, 20)
+    const ma60 = data.length >= 60 ? calcMA(data, 60) : null
+    const push = (name, arr, color) => series.push({
+      name, type: 'line', data: arr, smooth: true, showSymbol: false,
+      tooltip: { valueFormatter: (v) => (+v).toFixed(3) },
+      lineStyle: { width: 1, color }
+    })
+    push('MA5', ma5, '#ffa940'); legend.push('MA5')
+    push('MA10', ma10, '#1677ff'); legend.push('MA10')
+    push('MA20', ma20, '#722ed1'); legend.push('MA20')
+    if (ma60) { push('MA60', ma60, '#13c2c2'); legend.push('MA60') }
+  }
+
+  // 布林带（仅日/周/月）
+  if (!isMinute && data.length >= 20) {
+    const n = 20
+    const closes = data.map(d => +d.close)
+    const upper = [], middle = [], lower = []
+    for (let i = 0; i < closes.length; i++) {
+      if (i < n - 1) { upper.push('-'); middle.push('-'); lower.push('-'); continue }
+      const slice = closes.slice(i - n + 1, i + 1)
+      const m = slice.reduce((a, b) => a + b, 0) / n
+      const v = slice.reduce((a, b) => a + (b - m) ** 2, 0) / n
+      const s = Math.sqrt(v)
+      upper.push(+(m + 2 * s).toFixed(2))
+      middle.push(+m.toFixed(2))
+      lower.push(+(m - 2 * s).toFixed(2))
+    }
+    const bollFmt = { valueFormatter: (v) => (+v).toFixed(3) }
+    series.push({ name: 'BOLL上', type: 'line', data: upper, showSymbol: false, tooltip: bollFmt, lineStyle: { width: 1, color: '#eb2f96', opacity: 0.6 } })
+    series.push({ name: 'BOLL中', type: 'line', data: middle, showSymbol: false, tooltip: bollFmt, lineStyle: { width: 1, color: '#eb2f96', type: 'dashed' } })
+    series.push({ name: 'BOLL下', type: 'line', data: lower, showSymbol: false, tooltip: bollFmt, lineStyle: { width: 1, color: '#eb2f96', opacity: 0.6 } })
+    legend.push('BOLL上', 'BOLL中', 'BOLL下')
+  }
+
+  // 成交量
+  const volumes = data.map((d, i) => [
+    i, +d.volume || 0,
+    +d.close >= +d.open ? 1 : -1
+  ])
+
+  const subPeriodLabel = isMinute ? `${minutePeriod.value}分K` : { day: '日K', week: '周K', month: '月K' }[period.value]
+  const stockName = stockInfo.value?.name || sym
+  const priceStr = stockInfo.value?.price ? `$${stockInfo.value.price}` : (data.length ? `$${data[data.length-1].close}` : 'N/A')
+
+  chart.setOption({
+    title: {
+      text: `${stockName} ${subPeriodLabel}`,
+      subtext: `当前价: ${priceStr}  |  更新: ${lastUpdate.value}`,
+      left: 'center',
+      textStyle: { fontSize: 16, fontWeight: 600 },
+      subtextStyle: { fontSize: 12 }
+    },
+    tooltip: {
+      trigger: 'axis', axisPointer: { type: 'cross' },
+      backgroundColor: 'rgba(50, 50, 50, 0.9)', borderWidth: 0,
+      textStyle: { color: '#fff', fontSize: 12 }
+    },
+    legend: { data: legend, top: 30, textStyle: { fontSize: 12 } },
+    grid: [
+      { left: 50, right: 20, top: 70, height: '60%' },
+      { left: 50, right: 20, top: '76%', height: '14%' }
+    ],
+    xAxis: [
+      { type: 'category', data: dates, scale: true, boundaryGap: false,
+        axisLine: { onZero: false }, splitLine: { show: false },
+        axisLabel: { formatter: (v) => isMinute ? v.substring(5) : v.substring(5), fontSize: 11 },
+        axisPointer: { z: 100 }
+      },
+      { type: 'category', gridIndex: 1, data: dates, scale: true, boundaryGap: false,
+        axisLine: { onZero: false }, axisTick: { show: false },
+        axisLabel: { show: false }, splitLine: { show: false } }
+    ],
+    yAxis: [
+      { scale: true, splitArea: { show: true }, splitLine: { lineStyle: { type: 'dashed' } } },
+      { scale: true, gridIndex: 1, splitNumber: 2, axisLabel: { show: false },
+        axisLine: { show: false }, axisTick: { show: false }, splitLine: { show: false } }
+    ],
+    dataZoom: [
+      { type: 'inside', xAxisIndex: [0, 1], start: 50, end: 100 },
+      { show: true, xAxisIndex: [0, 1], type: 'slider', top: '94%', height: 18, start: 50, end: 100,
+        handleStyle: { color: '#1677ff' } }
+    ],
+    series: [
+      ...series,
+      { name: '成交量', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: volumes,
+        itemStyle: { color: (p) => (p.data[2] > 0 ? '#ff4d4f' : '#52c41a') } }
+    ]
+  })
+}
+
+// ============ 事件 ============
+const onSubmit = () => {
+  const s = symbol.value.trim().toUpperCase()
+  if (!s) return
+  router.replace(`/chart/${encodeURIComponent(s)}`)
+}
+
+const onPeriodChange = (p) => {
+  period.value = p
+  // 切到分钟时给个默认 5 天 (5min K 一天约 48 根)
+  if (p === 'minute' && range.value > 480) range.value = 240
+  loadData(symbol.value)
+}
+
+const onMinuteChange = (m) => {
+  minutePeriod.value = m
+  loadData(symbol.value)
+}
+
+const onChartTypeChange = (t) => {
+  chartType.value = t
+  loadData(symbol.value)
+}
+
+const onRangeChange = () => loadData(symbol.value)
+
+onMounted(() => loadData(route.params.symbol))
+onUnmounted(disposeChart)
+
+watch(() => route.params.symbol, (newSym) => {
+  if (newSym && newSym.toUpperCase() !== symbol.value) {
+    symbol.value = newSym.toUpperCase()
+    loadData(symbol.value)
+  }
+})
+
+// 指标颜色辅助
+const rsiColor = (v) => v == null ? '#999' : v >= 70 ? '#ff4d4f' : v <= 30 ? '#52c41a' : '#1677ff'
+const macdColor = (h) => h == null ? '#999' : h >= 0 ? '#ff4d4f' : '#52c41a'
+</script>
+
+<template>
+  <div class="kline-page">
+    <header>
+      <button class="back" @click="router.back()">← 返回</button>
+      <h1>K 线图</h1>
+    </header>
+
+    <div class="toolbar">
+      <form class="symbol-form" @submit.prevent="onSubmit">
+        <input
+          v-model="symbol"
+          placeholder="输入股票代码（如 600519）"
+          class="symbol-input"
+        />
+        <button type="submit" class="btn-primary">查看</button>
+      </form>
+
+      <div class="control-row">
+        <div class="control-group">
+          <span class="control-label">周期</span>
+          <div class="btn-group">
+            <button
+              v-for="p in periods"
+              :key="p.value"
+              class="pill"
+              :class="{ active: period === p.value }"
+              @click="onPeriodChange(p.value)"
+            >{{ p.label }}</button>
+          </div>
+        </div>
+
+        <div v-if="period === 'minute'" class="control-group">
+          <span class="control-label">分钟</span>
+          <div class="btn-group">
+            <button
+              v-for="m in minuteOptions"
+              :key="m.value"
+              class="pill"
+              :class="{ active: minutePeriod === m.value }"
+              @click="onMinuteChange(m.value)"
+            >{{ m.label }}</button>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <span class="control-label">类型</span>
+          <div class="btn-group">
+            <button
+              v-for="t in chartTypes"
+              :key="t.value"
+              class="pill"
+              :class="{ active: chartType === t.value }"
+              @click="onChartTypeChange(t.value)"
+            >{{ t.label }}</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="range-bar">
+        <span class="control-label">显示</span>
+        <button
+          v-for="r in ranges"
+          :key="r.value"
+          class="range-btn"
+          :class="{ active: range === r.value }"
+          @click="range = r.value; onRangeChange()"
+        >{{ r.label }}</button>
+      </div>
+    </div>
+
+    <main>
+      <p v-if="error" class="error-msg">{{ error }}</p>
+      <div v-if="loading && !chart" class="empty-state">加载中...</div>
+      <div ref="chartRef" class="chart-container"></div>
+
+      <div v-if="indicators" class="indicator-panel">
+        <div class="indicator">
+          <span class="ind-label">RSI(14)</span>
+          <span class="ind-value" :style="{ color: rsiColor(indicators.rsi) }">{{ indicators.rsi }}</span>
+          <span class="ind-hint">{{ indicators.rsi >= 70 ? '超买' : indicators.rsi <= 30 ? '超卖' : '中性' }}</span>
+        </div>
+        <div class="indicator">
+          <span class="ind-label">MACD</span>
+          <span class="ind-value">
+            <span style="color:#1677ff">DIF {{ indicators.macd.dif }}</span>
+            <span style="color:#722ed1;margin-left:6px">DEA {{ indicators.macd.dea }}</span>
+          </span>
+          <span class="ind-hint" :style="{ color: macdColor(indicators.macd.hist) }">
+            HIST {{ indicators.macd.hist >= 0 ? '+' : '' }}{{ indicators.macd.hist }}
+          </span>
+        </div>
+        <div class="indicator">
+          <span class="ind-label">BOLL(20)</span>
+          <span class="ind-value" style="color:#eb2f96">
+            {{ indicators.bollinger.lower }} / {{ indicators.bollinger.middle }} / {{ indicators.bollinger.upper }}
+          </span>
+          <span class="ind-hint">下轨 / 中轨 / 上轨</span>
+        </div>
+      </div>
+
+      <p v-if="stockInfo" class="price-info">
+        {{ stockInfo.name || symbol }} 当前价: <b>${{ stockInfo.price || 'N/A' }}</b>
+        <span class="update"> | {{ stockInfo.lastUpdated || 'N/A' }}</span>
+      </p>
+    </main>
+  </div>
+</template>
+
+<style scoped>
+.kline-page { min-height: 100vh; background: #f0f2f5; display: flex; flex-direction: column; }
+header {
+  background: #1a1a2e;
+  color: white;
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+header h1 { margin: 0; font-size: 18px; flex: 1; }
+.back {
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.4);
+  color: white;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.toolbar {
+  background: white;
+  padding: 12px 16px;
+  border-bottom: 1px solid #f0f0f0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.symbol-form { display: flex; gap: 8px; }
+.symbol-input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  font-size: 14px;
+}
+.symbol-input:focus { outline: none; border-color: #1677ff; }
+.btn-primary {
+  background: #1677ff;
+  color: white;
+  border: none;
+  padding: 0 18px;
+  border-radius: 4px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.btn-primary:hover { background: #4096ff; }
+
+.control-row { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+.control-group { display: flex; align-items: center; gap: 6px; }
+.control-label { font-size: 12px; color: #888; margin-right: 2px; }
+.btn-group { display: flex; gap: 4px; }
+.pill {
+  padding: 4px 10px;
+  background: #f5f5f5;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  font-size: 12px;
+  color: #666;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.pill:hover { border-color: #1677ff; color: #1677ff; }
+.pill.active {
+  background: #1677ff;
+  color: white;
+  border-color: #1677ff;
+}
+
+.range-bar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.range-btn {
+  padding: 4px 12px;
+  background: #f5f5f5;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  font-size: 12px;
+  color: #666;
+  cursor: pointer;
+}
+.range-btn.active {
+  background: #1677ff;
+  color: white;
+  border-color: #1677ff;
+}
+
+main {
+  flex: 1;
+  max-width: 1100px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-sizing: border-box;
+}
+.chart-container {
+  background: white;
+  border-radius: 8px;
+  padding: 8px;
+  height: 560px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+}
+.error-msg { color: #ff4d4f; text-align: center; padding: 24px; font-size: 14px; }
+.empty-state { color: #999; text-align: center; padding: 48px 24px; font-size: 14px; }
+
+.indicator-panel {
+  background: white;
+  border-radius: 8px;
+  padding: 12px 16px;
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+}
+.indicator {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 180px;
+}
+.ind-label { font-size: 12px; color: #888; }
+.ind-value { font-size: 14px; font-weight: 600; }
+.ind-hint { font-size: 11px; color: #999; }
+
+.price-info {
+  background: white;
+  border-radius: 8px;
+  padding: 12px 16px;
+  text-align: center;
+  font-size: 14px;
+  color: #555;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+}
+.price-info b { color: #fa8c16; font-size: 18px; margin: 0 4px; }
+.update { color: #999; font-size: 12px; }
+</style>

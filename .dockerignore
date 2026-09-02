@@ -5,3 +5,8 @@ target/
 .gitignore
 *.md
 test-cache.ps1
+chroma_data/
+.venv/
+napcat/
+_backup_before_llm_*/
+node_modules/
