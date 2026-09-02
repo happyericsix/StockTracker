@@ -106,8 +106,13 @@ def evaluate_rule(rule, ind, i, position=None):
 
 def run_backtest(config: dict, records: list[dict]) -> dict:
     cfg = StrategyConfig.model_validate(config)
-    if len(records) < 20:
-        return {"symbol": cfg.symbol, "error": "data insufficient"}
+    if len(records) <= 20:
+        return {
+            "symbol": cfg.symbol,
+            "error": "data insufficient",
+            "equity_curve": [],
+            "trade_log": [],
+        }
     ind = compute_indicators(records)
     cash = float(cfg.initial_capital)
     shares = 0.0

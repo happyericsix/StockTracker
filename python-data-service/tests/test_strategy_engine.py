@@ -71,6 +71,12 @@ def test_backtest_returns_curve_and_trades():
     assert result["data_points"] > 0
     assert "equity_curve" in result and "trade_log" in result
 
+def test_backtest_20_bar_boundary():
+    result = run_backtest(CONFIG, make_bars(n=20))
+    assert result["error"] == "data insufficient"
+    assert result["equity_curve"] == []
+    assert result["trade_log"] == []
+
 def test_evaluate_bar_returns_signal():
     bars = make_bars()
     out = evaluate_bar(CONFIG, bars, bars[-1]["date"], None)
