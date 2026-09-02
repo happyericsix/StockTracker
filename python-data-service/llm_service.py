@@ -353,3 +353,17 @@ def split_replies(text: str, max_len: int = 400) -> list[str]:
     if remaining:
         chunks.append(remaining)
     return chunks
+
+
+def chat_completion(messages, tools=None, temperature=0.2, max_tokens=1200):
+    if not _is_available():
+        return {"message": {"role": "assistant", "content": "AI 服务暂不可用"}}
+    payload = {"model": MODEL, "messages": messages,
+               "temperature": temperature, "max_tokens": max_tokens}
+    if tools:
+        payload["tools"] = tools
+    url = f"{BASE_URL}/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+    resp = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]
