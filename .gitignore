@@ -87,3 +87,7 @@ python-data-service/mlflow.db*
 
 ### QQ bot remnants ###
 napcat/
+
+### Superpowers SDD scratch ###
+.superpowers/
+
