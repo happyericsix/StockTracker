@@ -104,7 +104,7 @@ onMounted(() => {
     <header>
       <h1>Stock Tracker</h1>
       <div class="header-actions">
-        <button class="nav-btn" @click="goAssistant">💬 助手</button>
+        <button class="nav-btn assistant-nav" @click="goAssistant">🤖 智能助手</button>
         <button class="nav-btn badge-btn" @click="goMessages">
           消息
           <span v-if="messageBus.unread > 0" class="unread-badge">{{ messageBus.unread > 99 ? '99+' : messageBus.unread }}</span>
@@ -114,6 +114,15 @@ onMounted(() => {
       </div>
     </header>
     <main>
+      <section class="assistant-entry" @click="goAssistant">
+        <div class="assistant-icon">🤖</div>
+        <div class="assistant-copy">
+          <strong>智能助手</strong>
+          <span>自然语言查行情、生成交易策略、回测与模拟盘</span>
+        </div>
+        <span class="assistant-arrow">→</span>
+      </section>
+
       <section class="search-section">
         <StockSearchInput ref="searchInputRef" v-model="symbol" />
         <button @click="search" :disabled="loading">{{ loading ? '查询中...' : '查询' }}</button>
@@ -162,6 +171,8 @@ header h1 { margin: 0; font-size: 20px; }
 .header-actions { display: flex; gap: 8px; }
 .nav-btn { background: rgba(255,255,255,0.15); border: none; color: white; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; transition: background 0.2s; }
 .nav-btn:hover { background: rgba(255,255,255,0.25); }
+.assistant-nav { background: #1677ff; color: white; font-weight: 600; }
+.assistant-nav:hover { background: #4096ff; }
 .badge-btn { position: relative; }
 .unread-badge {
   position: absolute;
@@ -177,6 +188,36 @@ header h1 { margin: 0; font-size: 20px; }
   text-align: center;
 }
 main { max-width: 640px; margin: 0 auto; padding: 24px 16px; }
+
+.assistant-entry {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: linear-gradient(135deg, #1677ff 0%, #69b1ff 100%);
+  color: white;
+  border-radius: 12px;
+  padding: 16px 18px;
+  margin-bottom: 20px;
+  cursor: pointer;
+  box-shadow: 0 8px 20px rgba(22, 119, 255, 0.22);
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.assistant-entry:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(22, 119, 255, 0.3); }
+.assistant-icon {
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.22);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+  flex-shrink: 0;
+}
+.assistant-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.assistant-copy strong { font-size: 17px; }
+.assistant-copy span { font-size: 12px; opacity: 0.9; }
+.assistant-arrow { margin-left: auto; font-size: 22px; opacity: 0.9; }
 
 .search-section { display: flex; gap: 8px; margin-bottom: 20px; align-items: flex-start; }
 .search-section button { padding: 10px 20px; background: #1677ff; color: white; border: none; border-radius: 4px; cursor: pointer; white-space: nowrap; flex-shrink: 0; }
