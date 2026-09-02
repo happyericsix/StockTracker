@@ -20,11 +20,11 @@ TOOL_SCHEMAS = [
           _obj({"symbol": {"type": "string"}}, ["symbol"])),
     _tool("get_history", "Get daily history bars.",
           _obj({"symbol": {"type": "string"}, "days": {"type": "integer", "default": 250}}, ["symbol"])),
-    _tool("validate_strategy", "Validate a strategy JSON object.",
+    _tool("validate_strategy", "Validate a complete strategy JSON object. Required: schema_version=1.0, name, symbol, entry.logic, entry.conditions, exit.logic, exit.conditions. Conditions use type ma_cross/rsi_above/rsi_below/macd_cross/price_above/price_below/stop_loss_pct/take_profit_pct/trailing_stop_pct.",
           _obj({"strategy_json": {"type": "object"}}, ["strategy_json"])),
     _tool("backtest_strategy", "Backtest a strategy JSON object.",
           _obj({"strategy_json": {"type": "object"}}, ["strategy_json"])),
-    _tool("finalize_strategy", "Finalize the strategy JSON and return a plain-language summary.",
+    _tool("finalize_strategy", "Finalize the complete strategy JSON and return a plain-language summary. Include schema_version=1.0, name, symbol, initial_capital, data, position, entry, exit, risk.",
           _obj({"strategy_json": {"type": "object"}}, ["strategy_json"])),
 ]
 
