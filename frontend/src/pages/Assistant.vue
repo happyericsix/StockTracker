@@ -12,6 +12,7 @@ const sending = ref(false)
 const error = ref('')
 const composing = ref(false)
 const listEl = ref(null)
+const pendingLocalId = ref(null)
 let unsubscribe = null
 
 const scrollToBottom = async () => {
@@ -125,6 +126,15 @@ const onBusMessage = (msg) => {
     typing.value = false
   }
   if (msg.type === 'CHAT_BOT' || msg.type === 'CHAT_USER') {
+    if (msg.type === 'CHAT_USER' && pendingLocalId.value) {
+      const pendingIndex = messages.value.findIndex((m) => m.id === pendingLocalId.value)
+      if (pendingIndex !== -1) {
+        messages.value.splice(pendingIndex, 1, msg)
+        pendingLocalId.value = null
+        scrollToBottom()
+        return
+      }
+    }
     if (!messages.value.some((m) => m.id === msg.id)) {
       messages.value.push(msg)
       scrollToBottom()
@@ -154,6 +164,7 @@ const send = async () => {
     createdAt: new Date().toISOString(),
     read: true
   }
+  pendingLocalId.value = tempMsg.id
   messages.value.push(tempMsg)
   scrollToBottom()
   typing.value = true
@@ -161,6 +172,7 @@ const send = async () => {
   try {
     await sendChat(text)
   } catch (e) {
+    pendingLocalId.value = null
     typing.value = false
     error.value = '发送失败，请稍后重试'
   } finally {
