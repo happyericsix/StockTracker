@@ -328,7 +328,7 @@ def _simple_greet(msg: str) -> str:
 
 # ===== 工具方法：消息切分 =====
 
-def split_replies(text: str, max_len: int = 400) -> list[str]:
+def split_replies(text: str, max_len: int = 1600) -> list[str]:
     """
     把长文本切分成多条回复（默认 400 字/条）
 

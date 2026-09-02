@@ -27,6 +27,87 @@ const formatTime = (iso) => {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
+const escapeHtml = (text) => text
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;')
+
+const renderInline = (text) => text
+  .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+  .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+  .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+
+const renderMarkdown = (raw) => {
+  if (!raw || typeof raw !== 'string') return ''
+  const lines = escapeHtml(raw).split('\n')
+  const blocks = []
+  let paragraph = []
+  let list = null
+  let codeLines = null
+
+  const flushParagraph = () => {
+    if (paragraph.length === 0) return
+    blocks.push(`<p>${paragraph.map(renderInline).join('<br>')}</p>`)
+    paragraph = []
+  }
+  const flushList = () => {
+    if (!list) return
+    blocks.push(`<ul>${list.join('')}</ul>`)
+    list = null
+  }
+
+  for (const line of lines) {
+    if (codeLines !== null) {
+      if (/^```/.test(line)) {
+        blocks.push(`<pre><code>${codeLines.join('\n')}</code></pre>`)
+        codeLines = null
+      } else {
+        codeLines.push(line)
+      }
+      continue
+    }
+
+    if (/^```/.test(line)) {
+      flushParagraph()
+      flushList()
+      codeLines = []
+      continue
+    }
+
+    const heading = line.match(/^(#{1,6})\s+(.+)$/)
+    if (heading) {
+      flushParagraph()
+      flushList()
+      const level = heading[1].length
+      blocks.push(`<h${level}>${renderInline(heading[2])}</h${level}>`)
+      continue
+    }
+
+    const bullet = line.match(/^\s*[-*+]\s+(.+)$/)
+    if (bullet) {
+      flushParagraph()
+      if (!list) list = []
+      list.push(`<li>${renderInline(bullet[1])}</li>`)
+      continue
+    }
+
+    if (line.trim() === '') {
+      flushParagraph()
+      flushList()
+      continue
+    }
+
+    flushList()
+    paragraph.push(line)
+  }
+
+  flushParagraph()
+  flushList()
+  return blocks.join('')
+}
+
 const loadHistory = async () => {
   try {
     const res = await getChatHistory()
@@ -128,7 +209,8 @@ onUnmounted(() => {
       >
         <div v-if="m.type !== 'CHAT_USER'" class="avatar">🤖</div>
         <div class="bubble-wrap">
-          <div class="bubble">{{ m.content }}</div>
+        <div v-if="m.type !== 'CHAT_USER'" class="bubble markdown-body" v-html="renderMarkdown(m.content)"></div>
+        <div v-else class="bubble">{{ m.content }}</div>
           <div class="time">{{ formatTime(m.createdAt) }}</div>
           <div v-if="m.type !== 'CHAT_USER' && hasStrategyContent(m.content)" class="strategy-action">
             <button class="strategy-btn" @click="goStrategies">查看策略库</button>
@@ -255,6 +337,51 @@ onUnmounted(() => {
   background: #1677ff;
   border-radius: 12px 4px 12px 12px;
   color: white;
+}
+.bubble.markdown-body {
+  white-space: normal;
+  line-height: 1.6;
+}
+.bubble.markdown-body :deep(p) { margin: 4px 0; }
+.bubble.markdown-body :deep(h1),
+.bubble.markdown-body :deep(h2),
+.bubble.markdown-body :deep(h3),
+.bubble.markdown-body :deep(h4),
+.bubble.markdown-body :deep(h5),
+.bubble.markdown-body :deep(h6) {
+  margin: 10px 0 4px;
+  line-height: 1.4;
+  font-weight: 600;
+}
+.bubble.markdown-body :deep(h1) { font-size: 17px; }
+.bubble.markdown-body :deep(h2) { font-size: 16px; }
+.bubble.markdown-body :deep(h3) { font-size: 15px; }
+.bubble.markdown-body :deep(h4),
+.bubble.markdown-body :deep(h5),
+.bubble.markdown-body :deep(h6) { font-size: 14px; }
+.bubble.markdown-body :deep(ul) {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+.bubble.markdown-body :deep(li) { margin: 2px 0; }
+.bubble.markdown-body :deep(code) {
+  background: rgba(0,0,0,0.06);
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-size: 12px;
+}
+.bubble.markdown-body :deep(pre) {
+  margin: 8px 0;
+  background: #f5f5f5;
+  border-radius: 4px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.bubble.markdown-body :deep(pre code) {
+  background: transparent;
+  padding: 0;
 }
 .time { font-size: 10px; color: #bbb; }
 .msg-row.mine .time { text-align: right; }
