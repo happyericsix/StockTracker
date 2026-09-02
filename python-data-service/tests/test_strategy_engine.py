@@ -42,6 +42,17 @@ def test_stop_loss_needs_position():
     ok, _ = evaluate_rule(rule, ind, 30, None)
     assert not ok
 
+def test_ma_cross_non_precomputed_window():
+    bars = make_bars()
+    ind = compute_indicators(bars)
+    rule = RuleGroup.model_validate({
+        "logic": "all",
+        "conditions": [{"type": "ma_cross", "fast": 7, "slow": 21, "direction": "above"}]
+    })
+    ok, reasons = evaluate_rule(rule, ind, 25, None)
+    assert isinstance(ok, bool)
+    assert reasons in ([], ["ma_cross"])
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

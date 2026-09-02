@@ -49,6 +49,13 @@ def compute_indicators(records):
     ind["macd_dea"] = dea
     return ind
 
+def _ma_for(ind, w):
+    key = f"ma_{w}"
+    arr = ind.get(key)
+    if arr is None:
+        return _sma(ind["closes"], w)
+    return arr
+
 def _crossed(a, b, i, direction):
     if i == 0:
         return False
@@ -59,9 +66,11 @@ def _crossed(a, b, i, direction):
 def _cond_met(c, ind, i, position):
     t = c.type
     if t == "ma_cross":
-        if np.isnan(ind[f"ma_{c.fast}"][i]) or np.isnan(ind[f"ma_{c.slow}"][i]):
+        fast_ma = _ma_for(ind, c.fast)
+        slow_ma = _ma_for(ind, c.slow)
+        if np.isnan(fast_ma[i]) or np.isnan(slow_ma[i]):
             return False
-        return _crossed(ind[f"ma_{c.fast}"], ind[f"ma_{c.slow}"], i, c.direction)
+        return _crossed(fast_ma, slow_ma, i, c.direction)
     if t == "macd_cross":
         if i == 0 or np.isnan(ind["macd_dif"][i]) or np.isnan(ind["macd_dea"][i]):
             return False
