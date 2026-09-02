@@ -17,7 +17,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * 聊天机器人服务：异步调用 Python LLM（/api/v1/chat），
+ * 聊天机器人服务：异步调用 Python LLM（/api/v1/agent/chat），
  * 回复直接落库 + SSE 推送。不依赖 MessageService，避免循环依赖。
  */
 @Service
@@ -29,30 +29,23 @@ public class ChatService {
     private final MessageRepository messageRepo;
     private final UserRepository userRepository;
     private final SseEmitterService sseService;
+    private final StrategyService strategyService;
 
     public ChatService(WebClient llmWebClient, MessageRepository messageRepo,
-                       UserRepository userRepository, SseEmitterService sseService) {
+                       UserRepository userRepository, SseEmitterService sseService,
+                       StrategyService strategyService) {
         this.llmWebClient = llmWebClient;
         this.messageRepo = messageRepo;
         this.userRepository = userRepository;
         this.sseService = sseService;
+        this.strategyService = strategyService;
     }
 
     /** LLM 单次调用最长 60 秒，超时兜底回复 */
     @Async
     public void processAsync(Long userId, String username, String text) {
         try {
-            Map<String, String> body = new HashMap<>();
-            body.put("user_id", username);
-            body.put("message", text);
-
-            JsonNode resp = llmWebClient.post()
-                    .uri("/api/v1/chat")
-                    .bodyValue(body)
-                    .retrieve()
-                    .bodyToMono(JsonNode.class)
-                    .timeout(Duration.ofSeconds(60))
-                    .block();
+            JsonNode resp = callLlm(username, text);
 
             JsonNode replies = resp != null ? resp.get("replies") : null;
             if (replies == null || !replies.isArray() || replies.isEmpty()) {
@@ -65,10 +58,30 @@ public class ChatService {
                     saveBotReply(userId, content);
                 }
             }
+
+            JsonNode strategyJson = resp != null ? resp.get("strategy_json") : null;
+            if (strategyJson != null && strategyJson.isObject()) {
+                strategyService.createFromAgent(username, strategyJson);
+            }
         } catch (Exception e) {
             log.error("LLM 调用失败 userId={}: {}", userId, e.getMessage());
             saveBotReply(userId, "智能助手暂时不可用，请稍后再试。");
         }
+    }
+
+    /** 调用 agent 聊天接口；独立成包可见方法，方便单测替换远程依赖。 */
+    JsonNode callLlm(String username, String text) {
+        Map<String, String> body = new HashMap<>();
+        body.put("user_id", username);
+        body.put("message", text);
+
+        return llmWebClient.post()
+                .uri("/api/v1/agent/chat")
+                .bodyValue(body)
+                .retrieve()
+                .bodyToMono(JsonNode.class)
+                .timeout(Duration.ofSeconds(60))
+                .block();
     }
 
     private void saveBotReply(Long userId, String content) {
