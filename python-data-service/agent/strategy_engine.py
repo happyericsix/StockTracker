@@ -1,5 +1,6 @@
 from __future__ import annotations
 import numpy as np
+from agent.strategy_schema import StrategyConfig
 
 def _sma(a, w):
     out = np.full(len(a), np.nan)
@@ -101,3 +102,70 @@ def evaluate_rule(rule, ind, i, position=None):
     hit = all(flags) if rule.logic == "all" else any(flags)
     reasons = [n for n, f in zip(names, flags) if f]
     return hit, reasons
+
+
+def run_backtest(config: dict, records: list[dict]) -> dict:
+    cfg = StrategyConfig.model_validate(config)
+    if len(records) < 20:
+        return {"symbol": cfg.symbol, "error": "data insufficient"}
+    ind = compute_indicators(records)
+    cash = float(cfg.initial_capital)
+    shares = 0.0
+    entry_price = 0.0
+    hwm = 0.0
+    trades = []
+    equity_curve = []
+    comm = cfg.risk.commission_pct / 100.0
+    slip = cfg.risk.slippage_pct / 100.0
+
+    for i in range(20, len(records)):
+        price = float(ind["closes"][i])
+        if shares == 0:
+            ok, reasons = evaluate_rule(cfg.entry, ind, i, None)
+            if ok:
+                fill = price * (1 + slip)
+                budget = cash if cfg.position.type == "full" else cash * (cfg.position.size_pct or 100) / 100.0
+                shares = budget * (1 - comm) / fill
+                cash -= shares * fill * (1 + comm)
+                entry_price = fill
+                hwm = fill
+                trades.append({"date": ind["dates"][i], "side": "buy", "price": fill,
+                               "shares": shares, "amount": shares * fill, "reason": ",".join(reasons)})
+        else:
+            hwm = max(hwm, float(ind["highs"][i]))
+            ok, reasons = evaluate_rule(cfg.exit, ind, i, {"entry_price": entry_price, "high_watermark": hwm})
+            if ok:
+                fill = price * (1 - slip)
+                cash += shares * fill * (1 - comm)
+                trades.append({"date": ind["dates"][i], "side": "sell", "price": fill,
+                               "shares": shares, "amount": shares * fill, "reason": ",".join(reasons)})
+                shares = 0.0
+                entry_price = 0.0
+                hwm = 0.0
+        equity_curve.append({"date": ind["dates"][i], "equity": cash + shares * price, "close": price})
+
+    final = cash + shares * float(ind["closes"][-1])
+    return {
+        "symbol": cfg.symbol, "initial_capital": cfg.initial_capital,
+        "final_value": round(final, 2),
+        "total_return_pct": round((final / cfg.initial_capital - 1) * 100, 2),
+        "data_points": len(records),
+        "trade_log": trades, "equity_curve": equity_curve,
+        "start_date": ind["dates"][20], "end_date": ind["dates"][-1],
+    }
+
+
+def evaluate_bar(config: dict, records: list[dict], date: str, position: dict | None) -> dict:
+    cfg = StrategyConfig.model_validate(config)
+    ind = compute_indicators(records)
+    idx = next((i for i, d in enumerate(ind["dates"]) if d == date), len(records) - 1)
+    if idx < 20:
+        return {"signal": "hold", "matched_conditions": [], "date": date,
+                "price": float(ind["closes"][idx])}
+    if position and position.get("shares", 0) > 0:
+        ok, reasons = evaluate_rule(cfg.exit, ind, idx, position)
+        return {"signal": "sell" if ok else "hold", "matched_conditions": reasons,
+                "date": date, "price": float(ind["closes"][idx])}
+    ok, reasons = evaluate_rule(cfg.entry, ind, idx, None)
+    return {"signal": "buy" if ok else "hold", "matched_conditions": reasons,
+            "date": date, "price": float(ind["closes"][idx])}
