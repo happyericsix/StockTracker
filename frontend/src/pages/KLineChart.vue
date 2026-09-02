@@ -333,7 +333,7 @@ const renderChart = (sym, data) => {
     tooltip: {
       trigger: 'axis', axisPointer: { type: 'cross' },
       backgroundColor: 'rgba(50, 50, 50, 0.9)', borderWidth: 0,
-      textStyle: { color: '#fff', fontSize: 12 }
+      textStyle: { color: '#fff', fontSize: 12 }, confine: true
     },
     legend: { data: legend, top: 30, textStyle: { fontSize: 12 } },
     grid: [
@@ -356,7 +356,8 @@ const renderChart = (sym, data) => {
         axisLine: { show: false }, axisTick: { show: false }, splitLine: { show: false } }
     ],
     dataZoom: [
-      { type: 'inside', xAxisIndex: [0, 1], start: 50, end: 100 },
+      { type: 'inside', xAxisIndex: [0, 1], start: 50, end: 100,
+        moveOnMouseMove: false, zoomOnMouseWheel: true },
       { show: true, xAxisIndex: [0, 1], type: 'slider', top: '94%', height: 18, start: 50, end: 100,
         handleStyle: { color: '#1677ff' } }
     ],
