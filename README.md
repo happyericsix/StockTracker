@@ -73,6 +73,18 @@
 - MLflow 实验追踪
 - RAG（Chroma 向量库）—— 接入研报 / 新闻情感
 
+### 🧠 Strategy Agent（自然语言 → 策略 JSON）
+
+用户可以在聊天框用自然语言描述交易策略，Agent 会自动查行情、构建并校验策略 JSON，再把同一份配置落库到「策略库」。
+
+- **流程**：前端聊天 → Java `ChatService` → Python `/api/v1/agent/chat` → ReAct Agent → 返回 `{replies, strategy_json}` → Java 自动保存策略并推送回复
+- **策略 JSON 是唯一契约**：回测、模拟盘、未来实盘引擎都读取同一份结构化配置
+- **v1 规则**：MA 金叉/死叉、RSI 超买/超卖、MACD 金叉/死叉、价格上穿/下穿、止盈/止损/跟踪止盈，`all`/`any` 条件组合，全仓/百分比仓位
+- **策略库**：`/strategies` 列表，`/strategies/:id` 详情，支持回测、模拟盘启停、虚拟账户与成交记录展示
+- **模拟盘**：Java `PaperTradingService` 日频结算，策略级隔离，`strategyId + tradeDate` 幂等去重
+
+> ⚠️ 模拟盘是**虚拟账户**，仅用于验证策略逻辑，不代表真实收益，也不构成投资建议。
+
 ---
 
 ## 技术栈
@@ -345,6 +357,7 @@ stock-tracker/
 - DeepSeek LLM 集成
 - 二级缓存 + JWT 鉴权
 - Docker Compose 部署
+- Strategy Agent：自然语言生成策略 JSON，支持回测与模拟盘
 
 ### 🚧 进行中：PWA 化（接下来重点）
 - [ ] vite-plugin-pwa 集成
