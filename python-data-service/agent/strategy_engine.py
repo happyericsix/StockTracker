@@ -120,8 +120,15 @@ def run_backtest(config: dict, records: list[dict]) -> dict:
     hwm = 0.0
     trades = []
     equity_curve = []
+    benchmark_equity_curve = []
+    round_trip_pnls = []
     comm = cfg.risk.commission_pct / 100.0
     slip = cfg.risk.slippage_pct / 100.0
+
+    start_price = float(ind["closes"][20])
+    benchmark_shares = float(cfg.initial_capital) / start_price
+    start_equity = float(cfg.initial_capital)
+    last_buy_cost = 0.0
 
     for i in range(20, len(records)):
         price = float(ind["closes"][i])
@@ -131,7 +138,9 @@ def run_backtest(config: dict, records: list[dict]) -> dict:
                 fill = price * (1 + slip)
                 budget = cash if cfg.position.type == "full" else cash * (cfg.position.size_pct or 100) / 100.0
                 shares = budget * (1 - comm) / fill
-                cash -= shares * fill * (1 + comm)
+                buy_cost = shares * fill * (1 + comm)
+                cash -= buy_cost
+                last_buy_cost = buy_cost
                 entry_price = fill
                 hwm = fill
                 trades.append({"date": ind["dates"][i], "side": "buy", "price": fill,
@@ -141,23 +150,80 @@ def run_backtest(config: dict, records: list[dict]) -> dict:
             ok, reasons = evaluate_rule(cfg.exit, ind, i, {"entry_price": entry_price, "high_watermark": hwm})
             if ok:
                 fill = price * (1 - slip)
-                cash += shares * fill * (1 - comm)
+                sell_proceeds = shares * fill * (1 - comm)
+                cash += sell_proceeds
+                round_trip_pnls.append(sell_proceeds - last_buy_cost)
                 trades.append({"date": ind["dates"][i], "side": "sell", "price": fill,
                                "shares": shares, "amount": shares * fill, "reason": ",".join(reasons)})
                 shares = 0.0
                 entry_price = 0.0
                 hwm = 0.0
+                last_buy_cost = 0.0
         equity_curve.append({"date": ind["dates"][i], "equity": cash + shares * price, "close": price})
+        benchmark_equity_curve.append({
+            "date": ind["dates"][i],
+            "equity": benchmark_shares * price,
+            "close": price,
+        })
 
     final = cash + shares * float(ind["closes"][-1])
+    buy_and_hold_final = benchmark_equity_curve[-1]["equity"] if benchmark_equity_curve else start_equity
+    total_return = final / cfg.initial_capital - 1
+    buy_and_hold_return = buy_and_hold_final / cfg.initial_capital - 1
+
+    equity_values = [point["equity"] for point in equity_curve]
+    max_drawdown = _max_drawdown_pct(equity_values)
+    annualized_return = _annualized_return_pct(total_return, len(equity_values))
+    sharpe_ratio = _sharpe_ratio(equity_values)
+    wins = [pnl for pnl in round_trip_pnls if pnl > 0]
+    win_rate = (len(wins) / len(round_trip_pnls) * 100) if round_trip_pnls else 0.0
+
     return {
         "symbol": cfg.symbol, "initial_capital": cfg.initial_capital,
         "final_value": round(final, 2),
-        "total_return_pct": round((final / cfg.initial_capital - 1) * 100, 2),
+        "total_return_pct": round(total_return * 100, 2),
+        "buy_and_hold_return_pct": round(buy_and_hold_return * 100, 2),
+        "excess_return_pct": round((total_return - buy_and_hold_return) * 100, 2),
+        "annualized_return_pct": round(annualized_return, 2),
+        "sharpe_ratio": round(sharpe_ratio, 3),
+        "max_drawdown_pct": round(max_drawdown, 2),
+        "win_rate": round(win_rate, 2),
+        "closed_trades": len(round_trip_pnls),
+        "trade_count": len(trades),
         "data_points": len(records),
         "trade_log": trades, "equity_curve": equity_curve,
+        "benchmark_equity_curve": benchmark_equity_curve,
         "start_date": ind["dates"][20], "end_date": ind["dates"][-1],
     }
+
+
+def _max_drawdown_pct(equity_values):
+    if not equity_values:
+        return 0.0
+    values = np.asarray(equity_values, dtype=float)
+    running_high = np.maximum.accumulate(values)
+    drawdowns = (values - running_high) / running_high * 100
+    return float(np.min(drawdowns))
+
+
+def _sharpe_ratio(equity_values):
+    values = np.asarray(equity_values, dtype=float)
+    if len(values) < 2:
+        return 0.0
+    returns = np.diff(values) / values[:-1]
+    std = float(np.std(returns))
+    if std == 0:
+        return 0.0
+    return float(np.mean(returns) / std * np.sqrt(252))
+
+
+def _annualized_return_pct(total_return, bars):
+    if bars <= 0 or total_return <= -1:
+        return 0.0
+    years = bars / 252.0
+    if years <= 0:
+        return 0.0
+    return ((1 + total_return) ** (1 / years) - 1) * 100
 
 
 def evaluate_bar(config: dict, records: list[dict], date: str, position: dict | None) -> dict:

@@ -1,7 +1,8 @@
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import * as echarts from 'echarts'
 import {
   listStrategies,
   runBacktest,
@@ -23,6 +24,8 @@ const error = ref('')
 const backtestLoading = ref(false)
 const backtestData = ref(null)
 const paperLoading = ref(false)
+const backtestChartRef = ref(null)
+let backtestChart = null
 
 const unwrap = (res) => {
   const payload = res?.data
@@ -47,6 +50,26 @@ const formatMoney = (value) => {
   return n.toLocaleString('zh-CN', { style: 'currency', currency: 'USD' })
 }
 
+const formatNumber = (value, digits = 2) => {
+  if (value === null || value === undefined) return 'N/A'
+  const n = Number(value)
+  if (Number.isNaN(n)) return 'N/A'
+  return n.toLocaleString('zh-CN', { maximumFractionDigits: digits, minimumFractionDigits: digits })
+}
+
+const formatPct = (value) => {
+  if (value === null || value === undefined) return 'N/A'
+  const n = Number(value)
+  if (Number.isNaN(n)) return 'N/A'
+  return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`
+}
+
+const pnlClass = (value) => {
+  const n = Number(value)
+  if (Number.isNaN(n) || n === 0) return ''
+  return n > 0 ? 'positive' : 'negative'
+}
+
 const prettyConfig = computed(() => {
   const cfg = strategy.value?.configJson
   if (!cfg) return '{}'
@@ -60,17 +83,58 @@ const prettyConfig = computed(() => {
   return JSON.stringify(cfg, null, 2)
 })
 
-const backtestText = computed(() => {
-  if (backtestData.value === null || backtestData.value === undefined) return ''
+const backtestResult = computed(() => {
+  if (backtestData.value === null || backtestData.value === undefined) return null
   if (typeof backtestData.value === 'string') {
     try {
-      return JSON.stringify(JSON.parse(backtestData.value), null, 2)
+      return JSON.parse(backtestData.value)
     } catch (e) {
-      return backtestData.value
+      return { error: '回测结果解析失败' }
     }
   }
-  return JSON.stringify(backtestData.value, null, 2)
+  if (backtestData.value.valid === false) return { error: backtestData.value.error || '策略校验失败' }
+  return backtestData.value.backtest || backtestData.value
 })
+
+const renderBacktestChart = async () => {
+  await nextTick()
+  const el = backtestChartRef.value
+  const result = backtestResult.value
+  if (!el || !result || result.error || !result.equity_curve) return
+
+  if (!backtestChart) backtestChart = echarts.init(el)
+
+  const strategyCurve = Array.isArray(result.equity_curve) ? result.equity_curve : []
+  const benchmarkCurve = Array.isArray(result.benchmark_equity_curve) ? result.benchmark_equity_curve : []
+  const dates = strategyCurve.map((point) => point.date || '')
+
+  backtestChart.setOption({
+    tooltip: { trigger: 'axis', confine: true },
+    legend: { data: ['策略权益', '买入持有'], top: 0 },
+    grid: { left: 70, right: 20, top: 36, bottom: 36 },
+    xAxis: { type: 'category', data: dates, boundaryGap: false },
+    yAxis: { type: 'value', scale: true },
+    series: [
+      {
+        name: '策略权益',
+        type: 'line',
+        showSymbol: false,
+        smooth: true,
+        data: strategyCurve.map((point) => point.equity),
+        lineStyle: { width: 2, color: '#1677ff' },
+        areaStyle: { color: 'rgba(22,119,255,0.08)' }
+      },
+      {
+        name: '买入持有',
+        type: 'line',
+        showSymbol: false,
+        smooth: true,
+        data: benchmarkCurve.map((point) => point.equity),
+        lineStyle: { width: 1.5, type: 'dashed', color: '#999' }
+      }
+    ]
+  }, { notMerge: true })
+}
 
 const loadPaper = async () => {
   try {
@@ -121,6 +185,7 @@ const handleBacktest = async () => {
   } finally {
     backtestLoading.value = false
   }
+  await renderBacktestChart()
 }
 
 const togglePaper = async () => {
@@ -143,6 +208,12 @@ const togglePaper = async () => {
 const goBack = () => router.push('/strategies')
 
 onMounted(loadDetail)
+onUnmounted(() => {
+  if (backtestChart) {
+    backtestChart.dispose()
+    backtestChart = null
+  }
+})
 </script>
 
 <template>
@@ -202,7 +273,57 @@ onMounted(loadDetail)
         <section v-if="backtestLoading || backtestData !== null" class="card">
           <h3>回测结果</h3>
           <div v-if="backtestLoading" class="empty">回测运行中...</div>
-          <pre v-else class="config-block">{{ backtestText }}</pre>
+          <div v-else-if="backtestResult && backtestResult.error" class="empty">{{ backtestResult.error }}</div>
+          <template v-else-if="backtestResult">
+            <div class="metric-grid">
+              <div class="metric">
+                <span>策略收益</span>
+                <strong :class="pnlClass(backtestResult.total_return_pct)">{{ formatPct(backtestResult.total_return_pct) }}</strong>
+              </div>
+              <div class="metric">
+                <span>买入持有</span>
+                <strong :class="pnlClass(backtestResult.buy_and_hold_return_pct)">{{ formatPct(backtestResult.buy_and_hold_return_pct) }}</strong>
+              </div>
+              <div class="metric">
+                <span>超额收益</span>
+                <strong :class="pnlClass(backtestResult.excess_return_pct)">{{ formatPct(backtestResult.excess_return_pct) }}</strong>
+              </div>
+              <div class="metric">
+                <span>最大回撤</span>
+                <strong class="negative">{{ formatPct(backtestResult.max_drawdown_pct) }}</strong>
+              </div>
+              <div class="metric">
+                <span>胜率</span>
+                <strong>{{ formatPct(backtestResult.win_rate) }}</strong>
+              </div>
+              <div class="metric">
+                <span>夏普比率</span>
+                <strong>{{ formatNumber(backtestResult.sharpe_ratio, 3) }}</strong>
+              </div>
+              <div class="metric">
+                <span>年化收益</span>
+                <strong :class="pnlClass(backtestResult.annualized_return_pct)">{{ formatPct(backtestResult.annualized_return_pct) }}</strong>
+              </div>
+              <div class="metric">
+                <span>已平仓交易</span>
+                <strong>{{ backtestResult.closed_trades ?? 0 }}</strong>
+              </div>
+            </div>
+
+            <div ref="backtestChartRef" class="equity-chart"></div>
+
+            <div v-if="backtestResult.trade_log && backtestResult.trade_log.length" class="backtest-trades">
+              <h4>回测交易明细</h4>
+              <div v-for="(trade, index) in backtestResult.trade_log" :key="index" class="trade-row">
+                <span class="trade-date">{{ trade.date }}</span>
+                <span class="trade-side" :class="trade.side">{{ trade.side === 'buy' ? '买入' : '卖出' }}</span>
+                <span>价格: {{ formatNumber(trade.price, 3) }}</span>
+                <span>数量: {{ formatNumber(trade.shares, 2) }}</span>
+                <span>金额: {{ formatMoney(trade.amount) }}</span>
+                <span class="trade-reason" v-if="trade.reason">触发: {{ trade.reason }}</span>
+              </div>
+            </div>
+          </template>
         </section>
 
         <section class="card">
@@ -325,6 +446,34 @@ main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }
   max-height: 400px;
   overflow: auto;
 }
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.metric {
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.metric span { font-size: 12px; color: #888; }
+.metric strong { font-size: 18px; color: #333; }
+.metric strong.positive { color: #cf1322; }
+.metric strong.negative { color: #389e0d; }
+
+.equity-chart {
+  width: 100%;
+  height: 320px;
+  margin: 4px 0 18px;
+}
+
+.backtest-trades h4 { margin: 4px 0 10px; font-size: 14px; }
 
 .account-grid {
   display: grid;

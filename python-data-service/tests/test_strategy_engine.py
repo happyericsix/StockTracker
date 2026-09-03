@@ -71,6 +71,26 @@ def test_backtest_returns_curve_and_trades():
     assert result["data_points"] > 0
     assert "equity_curve" in result and "trade_log" in result
 
+
+def test_backtest_returns_performance_metrics():
+    result = run_backtest(CONFIG, make_bars(n=120))
+    for key in (
+        "total_return_pct",
+        "buy_and_hold_return_pct",
+        "excess_return_pct",
+        "annualized_return_pct",
+        "sharpe_ratio",
+        "max_drawdown_pct",
+        "win_rate",
+        "closed_trades",
+        "trade_count",
+        "benchmark_equity_curve",
+    ):
+        assert key in result, key
+    assert result["max_drawdown_pct"] <= 0
+    assert 0 <= result["win_rate"] <= 100
+    assert len(result["benchmark_equity_curve"]) == len(result["equity_curve"])
+
 def test_backtest_20_bar_boundary():
     result = run_backtest(CONFIG, make_bars(n=20))
     assert result["error"] == "data insufficient"
