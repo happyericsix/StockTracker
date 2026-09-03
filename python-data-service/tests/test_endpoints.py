@@ -5,6 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient
 import akshare_client
+import agent.tool_registry
 import app as main
 
 VALID_STRATEGY = {
@@ -72,6 +73,34 @@ def test_evaluate_bar_empty_history():
         akshare_client.get_history = original
     assert r.status_code == 200
     assert "error" in r.json()
+
+
+def test_agent_diagnostic_endpoint():
+    c = TestClient(main.app)
+    original = agent.tool_registry.execute_tool
+
+    def fake_execute(name, args):
+        if name == "get_risk_metrics":
+            return {"risk_level": "low", "decision_note": "test"}
+        if name == "get_model_status":
+            return {"available": True, "decision_use": False}
+        if name == "get_model_consensus":
+            return {"consensus": "neutral", "confidence": "low", "decision_use": False}
+        return {"error": "unexpected"}
+
+    agent.tool_registry.execute_tool = fake_execute
+    try:
+        r = c.get("/api/v1/agent/diagnostic/600519")
+    finally:
+        agent.tool_registry.execute_tool = original
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["symbol"] == "600519"
+    assert body["risk"]["risk_level"] == "low"
+    assert body["model_status"]["decision_use"] is False
+    assert body["model_consensus"]["decision_use"] is False
+    assert "disclaimer" in body
 
 
 if __name__ == "__main__":

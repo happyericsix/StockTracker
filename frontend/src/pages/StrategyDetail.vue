@@ -6,6 +6,7 @@ import * as echarts from 'echarts'
 import {
   listStrategies,
   runBacktest,
+  getStrategyDiagnostic,
   startPaper,
   stopPaper,
   getPaperAccount,
@@ -24,6 +25,9 @@ const error = ref('')
 const backtestLoading = ref(false)
 const backtestData = ref(null)
 const paperLoading = ref(false)
+const diagnosticLoading = ref(false)
+const diagnosticData = ref(null)
+const diagnosticError = ref('')
 const backtestChartRef = ref(null)
 let backtestChart = null
 
@@ -94,6 +98,18 @@ const backtestResult = computed(() => {
   }
   if (backtestData.value.valid === false) return { error: backtestData.value.error || '策略校验失败' }
   return backtestData.value.backtest || backtestData.value
+})
+
+const diagnostic = computed(() => {
+  const data = diagnosticData.value
+  if (!data || typeof data !== 'object') return null
+  return {
+    symbol: data.symbol || '',
+    risk: data.risk || null,
+    model_status: data.model_status || data.modelStatus || null,
+    model_consensus: data.model_consensus || data.modelConsensus || null,
+    disclaimer: data.disclaimer || ''
+  }
 })
 
 const renderBacktestChart = async () => {
@@ -186,6 +202,21 @@ const handleBacktest = async () => {
     backtestLoading.value = false
   }
   await renderBacktestChart()
+}
+
+const loadDiagnostic = async () => {
+  if (!strategy.value) return
+  diagnosticLoading.value = true
+  diagnosticError.value = ''
+  diagnosticData.value = null
+  try {
+    const res = await getStrategyDiagnostic(strategy.value.id)
+    diagnosticData.value = unwrap(res)
+  } catch (e) {
+    diagnosticError.value = errorMessage(e, '模型诊断加载失败，请稍后重试')
+  } finally {
+    diagnosticLoading.value = false
+  }
 }
 
 const togglePaper = async () => {
@@ -323,6 +354,58 @@ onUnmounted(() => {
                 <span class="trade-reason" v-if="trade.reason">触发: {{ trade.reason }}</span>
               </div>
             </div>
+          </template>
+        </section>
+
+        <section class="card diagnostic-card">
+          <div class="diagnostic-head">
+            <div>
+              <h3>模型诊断</h3>
+              <p>仅作低权重参考，不参与策略买卖决策</p>
+            </div>
+            <button class="btn-diagnostic" :disabled="diagnosticLoading" @click="loadDiagnostic">
+              {{ diagnosticLoading ? '加载中...' : diagnosticData ? '重新加载' : '加载模型诊断' }}
+            </button>
+          </div>
+
+          <p v-if="diagnosticError" class="error">{{ diagnosticError }}</p>
+
+          <template v-if="diagnostic">
+            <div class="diagnostic-grid">
+              <div class="diagnostic-group">
+                <span class="group-label">风险指标</span>
+                <div v-if="diagnostic.risk && !diagnostic.risk.error" class="diagnostic-meta">
+                  <span>波动率: {{ formatNumber(diagnostic.risk.annual_volatility_pct, 2) }}%</span>
+                  <span>最大回撤: {{ formatPct(diagnostic.risk.max_drawdown_pct) }}</span>
+                  <span>当前回撤: {{ formatPct(diagnostic.risk.current_drawdown_pct) }}</span>
+                  <span>距 MA20: {{ formatPct(diagnostic.risk.distance_from_ma20_pct) }}</span>
+                  <span>风险等级: <b>{{ diagnostic.risk.risk_level || 'N/A' }}</b></span>
+                </div>
+                <div v-else class="empty">风险数据不可用</div>
+              </div>
+
+              <div class="diagnostic-group">
+                <span class="group-label">模型状态</span>
+                <div v-if="diagnostic.model_status" class="diagnostic-meta">
+                  <span>可用: {{ diagnostic.model_status.available ? '是' : '否' }}</span>
+                  <span>缓存命中: {{ diagnostic.model_status.cache_hit ? '是' : '否' }}</span>
+                  <span>磁盘模型: {{ diagnostic.model_status.disk_model_available ? '有' : '无' }}</span>
+                  <span>参与决策: {{ diagnostic.model_status.decision_use ? '是' : '否' }}</span>
+                </div>
+                <div v-else class="empty">模型状态不可用</div>
+              </div>
+
+              <div class="diagnostic-group">
+                <span class="group-label">模型共识</span>
+                <div v-if="diagnostic.model_consensus" class="diagnostic-meta">
+                  <span>共识: <b>{{ diagnostic.model_consensus.consensus || 'neutral' }}</b></span>
+                  <span>置信度: <b>{{ diagnostic.model_consensus.confidence || 'N/A' }}</b></span>
+                  <span>参与决策: {{ diagnostic.model_consensus.decision_use ? '是' : '否' }}</span>
+                </div>
+                <div v-else class="empty">模型共识不可用</div>
+              </div>
+            </div>
+            <p class="disclaimer">{{ diagnostic.disclaimer || '模型诊断仅作低权重参考，不构成投资建议。' }}</p>
           </template>
         </section>
 
@@ -474,6 +557,55 @@ main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }
 }
 
 .backtest-trades h4 { margin: 4px 0 10px; font-size: 14px; }
+
+.diagnostic-card { border-left: 3px solid #d9d9d9; }
+.diagnostic-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.diagnostic-head h3 { margin: 0; }
+.diagnostic-head p { margin: 4px 0 0; color: #999; font-size: 12px; }
+.btn-diagnostic {
+  padding: 7px 14px;
+  border: none;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  color: white;
+  background: #8c8c8c;
+}
+.btn-diagnostic:hover { background: #595959; }
+.btn-diagnostic:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.diagnostic-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+.diagnostic-group {
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  padding: 12px;
+}
+.group-label { display: block; font-size: 12px; color: #888; margin-bottom: 8px; }
+.diagnostic-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: #555;
+}
+.diagnostic-meta b { color: #333; }
+.disclaimer {
+  margin: 12px 0 0;
+  color: #999;
+  font-size: 12px;
+}
 
 .account-grid {
   display: grid;

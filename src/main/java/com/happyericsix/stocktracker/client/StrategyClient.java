@@ -33,6 +33,10 @@ public class StrategyClient {
         return post("/api/v1/strategies/backtest", java.util.Map.of("strategy_json", raw(configJson)));
     }
 
+    public JsonNode getModelDiagnostic(String symbol) {
+        return get("/api/v1/agent/diagnostic/" + symbol);
+    }
+
     public JsonNode evaluateBar(String configJson, String symbol, String date, JsonNode position) {
         var body = new HashMap<String, Object>();
         body.put("strategy_json", raw(configJson));
@@ -50,6 +54,18 @@ public class StrategyClient {
     private JsonNode post(String uri, Object body) {
         try {
             return webClient.post().uri(uri).bodyValue(body)
+                    .retrieve().bodyToMono(JsonNode.class)
+                    .timeout(Duration.ofSeconds(60))
+                    .block();
+        } catch (WebClientResponseException e) {
+            log.warn("Strategy service error for {}: HTTP {} {}", uri, e.getStatusCode(), e.getResponseBodyAsString());
+            throw e;
+        }
+    }
+
+    private JsonNode get(String uri) {
+        try {
+            return webClient.get().uri(uri)
                     .retrieve().bodyToMono(JsonNode.class)
                     .timeout(Duration.ofSeconds(60))
                     .block();

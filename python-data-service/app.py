@@ -301,6 +301,27 @@ async def agent_chat(req: Request):
         return {"replies": ["⚠️ 处理出错了，稍后再试"], "strategy_json": None}
 
 
+@app.get("/api/v1/agent/diagnostic/{symbol}")
+async def agent_diagnostic(symbol: str):
+    """Return risk metrics and optional model diagnostics for one symbol."""
+    try:
+        import agent.tool_registry as tool_registry
+
+        def collect():
+            return {
+                "symbol": symbol,
+                "risk": tool_registry.execute_tool("get_risk_metrics", {"symbol": symbol}),
+                "model_status": tool_registry.execute_tool("get_model_status", {"symbol": symbol}),
+                "model_consensus": tool_registry.execute_tool("get_model_consensus", {"symbol": symbol}),
+                "disclaimer": "模型诊断仅作低权重参考，不构成投资建议，不参与策略买卖决策。",
+            }
+
+        return await asyncio.to_thread(collect)
+    except Exception as e:
+        logger.error(f"agent diagnostic error for {symbol}: {e}", exc_info=True)
+        return {"symbol": symbol, "error": str(e)}
+
+
 @app.post("/api/v1/strategies/validate")
 async def validate_strategy_endpoint(req: Request):
     from agent.strategy_schema import validate_strategy_config

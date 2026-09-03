@@ -1,6 +1,7 @@
 package com.happyericsix.stocktracker.service;
 
 import com.happyericsix.stocktracker.client.StrategyClient;
+import com.happyericsix.stocktracker.dto.ModelDiagnosticResponse;
 import com.happyericsix.stocktracker.dto.StrategyRequest;
 import com.happyericsix.stocktracker.dto.StrategyResponse;
 import com.happyericsix.stocktracker.entity.Strategy;
@@ -98,6 +99,21 @@ public class StrategyService {
         strategyRepository.save(strategy);
         log.info("User {} ran backtest for strategy id={}", username, id);
         return result;
+    }
+
+    public ModelDiagnosticResponse getModelDiagnostic(String username, Long id) {
+        Strategy strategy = strategyRepository.findByIdAndUserId(id, getUser(username).getId())
+                .orElseThrow(() -> new IllegalArgumentException("策略不存在"));
+
+        JsonNode node = strategyClient.getModelDiagnostic(strategy.getSymbol());
+        String symbol = node.hasNonNull("symbol") ? node.get("symbol").asText() : strategy.getSymbol();
+        return new ModelDiagnosticResponse(
+                symbol,
+                node.get("risk"),
+                node.get("model_status"),
+                node.get("model_consensus"),
+                node.hasNonNull("disclaimer") ? node.get("disclaimer").asText() : ""
+        );
     }
 
     @Transactional

@@ -2,6 +2,7 @@ package com.happyericsix.stocktracker.controller;
 
 import com.happyericsix.stocktracker.dto.PaperAccountResponse;
 import com.happyericsix.stocktracker.dto.PaperTradeResponse;
+import com.happyericsix.stocktracker.dto.ModelDiagnosticResponse;
 import com.happyericsix.stocktracker.dto.Result;
 import com.happyericsix.stocktracker.dto.StrategyRequest;
 import com.happyericsix.stocktracker.dto.StrategyResponse;
@@ -56,6 +57,13 @@ public class StrategyController {
             @PathVariable Long id,
             Authentication authentication) {
         return Result.success(strategyService.runBacktest(authentication.getName(), id));
+    }
+
+    @GetMapping("/{id}/diagnostic")
+    public Result<ModelDiagnosticResponse> getModelDiagnostic(
+            @PathVariable Long id,
+            Authentication authentication) {
+        return Result.success(strategyService.getModelDiagnostic(authentication.getName(), id));
     }
 
     @PostMapping("/{id}/paper/start")
