@@ -219,7 +219,7 @@ const renderChart = (sym, data) => {
     const kline = data.map(d => [+d.open, +d.close, +d.low, +d.high])
     series.push({
       name: 'K线', type: 'candlestick', data: kline,
-      tooltip: { valueFormatter: (v) => v.map(x => (+x).toFixed(3)).join(' / ') },
+      tooltip: { valueFormatter: (v) => (Array.isArray(v) ? v.map(x => (+x).toFixed(3)).join(' / ') : (+v).toFixed(3)) },
       itemStyle: {
         color: '#ff4d4f', color0: '#52c41a',
         borderColor: '#ff4d4f', borderColor0: '#52c41a'
@@ -242,7 +242,7 @@ const renderChart = (sym, data) => {
     const ohlc = data.map(d => [+d.open, +d.close, +d.low, +d.high])
     series.push({
       name: 'OHLC', type: 'candlestick', data: ohlc,
-      tooltip: { valueFormatter: (v) => v.map(x => (+x).toFixed(3)).join(' / ') },
+      tooltip: { valueFormatter: (v) => (Array.isArray(v) ? v.map(x => (+x).toFixed(3)).join(' / ') : (+v).toFixed(3)) },
       renderItem: (params, api) => {
         const open = api.value(0)
         const close = api.value(1)
@@ -327,6 +327,7 @@ const renderChart = (sym, data) => {
       text: `${stockName} ${subPeriodLabel}`,
       subtext: `当前价: ${priceStr}  |  更新: ${lastUpdate.value}`,
       left: 'center',
+      top: 0,
       textStyle: { fontSize: 16, fontWeight: 600 },
       subtextStyle: { fontSize: 12 }
     },
@@ -335,10 +336,10 @@ const renderChart = (sym, data) => {
       backgroundColor: 'rgba(50, 50, 50, 0.9)', borderWidth: 0,
       textStyle: { color: '#fff', fontSize: 12 }, confine: true
     },
-    legend: { data: legend, top: 30, textStyle: { fontSize: 12 } },
+    legend: { data: legend, top: 46, textStyle: { fontSize: 12 } },
     grid: [
-      { left: 50, right: 20, top: 70, height: '60%' },
-      { left: 50, right: 20, top: '76%', height: '14%' }
+      { left: 50, right: 20, top: 82, height: '58%' },
+      { left: 50, right: 20, top: '76%', height: '12%' }
     ],
     xAxis: [
       { type: 'category', data: dates, scale: true, boundaryGap: false,
@@ -366,7 +367,7 @@ const renderChart = (sym, data) => {
       { name: '成交量', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: volumes,
         itemStyle: { color: (p) => (p.data[2] > 0 ? '#ff4d4f' : '#52c41a') } }
     ]
-  })
+  }, { notMerge: true })
 }
 
 // ============ 事件 ============
@@ -393,7 +394,10 @@ const onChartTypeChange = (t) => {
   loadData(symbol.value)
 }
 
-const onRangeChange = () => loadData(symbol.value)
+const onRangeChange = (value) => {
+  range.value = value
+  loadData(symbol.value)
+}
 
 onMounted(() => loadData(route.params.symbol))
 onUnmounted(disposeChart)
@@ -475,7 +479,7 @@ const macdColor = (h) => h == null ? '#999' : h >= 0 ? '#ff4d4f' : '#52c41a'
           :key="r.value"
           class="range-btn"
           :class="{ active: range === r.value }"
-          @click="range = r.value; onRangeChange()"
+          @click="onRangeChange(r.value)"
         >{{ r.label }}</button>
       </div>
     </div>

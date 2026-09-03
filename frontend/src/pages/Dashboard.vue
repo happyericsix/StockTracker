@@ -87,6 +87,7 @@ const remove = async (sym) => {
 const goDetail = (sym) => router.push('/chart/' + sym)
 
 const goAssistant = () => router.push('/assistant')
+const goStrategies = () => router.push('/strategies')
 const goMessages = () => router.push('/messages')
 const goAlerts = () => router.push('/alerts')
 const goAddAlert = (sym) => router.push({ path: '/alerts', query: { symbol: sym, new: '1' } })
@@ -114,13 +115,24 @@ onMounted(() => {
       </div>
     </header>
     <main>
-      <section class="assistant-entry" @click="goAssistant">
-        <div class="assistant-icon">🤖</div>
-        <div class="assistant-copy">
+      <section class="feature-grid">
+        <div class="feature-card assistant-entry" @click="goAssistant">
+          <div class="feature-icon">🤖</div>
+          <div class="feature-copy">
           <strong>智能助手</strong>
           <span>自然语言查行情、生成交易策略、回测与模拟盘</span>
+          </div>
+          <span class="feature-arrow">→</span>
         </div>
-        <span class="assistant-arrow">→</span>
+
+        <div class="feature-card strategy-entry" @click="goStrategies">
+          <div class="feature-icon">📚</div>
+          <div class="feature-copy">
+            <strong>策略库</strong>
+            <span>统一管理策略、回测与模拟盘</span>
+          </div>
+          <span class="feature-arrow">→</span>
+        </div>
       </section>
 
       <section class="search-section">
@@ -187,23 +199,36 @@ header h1 { margin: 0; font-size: 20px; }
   min-width: 16px;
   text-align: center;
 }
-main { max-width: 640px; margin: 0 auto; padding: 24px 16px; }
+main { max-width: 760px; margin: 0 auto; padding: 24px 16px; }
 
-.assistant-entry {
+.feature-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.feature-card {
   display: flex;
   align-items: center;
   gap: 14px;
-  background: linear-gradient(135deg, #1677ff 0%, #69b1ff 100%);
   color: white;
   border-radius: 12px;
   padding: 16px 18px;
-  margin-bottom: 20px;
   cursor: pointer;
-  box-shadow: 0 8px 20px rgba(22, 119, 255, 0.22);
   transition: transform 0.2s, box-shadow 0.2s;
 }
-.assistant-entry:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(22, 119, 255, 0.3); }
-.assistant-icon {
+.feature-card:hover { transform: translateY(-1px); }
+.assistant-entry {
+  background: linear-gradient(135deg, #1677ff 0%, #69b1ff 100%);
+  box-shadow: 0 8px 20px rgba(22, 119, 255, 0.22);
+}
+.assistant-entry:hover { box-shadow: 0 10px 24px rgba(22, 119, 255, 0.3); }
+.strategy-entry {
+  background: linear-gradient(135deg, #722ed1 0%, #b37feb 100%);
+  box-shadow: 0 8px 20px rgba(114, 46, 209, 0.22);
+}
+.strategy-entry:hover { box-shadow: 0 10px 24px rgba(114, 46, 209, 0.3); }
+.feature-icon {
   width: 46px;
   height: 46px;
   border-radius: 12px;
@@ -214,10 +239,14 @@ main { max-width: 640px; margin: 0 auto; padding: 24px 16px; }
   font-size: 24px;
   flex-shrink: 0;
 }
-.assistant-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.assistant-copy strong { font-size: 17px; }
-.assistant-copy span { font-size: 12px; opacity: 0.9; }
-.assistant-arrow { margin-left: auto; font-size: 22px; opacity: 0.9; }
+.feature-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.feature-copy strong { font-size: 17px; }
+.feature-copy span { font-size: 12px; opacity: 0.9; }
+.feature-arrow { margin-left: auto; font-size: 22px; opacity: 0.9; }
+
+@media (max-width: 640px) {
+  .feature-grid { grid-template-columns: 1fr; }
+}
 
 .search-section { display: flex; gap: 8px; margin-bottom: 20px; align-items: flex-start; }
 .search-section button { padding: 10px 20px; background: #1677ff; color: white; border: none; border-radius: 4px; cursor: pointer; white-space: nowrap; flex-shrink: 0; }

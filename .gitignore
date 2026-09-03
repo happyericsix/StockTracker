@@ -79,6 +79,10 @@ python-data-service/lagrange/Lagrange.OneBot/bin/Release/
 ### Backups / temporary ###
 _backup_*/
 
+### Runtime logs ###
+*.out.log
+*.err.log
+
 ### Quant models / MLflow (generated) ###
 python-data-service/models/
 python-data-service/mlruns/
