@@ -150,7 +150,21 @@ const hasStrategyContent = (content) => {
   return hasSchema && (hasJsonFence || hasEntryExit)
 }
 
+const getStrategyId = (msg) => {
+  if (!msg || !msg.metadata) return null
+  try {
+    const meta = typeof msg.metadata === 'string' ? JSON.parse(msg.metadata) : msg.metadata
+    return meta && meta.strategyId ? String(meta.strategyId) : null
+  } catch (e) {
+    return null
+  }
+}
+
 const goStrategies = () => router.push('/strategies')
+const goStrategy = (msg) => {
+  const id = getStrategyId(msg)
+  router.push(id ? `/strategies/${id}` : '/strategies')
+}
 
 const send = async () => {
   const text = input.value.trim()
@@ -224,8 +238,8 @@ onUnmounted(() => {
         <div v-if="m.type !== 'CHAT_USER'" class="bubble markdown-body" v-html="renderMarkdown(m.content)"></div>
         <div v-else class="bubble">{{ m.content }}</div>
           <div class="time">{{ formatTime(m.createdAt) }}</div>
-          <div v-if="m.type !== 'CHAT_USER' && hasStrategyContent(m.content)" class="strategy-action">
-            <button class="strategy-btn" @click="goStrategies">查看策略库</button>
+          <div v-if="m.type !== 'CHAT_USER' && (getStrategyId(m) || hasStrategyContent(m.content))" class="strategy-action">
+            <button class="strategy-btn" @click="goStrategy(m)">{{ getStrategyId(m) ? '查看回测与策略详情' : '查看策略库' }}</button>
           </div>
         </div>
         <div v-if="m.type === 'CHAT_USER'" class="avatar mine-avatar">我</div>

@@ -10,7 +10,7 @@ from agent.tool_registry import TOOL_SCHEMAS, execute_tool
 from agent.strategy_schema import extract_strategy_json, validate_strategy_config
 
 logger = logging.getLogger(__name__)
-MAX_STEPS = 6
+MAX_STEPS = 12
 TOOL_TIMEOUT = 15
 
 SYSTEM_PROMPT = """你是股票策略助手。用户可能让你生成交易策略。
@@ -25,9 +25,10 @@ SYSTEM_PROMPT = """你是股票策略助手。用户可能让你生成交易策�
 说明“模型是否可参考”，不能替代规则、风控和历史回测。
 
 若用户在描述策略，请先查行情和技术指标，必要时查看风险指标和模型状态，然后生成
-完整的策略 JSON，调用一次 validate_strategy 校验，成功后调用 finalize_strategy，
-并在最终回复中用 ```json 代码块输出同一份 JSON。不要反复猜测字段格式；如果校验
-失败，根据错误信息一次性修正后重新校验。
+完整的策略 JSON，调用一次 validate_strategy 校验，成功后调用 backtest_strategy
+做一次历史回测，再调用 finalize_strategy，并在最终回复中用 ```json 代码块输出
+同一份 JSON。不要反复猜测字段格式；如果校验失败，根据错误信息一次性修正后重新
+校验。回测结果只用于验证规则是否成立，不代表未来收益。
 
 策略 JSON 必须严格符合以下结构：
 ```json
@@ -63,8 +64,58 @@ entry.logic / exit.logic 只能是 all 或 any。position.type 只能是 full �
 如果用户没有指定股票，请先调用 search_stock 解析，不要擅自假设股票代码。
 若用户只是闲聊或查行情，直接回复，不需要生成策略 JSON。"""
 
-CORRECTION_PROMPT = "请重新输出，必须用 ```json 代码块给出 schema_version=1.0 的策略 JSON"
+CORRECTION_PROMPT = "请直接输出最终策略 JSON，不要输出推理过程。必须用 ```json 代码块给出 schema_version=1.0 的策略 JSON。"
 DEGRADE_REPLY = "没理解，请换个说法描述你的策略"
+
+
+def _describe_conditions(conditions):
+    labels = []
+    for cond in conditions or []:
+        ctype = cond.get("type", "")
+        if ctype == "ma_cross":
+            labels.append(f"MA{cond.get('fast')}/{cond.get('slow')} {cond.get('direction')}")
+        elif ctype == "macd_cross":
+            labels.append(f"MACD {cond.get('direction')}")
+        elif ctype in {"rsi_above", "rsi_below", "price_above", "price_below",
+                       "stop_loss_pct", "take_profit_pct", "trailing_stop_pct"}:
+            labels.append(f"{ctype} {cond.get('value')}")
+        else:
+            labels.append(ctype)
+    return "；".join(labels) if labels else "未配置"
+
+
+def _build_strategy_reply(cfg, backtest):
+    data = cfg.model_dump()
+    entry = data.get("entry") or {}
+    exit_rule = data.get("exit") or {}
+    lines = [
+        f"✅ 已生成策略「{data.get('name', '策略')}」（{data.get('symbol', '')}）",
+        "",
+        "**策略配置**",
+        f"- 入场条件：{_describe_conditions(entry.get('conditions'))}",
+        f"- 出场条件：{_describe_conditions(exit_rule.get('conditions'))}",
+    ]
+
+    lines.append("")
+    lines.append("**回测验证**")
+    if isinstance(backtest, dict) and "total_return_pct" in backtest:
+        lines.extend([
+            f"- 总收益：{backtest.get('total_return_pct')}%",
+            f"- 买入持有：{backtest.get('buy_and_hold_return_pct')}%",
+            f"- 超额收益：{backtest.get('excess_return_pct')}%",
+            f"- 最大回撤：{backtest.get('max_drawdown_pct')}%",
+            f"- 夏普比率：{backtest.get('sharpe_ratio')}",
+            f"- 胜率：{backtest.get('win_rate')}%",
+            f"- 交易笔数：{backtest.get('trade_count')}",
+        ])
+    else:
+        lines.append("- 当前历史数据不足，回测暂未完成；策略已保存，可稍后在策略详情重试。")
+
+    lines.extend([
+        "",
+        "策略已保存到策略库，可继续运行回测或启动模拟盘。以上仅作规则验证，不构成收益承诺。",
+    ])
+    return "\n".join(lines)
 
 
 class _ToolResult:
@@ -127,6 +178,13 @@ _TOOL_EXECUTOR = _DaemonWorkerPool(max_workers=2)
 def _looks_like_strategy_attempt(text):
     lowered = (text or "").lower()
     return "```json" in lowered or "schema_version" in lowered
+
+
+def _looks_like_strategy_request(text):
+    lowered = (text or "").lower()
+    keywords = ("策略", "买入", "卖出", "止损", "止盈", "均线", "rsi", "macd",
+                "仓位", "回测", "模拟盘", "建仓", "平仓")
+    return any(keyword in lowered for keyword in keywords)
 
 
 def _parse_tool_args(raw_args):
@@ -205,15 +263,29 @@ def run_agent(user_id, message, history=None):
         if isinstance(strategy, dict):
             cfg, err = validate_strategy_config(strategy)
             if err is None:
+                backtest_result = execute_tool("backtest_strategy", {"strategy_json": cfg.model_dump()})
+                if not isinstance(backtest_result, dict) or not backtest_result.get("valid"):
+                    backtest_error = (backtest_result or {}).get("error") if isinstance(backtest_result, dict) else "未知错误"
+                    if retry_used:
+                        return {"replies": [DEGRADE_REPLY], "strategy_json": None}
+                    retry_used = True
+                    messages.append({
+                        "role": "user",
+                        "content": f"策略校验通过，但回测失败：{backtest_error}。请检查数据与规则后重新输出策略 JSON。",
+                    })
+                    continue
+                backtest = backtest_result.get("backtest")
+                summary = _build_strategy_reply(cfg, backtest)
                 return {
-                    "replies": llm_service.split_replies(text),
+                    "replies": llm_service.split_replies(summary),
                     "strategy_json": cfg.model_dump(),
+                    "backtest": backtest,
                 }
 
         if retry_used:
             return {"replies": [DEGRADE_REPLY], "strategy_json": None}
 
-        if strategy is not None or _looks_like_strategy_attempt(text):
+        if strategy is not None or _looks_like_strategy_attempt(text) or _looks_like_strategy_request(message):
             retry_used = True
             messages.append({"role": "user", "content": CORRECTION_PROMPT})
             continue

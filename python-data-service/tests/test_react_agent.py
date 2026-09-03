@@ -26,13 +26,39 @@ VALID_STRATEGY = {
 INVALID_STRATEGY = {"schema_version": "1.0", "name": "bad"}
 
 
+def fake_execute_tool(name, args):
+    if name == "validate_strategy":
+        return {"valid": True, "error": None, "normalized": args.get("strategy_json")}
+    if name == "backtest_strategy":
+        return {
+            "valid": True,
+            "backtest": {
+                "symbol": "600519",
+                "total_return_pct": 1.23,
+                "buy_and_hold_return_pct": 0.55,
+                "excess_return_pct": 0.68,
+                "max_drawdown_pct": -12.34,
+                "sharpe_ratio": 0.81,
+                "win_rate": 42.5,
+                "trade_count": 8,
+                "trade_log": [],
+                "equity_curve": [],
+                "benchmark_equity_curve": [],
+            },
+        }
+    return {"ok": True}
+
+
 def _run_with_completion(completion, user_id="u1", message="做一个20日上穿60日买入", history=None):
     original = ra.llm_service.chat_completion
+    original_execute_tool = ra.execute_tool
     ra.llm_service.chat_completion = completion
+    ra.execute_tool = fake_execute_tool
     try:
         return ra.run_agent(user_id, message, history)
     finally:
         ra.llm_service.chat_completion = original
+        ra.execute_tool = original_execute_tool
 
 
 def fake_completion(messages, tools=None, temperature=0.2, max_tokens=1200):
@@ -40,13 +66,9 @@ def fake_completion(messages, tools=None, temperature=0.2, max_tokens=1200):
 
 
 def test_run_agent_returns_strategy():
-    original = ra.llm_service.chat_completion
-    ra.llm_service.chat_completion = fake_completion
-    try:
-        out = ra.run_agent("u1", "做一个20日上穿60日买入", [])
-    finally:
-        ra.llm_service.chat_completion = original
+    out = _run_with_completion(fake_completion)
     assert out["strategy_json"] is not None
+    assert isinstance(out["backtest"], dict)
     assert len(out["replies"]) >= 1
 
 
@@ -165,6 +187,43 @@ def test_schema_invalid_final_json_is_not_returned():
     assert out["strategy_json"] is None
     assert any("没理解" in reply for reply in out["replies"])
 
+
+def test_valid_strategy_is_backtested_and_reply_is_clean():
+    out = _run_with_completion(fake_completion)
+    assert out["strategy_json"] is not None
+    assert out["backtest"]["total_return_pct"] == 1.23
+    joined_replies = "\n".join(out["replies"])
+    assert "```json" not in joined_replies
+    assert "回测验证" in joined_replies
+
+
+def test_backtest_failure_retries_then_degrades():
+    calls = {"n": 0}
+
+    def fake(messages, tools=None, temperature=0.2, max_tokens=1200):
+        calls["n"] += 1
+        text = "策略如下：\n```json\n" + json.dumps(VALID_STRATEGY, ensure_ascii=False) + "\n```"
+        return {"message": {"role": "assistant", "content": text}}
+
+    original = ra.llm_service.chat_completion
+    original_execute_tool = ra.execute_tool
+
+    def failing_backtest(name, args):
+        if name == "backtest_strategy":
+            return {"valid": False, "error": "data insufficient"}
+        return fake_execute_tool(name, args)
+
+    ra.llm_service.chat_completion = fake
+    ra.execute_tool = failing_backtest
+    try:
+        out = ra.run_agent("u1", "做一个20日上穿60日买入", [])
+    finally:
+        ra.llm_service.chat_completion = original
+        ra.execute_tool = original_execute_tool
+
+    assert calls["n"] == 2
+    assert out["strategy_json"] is None
+    assert any("没理解" in reply for reply in out["replies"])
 
 
 
