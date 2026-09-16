@@ -12,8 +12,10 @@ export default defineConfig({
         name: 'Stock Tracker',
         short_name: 'Stock',
         description: '量化股票分析助手',
-        theme_color: '#1a73e8',
-        background_color: '#ffffff',
+        // 与页面顶部导航同色（--color-bg-inverse: #1a1a2e），
+        // 独立模式下状态栏与 header 连成一片；旧值 #1a73e8 是第三个游离的蓝色。
+        theme_color: '#1a1a2e',
+        background_color: '#f0f2f5',
         display: 'standalone',
         orientation: 'portrait',
         start_url: '/',

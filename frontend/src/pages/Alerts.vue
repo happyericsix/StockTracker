@@ -17,7 +17,13 @@ const alerts = ref([])
 
 const loading = ref(false)
 
+// 表单校验错误：显示在表单卡内部（表单开着时用户就在旁边）
 const error = ref('')
+
+// 操作类错误（切换开关、删除、提交后表单已关闭的情况）挂在页面级。
+// 不能和表单校验错误共用一个状态 —— 表单卡里的 <p class="error"> 会随表单一起被
+// v-if 卸载，而提交走本地兜底时会 resetForm() 关掉表单，那条错误就永远看不到了。
+const opError = ref('')
 
 const success = ref('')
 
@@ -44,14 +50,17 @@ const parseFieldErrors = (message) => {
 // 返回: { retryable, status, message, fieldErrors }
 //   - retryable: true 表示 5xx/网络错(可走本地兜底)
 //   - fieldErrors: 仅 4xx 且能从 message 解析出字段错误时填充
+// 注意 status 优先取 businessCode：Result.error(...) 是**带 HTTP 200** 返回的，
+// 直接用 HTTP 状态会把 4xx 类业务拒绝误判成"后端不可用"从而走错分支
+// （见 api/request.js 的响应拦截器）。
 const classifyError = (e) => {
-  const status = e.response?.status
+  const status = e.businessCode ?? e.response?.status
   const rawMsg = e.response?.data?.message
   if (status >= 400 && status < 500) {
     return {
       retryable: false,
       status,
-      message: rawMsg || `请求被拒绝 (${status})`,
+      message: rawMsg || `请求被拒绝（${status}），请检查填写内容后重试`,
       fieldErrors: parseFieldErrors(rawMsg)
     }
   }
@@ -291,7 +300,8 @@ const submitForm = async () => {
     const cls = classifyError(e)
     if (cls.retryable) {
       // 5xx / 网络:后端真挂,才走本地兜底
-      error.value = cls.message + ',已暂存到本地'
+      // 注意：下面 resetForm() 会关掉表单，所以这条必须挂在页面级
+      opError.value = cls.message + ',已暂存到本地'
       await saveLocalFallback()
       resetForm()
     } else {
@@ -312,6 +322,7 @@ const submitForm = async () => {
 
 const handleToggle = async (item) => {
 
+  opError.value = ''
   const previous = item.enabled
   const next = !previous
   // 乐观切换 UI,失败时回滚
@@ -324,11 +335,11 @@ const handleToggle = async (item) => {
       // 5xx/网络:本地切换 + 标记
       item._localOnly = true
       saveLocal()
-      error.value = `后端暂不可用,已本地切换 ${item.name || item.symbol} 的开关状态`
+      opError.value = `后端暂不可用,已本地切换 ${item.name || item.symbol} 的开关状态`
     } else {
       // 4xx:回滚到原状态,显示后端错误
       item.enabled = previous
-      error.value = `切换失败: ${cls.message}`
+      opError.value = `切换失败: ${cls.message}`
     }
   }
 
@@ -340,6 +351,7 @@ const handleDelete = async (item) => {
 
   if (!confirm(`确认删除 ${item.name || item.symbol} 的预警？`)) return
 
+  opError.value = ''
   const previousList = alerts.value.slice()
   // 乐观删除 UI,失败时回滚
   alerts.value = alerts.value.filter(a => a.id !== item.id)
@@ -352,11 +364,11 @@ const handleDelete = async (item) => {
       item._localOnly = true
       alerts.value.push(item)
       saveLocal()
-      error.value = `后端暂不可用,已在本地暂存删除 ${item.name || item.symbol}(未真正同步)`
+      opError.value = `后端暂不可用,已在本地暂存删除 ${item.name || item.symbol}(未真正同步)`
     } else {
       // 4xx:回滚列表,显示后端错误
       alerts.value = previousList
-      error.value = `删除失败: ${cls.message}`
+      opError.value = `删除失败: ${cls.message}`
     }
   }
 
@@ -374,15 +386,20 @@ const loadAlerts = async () => {
 
   } catch (e) {
 
+    // 静默回退到本地缓存会让用户以为"确实没有预警"，所以必须说出来
     const stored = localStorage.getItem('alerts_data')
 
     if (stored) {
 
       try { alerts.value = JSON.parse(stored) } catch { alerts.value = [] }
 
+      opError.value = '预警列表加载失败，当前显示的是本地暂存的数据，可能不是最新。'
+
     } else {
 
       alerts.value = []
+
+      opError.value = '预警列表加载失败，请检查网络后重试。'
 
     }
 
@@ -550,17 +567,20 @@ onMounted(async () => {
 
       <div v-if="showForm" class="form-card">
 
-        <h3>{{ editingId ? '编辑预警' : '添加预警' }}</h3>
+        <!-- 二级标题：原来是 h3，导致标题大纲从 h1 直接跳到 h3（跳级） -->
+        <h2>{{ editingId ? '编辑预警' : '添加预警' }}</h2>
 
         <div class="form-row">
 
           <label class="form-field" :class="{ 'has-error': fieldErrors.symbol }">
-            <input v-model="form.symbol" placeholder="股票代码（AAPL / 600519 / 00700）" :disabled="!!editingId" />
+            <!-- 这三个字段视觉上靠 placeholder 充当标签（输入后即消失），
+                 所以补 aria-label 给可访问名称 -->
+            <input v-model="form.symbol" aria-label="股票代码" placeholder="股票代码（AAPL / 600519 / 00700）" :disabled="!!editingId" />
             <span v-if="fieldErrors.symbol" class="field-error">{{ fieldErrors.symbol }}</span>
           </label>
 
           <label class="form-field" :class="{ 'has-error': fieldErrors.conditionType }">
-            <select v-model="form.conditionType">
+            <select v-model="form.conditionType" aria-label="条件类型">
               <option v-for="ct in conditionTypes" :key="ct.value" :value="ct.value">
                 {{ ct.label }}
               </option>
@@ -569,7 +589,7 @@ onMounted(async () => {
           </label>
 
           <label class="form-field" :class="{ 'has-error': fieldErrors.threshold }">
-            <input v-model="form.threshold" type="number" step="0.01" :placeholder="getConditionDesc(form.conditionType)" />
+            <input v-model="form.threshold" class="num" aria-label="阈值" type="number" step="0.01" :placeholder="getConditionDesc(form.conditionType)" />
             <span v-if="fieldErrors.threshold" class="field-error">{{ fieldErrors.threshold }}</span>
           </label>
 
@@ -580,17 +600,17 @@ onMounted(async () => {
           <div class="form-row form-row-advanced">
             <label class="form-field" :class="{ 'has-error': fieldErrors.cooldownMinutes }">
               <span class="field-label">冷却（分钟，默认 5）</span>
-              <input v-model="form.cooldownMinutes" type="number" min="0" max="1440" placeholder="5" />
+              <input v-model="form.cooldownMinutes" class="num" type="number" min="0" max="1440" placeholder="5" />
               <span v-if="fieldErrors.cooldownMinutes" class="field-error">{{ fieldErrors.cooldownMinutes }}</span>
             </label>
             <label class="form-field" :class="{ 'has-error': fieldErrors.resetRatio }">
               <span class="field-label">重置比率（0~1，默认 0.5）</span>
-              <input v-model="form.resetRatio" type="number" step="0.05" min="0" max="1" placeholder="0.5" />
+              <input v-model="form.resetRatio" class="num" type="number" step="0.05" min="0" max="1" placeholder="0.5" />
               <span v-if="fieldErrors.resetRatio" class="field-error">{{ fieldErrors.resetRatio }}</span>
             </label>
             <label class="form-field" :class="{ 'has-error': fieldErrors.reArmHours }">
               <span class="field-label">重置小时（默认 2）</span>
-              <input v-model="form.reArmHours" type="number" min="1" max="720" placeholder="2" />
+              <input v-model="form.reArmHours" class="num" type="number" min="1" max="720" placeholder="2" />
               <span v-if="fieldErrors.reArmHours" class="field-error">{{ fieldErrors.reArmHours }}</span>
             </label>
           </div>
@@ -598,7 +618,7 @@ onMounted(async () => {
 
         <p class="condition-desc">{{ getConditionDesc(form.conditionType) }}</p>
 
-        <p v-if="error" class="error">{{ error }}</p>
+        <p v-if="error" class="error" role="alert">{{ error }}</p>
 
         <div class="form-actions">
 
@@ -616,7 +636,11 @@ onMounted(async () => {
 
 
 
-      <p v-if="success" class="success">{{ success }}</p>
+      <!-- 页面级操作错误：与表单校验错误分开，
+           否则切换/删除失败时（表单是关着的）用户看不到任何反馈 -->
+      <p v-if="opError" class="error" role="alert">{{ opError }}</p>
+
+      <p v-if="success" class="success" role="status">{{ success }}</p>
 
 
 
@@ -646,14 +670,19 @@ onMounted(async () => {
 
             <div class="alert-right">
 
-              <div class="alert-threshold">阈值: {{ item.threshold }}</div>
-              <div v-if="item.conditionType === 'trailing_take_profit' && item.highWatermark" class="alert-hwm">
+              <div class="alert-threshold num">阈值: {{ item.threshold }}</div>
+              <div v-if="item.conditionType === 'trailing_take_profit' && item.highWatermark" class="alert-hwm num">
                 最高点: {{ Number(item.highWatermark).toFixed(2) }}
               </div>
 
               <label class="toggle-switch">
 
-                <input type="checkbox" :checked="item.enabled" @change="handleToggle(item)" />
+                <input
+                  type="checkbox"
+                  :checked="item.enabled"
+                  :aria-label="`${item.name || item.symbol} 预警开关`"
+                  @change="handleToggle(item)"
+                />
 
                 <span class="toggle-slider"></span>
 
@@ -685,35 +714,50 @@ onMounted(async () => {
 
 <style scoped>
 
-.alerts-page { min-height: 100vh; background: #f0f2f5; }
+.alerts-page {
+  min-height: 100vh;
+  /* 移动端地址栏高度算进 100vh，会顶出底部，补 dvh 兜底 */
+  min-height: 100dvh;
+  background: var(--color-bg-page);
+}
 
-header { background: #1a1a2e; color: white; padding: 16px 24px; display: flex; align-items: center; gap: 16px; }
+header {
+  background: var(--color-bg-inverse);
+  color: var(--color-text-inverse);
+  /* iOS 独立模式（black-translucent）内容会顶到状态栏下，让出顶部安全区 */
+  padding: calc(16px + env(safe-area-inset-top, 0px)) 24px 16px;
+  display: flex; align-items: center; gap: 16px;
+}
 
 header h1 { margin: 0; font-size: 20px; flex: 1; }
 
-.back-btn { background: transparent; border: 1px solid white; color: white; padding: 6px 16px; border-radius: 4px; cursor: pointer; }
+.back-btn { background: transparent; border: 1px solid var(--color-text-inverse); color: var(--color-text-inverse); padding: 6px 16px; border-radius: var(--radius-sm); cursor: pointer; }
 
-.add-btn { background: #fa8c16; border: none; color: white; padding: 6px 16px; border-radius: 4px; cursor: pointer; font-size: 14px; }
+/* 原 #fa8c16 配白字只有 2.38:1（严重不达标），换警示色 5.43:1 */
+.add-btn { background: var(--color-warning); border: none; color: var(--color-text-on-accent); padding: 6px 16px; border-radius: var(--radius-sm); cursor: pointer; font-size: 14px; }
 
-.add-btn:hover { background: #ffa940; }
+/* 悬停不再换更浅的橙（#ffa940 配白字只有 3.5:1），改为整体压暗，文字对比度只增不减 */
+.add-btn:hover { filter: brightness(0.88); }
 
 main { max-width: 700px; margin: 0 auto; padding: 24px 16px; }
 
 
 
-.form-card { background: white; border-radius: 8px; padding: 24px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+.form-card { background: var(--color-bg-surface); border-radius: var(--radius-lg); padding: 24px; margin-bottom: 16px; box-shadow: var(--shadow-1); }
 
-.form-card h3 { margin-bottom: 16px; font-size: 16px; }
+.form-card h2 { margin-bottom: 16px; font-size: 16px; }
 
 .form-row { display: flex; flex-direction: column; gap: 10px; }
 
-.form-row input, .form-row select { padding: 10px 12px; border: 1px solid #d9d9d9; border-radius: 4px; font-size: 14px; }
+/* 输入控件边界需 ≥3:1（1.4.11），原 #d9d9d9 对白只有 1.41:1 */
+.form-row input, .form-row select { padding: 10px 12px; border: 1px solid var(--color-border-control); border-radius: var(--radius-sm); font-size: 14px; }
 
-.form-row input:focus, .form-row select:focus { outline: none; border-color: #4096ff; }
+/* 删掉 outline: none，焦点环交回全局 :focus-visible；边框变色只作第二通道 */
+.form-row input:focus-visible, .form-row select:focus-visible { border-color: var(--color-accent); }
 
-.form-row select { background: white; cursor: pointer; }
+.form-row select { background: var(--color-bg-surface); cursor: pointer; }
 
-.condition-desc { font-size: 12px; color: #999; margin-top: 8px; }
+.condition-desc { font-size: 12px; color: var(--color-text-muted); margin-top: 8px; }
 
 .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 
@@ -721,7 +765,7 @@ main { max-width: 700px; margin: 0 auto; padding: 24px 16px; }
 
 .alerts-list { display: flex; flex-direction: column; gap: 12px; }
 
-.alert-card { background: white; border-radius: 8px; padding: 16px 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); transition: opacity 0.2s; }
+.alert-card { background: var(--color-bg-surface); border-radius: var(--radius-lg); padding: 16px 20px; box-shadow: var(--shadow-1); transition: opacity var(--duration-base) var(--ease-out); }
 
 .alert-card.disabled { opacity: 0.5; }
 
@@ -730,36 +774,37 @@ main { max-width: 700px; margin: 0 auto; padding: 24px 16px; }
 .alert-left { display: flex; flex-direction: column; gap: 4px; }
 
 .alert-symbol { font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
-.alert-symbol-code { font-size: 12px; color: #999; font-weight: normal; }
+.alert-symbol-code { font-size: 12px; color: var(--color-text-muted); font-weight: normal; }
 
+/* 原来是 #fff7e6 底 + #fa8c16 文字（对浅底约 2.4:1）。恢复米黄底但把文字换成达标的警示色 */
 .local-badge {
   font-size: 11px; font-weight: 500; padding: 2px 6px;
-  background: #fff7e6; color: #fa8c16;
-  border: 1px solid #ffd591; border-radius: 4px;
+  background: var(--color-warning-soft); color: var(--color-warning);
+  border: 1px solid var(--color-warning-mark); border-radius: var(--radius-sm);
 }
 
 .form-advanced {
   margin-top: 12px; padding: 8px 0;
-  border-top: 1px dashed #e8e8e8;
+  border-top: 1px dashed var(--color-border);
 }
 .form-advanced summary {
-  cursor: pointer; font-size: 13px; color: #666;
+  cursor: pointer; font-size: 13px; color: var(--color-text-muted);
   user-select: none;
 }
-.form-advanced summary:hover { color: #1677ff; }
+.form-advanced summary:hover { color: var(--color-accent); }
 .form-row-advanced { margin-top: 10px; }
 
 .form-field {
   display: flex; flex-direction: column; gap: 4px;
-  font-size: 12px; color: #666;
+  font-size: 12px; color: var(--color-text-muted);
 }
-.form-field > .field-label { font-size: 12px; color: #666; }
+.form-field > .field-label { font-size: 12px; color: var(--color-text-muted); }
 .form-field > input,
 .form-field > select {
-  padding: 10px 12px; border: 1px solid #d9d9d9;
-  border-radius: 4px; font-size: 14px;
-  background: white;
-  color: #333;  /* 显式深色,避免继承父级灰色导致文字看不清 */
+  padding: 10px 12px; border: 1px solid var(--color-border-control);
+  border-radius: var(--radius-sm); font-size: 14px;
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);  /* 显式深色,避免继承父级灰色导致文字看不清 */
   font-family: inherit;
   /* 关键:让 select 用浏览器默认外观,避免我们覆盖导致 dropdown 不显示 */
   appearance: auto;
@@ -777,27 +822,30 @@ main { max-width: 700px; margin: 0 auto; padding: 24px 16px; }
   height: 24px;
   width: 14px;
 }
-.form-field > input:focus,
-.form-field > select:focus { outline: none; border-color: #4096ff; }
+.form-field > input:focus-visible,
+.form-field > select:focus-visible { border-color: var(--color-accent); }
+/* 原来只有边框变色，扫读时不够醒目；恢复原有的浅红底做整块标红。
+   文字/边框用 --color-danger（对浅红底 5.07:1），底色用 --color-danger-soft */
 .form-field.has-error > input,
 .form-field.has-error > select {
-  border-color: #ff4d4f;
-  background: #fff2f0;
+  border-color: var(--color-danger);
+  background: var(--color-danger-soft);
 }
 .field-error {
-  font-size: 12px; color: #ff4d4f;
+  font-size: 12px; color: var(--color-danger);
   line-height: 1.4;
 }
 
-.alert-condition { font-size: 13px; color: #888; }
+.alert-condition { font-size: 13px; color: var(--color-text-secondary); }
 
 .alert-right { display: flex; align-items: center; gap: 16px; }
 
-.alert-threshold { font-size: 16px; font-weight: 600; color: #fa8c16; }
+/* 原 #fa8c16 作文字对白仅 2.38:1 */
+.alert-threshold { font-size: 16px; font-weight: 600; color: var(--color-warning); }
 
-.alert-hwm { font-size: 12px; color: #999; margin-top: 2px; }
+.alert-hwm { font-size: 12px; color: var(--color-text-muted); margin-top: 2px; }
 
-.alert-actions { display: flex; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid #f0f0f0; }
+.alert-actions { display: flex; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--color-border); }
 
 
 
@@ -807,45 +855,56 @@ main { max-width: 700px; margin: 0 auto; padding: 24px 16px; }
 
 .toggle-switch input { opacity: 0; width: 0; height: 0; }
 
-.toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: 0.3s; border-radius: 24px; }
+/* 关闭态轨道原 #ccc 对白仅 1.6:1，白滑块几乎看不出边界，换控件边界令牌（3.36:1） */
+.toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: var(--color-border-control); transition: var(--duration-base) var(--ease-out); border-radius: var(--radius-pill); }
 
-.toggle-slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background-color: white; transition: 0.3s; border-radius: 50%; }
+.toggle-slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background-color: var(--color-bg-surface); transition: var(--duration-base) var(--ease-out); border-radius: 50%; }
 
-.toggle-switch input:checked + .toggle-slider { background-color: #52c41a; }
+/* 开启态原 #52c41a 白滑块仅 2.27:1，换成功色 5.59:1。
+   状态不单靠颜色：滑块位置同时右移（下一条 transform），颜色只是第二通道。 */
+.toggle-switch input:checked + .toggle-slider { background-color: var(--color-success); }
 
 .toggle-switch input:checked + .toggle-slider:before { transform: translateX(20px); }
 
+/* 原生 checkbox 被压成 0 尺寸，全局焦点环落上去也看不见；把焦点环画到滑块上 */
+.toggle-switch input:focus-visible + .toggle-slider { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
 
 
-.btn { padding: 8px 16px; border: none; border-radius: 4px; font-size: 13px; cursor: pointer; transition: all 0.2s; }
+
+.btn { padding: 8px 16px; border: none; border-radius: var(--radius-sm); font-size: 13px; cursor: pointer; transition: all var(--duration-base) var(--ease-out); }
 
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-.btn-primary { background: #1677ff; color: white; }
+/* 原 #1677ff 配白字只有 4.10:1，不达 AA */
+.btn-primary { background: var(--color-accent); color: var(--color-text-on-accent); }
 
-.btn-primary:hover:not(:disabled) { background: #4096ff; }
+.btn-primary:hover:not(:disabled) { background: var(--color-accent-hover); }
 
-.btn-text { background: transparent; color: #666; }
+.btn-text { background: transparent; color: var(--color-text-muted); }
 
-.btn-text:hover { color: #333; }
+.btn-text:hover { color: var(--color-text-primary); }
 
 .btn-sm { padding: 4px 12px; font-size: 12px; }
 
-.btn-outline { background: transparent; border: 1px solid #d9d9d9; color: #555; }
+/* 按钮边界同属控件边界，也要 ≥3:1（原 #d9d9d9 仅 1.41:1） */
+.btn-outline { background: transparent; border: 1px solid var(--color-border-control); color: var(--color-text-secondary); }
 
-.btn-outline:hover { border-color: #1677ff; color: #1677ff; }
+.btn-outline:hover { border-color: var(--color-accent); color: var(--color-accent); }
 
-.btn-danger-outline { background: transparent; border: 1px solid #ffccc7; color: #ff4d4f; }
+/* 原 #ffccc7 边框对白仅 1.4:1、#ff4d4f 文字 3.19:1，都换危险色 */
+.btn-danger-outline { background: transparent; border: 1px solid var(--color-danger); color: var(--color-danger); }
 
-.btn-danger-outline:hover { background: #fff2f0; }
+.btn-danger-outline:hover { background: var(--color-bg-subtle); }
 
 
 
-.empty { color: #999; text-align: center; padding: 48px 16px; font-size: 14px; }
+/* 原 #999 对灰底 2.54:1 */
+.empty { color: var(--color-text-muted); text-align: center; padding: 48px 16px; font-size: 14px; }
 
-.error { color: #ff4d4f; font-size: 13px; margin-bottom: 8px; }
+.error { color: var(--color-danger); font-size: 13px; margin-bottom: 8px; }
 
-.success { color: #52c41a; font-size: 13px; margin-bottom: 16px; text-align: center; }
+/* 原 #52c41a 作文字对灰底约 2.2:1 */
+.success { color: var(--color-success); font-size: 13px; margin-bottom: 16px; text-align: center; }
 
 </style>
 

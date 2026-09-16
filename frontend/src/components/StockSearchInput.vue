@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { searchStock } from '../api/stock.js'
 
@@ -88,7 +88,7 @@ watch(keyword, (val) => {
     try {
       const res = await searchStock(val.trim(), current.signal)
       if (current !== abortController) return
-      results.value = res.data?.data?.results || []
+      results.value = res.data?.results || []
       showDropdown.value = true
       activeIndex.value = -1
     } catch (err) {
@@ -141,6 +141,15 @@ const onKeydown = (e) => {
 const getActiveList = () => isRecentMode() ? recentSearches.value : results.value
 const isRecentMode = () => !keyword.value || !keyword.value.trim()
 
+// 组合框语义：焦点始终留在输入框里，用 aria-activedescendant 把当前高亮项
+// 告诉屏幕阅读器。这里只算 id，不改动任何键盘行为。
+const activeDescendantId = computed(() => {
+  if (!showDropdown.value || activeIndex.value < 0) return undefined
+  const item = getActiveList()[activeIndex.value]
+  if (!item) return undefined
+  return `${isRecentMode() ? 'search-hist' : 'search-opt'}-${item.code}`
+})
+
 // ---- 焦点 ----
 
 const onFocus = () => {
@@ -172,12 +181,20 @@ onUnmounted(() => document.removeEventListener('click', onClickOutside))
 <template>
   <div ref="wrapperRef" class="search-wrapper">
     <div class="search-input-row">
+      <!-- 搜索框视觉上不放标签，用 aria-label 提供可访问名称；
+           交互沿用「输入框 + 弹出列表」组合框模式（焦点留在输入框，方向键选项） -->
       <input
         :value="keyword"
         @input="onInput"
         @keydown="onKeydown"
         @focus="onFocus"
         @blur="onBlur"
+        role="combobox"
+        aria-label="搜索股票代码或名称"
+        aria-autocomplete="list"
+        aria-controls="stock-search-listbox"
+        :aria-expanded="showDropdown ? 'true' : 'false'"
+        :aria-activedescendant="activeDescendantId"
         placeholder="输入股票代码或名称，如 600519、贵州茅台"
         autocomplete="off"
       />
@@ -187,29 +204,48 @@ onUnmounted(() => document.removeEventListener('click', onClickOutside))
     <!-- 历史记录 -->
     <div v-if="showDropdown && isRecentMode() && recentSearches.length > 0" class="dropdown">
       <div class="dropdown-header">
-        <span class="dropdown-title">最近搜索</span>
+        <span class="dropdown-title" id="stock-search-history-title">最近搜索</span>
+        <!-- 历史记录没有逐项删除，只有整个「清空」按钮；它自带可见名称 -->
         <button class="clear-btn" @mousedown.prevent="clearHistory">清空</button>
       </div>
-      <li
-        v-for="(item, idx) in recentSearches"
-        :key="'r' + item.code"
-        :class="{ active: idx === activeIndex }"
-        @mousedown.prevent="selectRecent(item)"
+      <ul
+        id="stock-search-listbox"
+        role="listbox"
+        aria-labelledby="stock-search-history-title"
       >
-        <span class="code">{{ item.code }}</span>
-        <span class="name">{{ item.name }}</span>
-      </li>
+        <li
+          v-for="(item, idx) in recentSearches"
+          :key="'r' + item.code"
+          :id="'search-hist-' + item.code"
+          role="option"
+          :aria-selected="idx === activeIndex"
+          :class="{ active: idx === activeIndex }"
+          @mousedown.prevent="selectRecent(item)"
+        >
+          <span class="code num">{{ item.code }}</span>
+          <span class="name">{{ item.name }}</span>
+        </li>
+      </ul>
     </div>
 
     <!-- 搜索结果 -->
-    <ul v-if="showDropdown && !isRecentMode() && results.length > 0" class="dropdown">
+    <ul
+      v-if="showDropdown && !isRecentMode() && results.length > 0"
+      id="stock-search-listbox"
+      class="dropdown"
+      role="listbox"
+      aria-label="搜索结果"
+    >
       <li
         v-for="(item, idx) in results"
         :key="item.code"
+        :id="'search-opt-' + item.code"
+        role="option"
+        :aria-selected="idx === activeIndex"
         :class="{ active: idx === activeIndex }"
         @mousedown.prevent="selectItem(item)"
       >
-        <span class="code">{{ item.code }}</span>
+        <span class="code num">{{ item.code }}</span>
         <span class="name">{{ item.name }}</span>
       </li>
     </ul>
@@ -224,39 +260,45 @@ onUnmounted(() => document.removeEventListener('click', onClickOutside))
 .search-wrapper { position: relative; flex: 1; }
 .search-input-row { display: flex; align-items: center; position: relative; }
 .search-input-row input {
-  width: 100%; padding: 10px 12px; border: 1px solid #d9d9d9;
-  border-radius: 4px; font-size: 14px; box-sizing: border-box;
+  width: 100%; padding: 10px 12px; border: 1px solid var(--color-border-control);
+  border-radius: var(--radius-sm); font-size: 14px; box-sizing: border-box;
 }
-.search-input-row input:focus {
-  outline: none; border-color: #4096ff;
-  box-shadow: 0 0 0 2px rgba(24, 144, 255, 0.2);
+/* 焦点：删掉 outline:none 与那圈淡色 box-shadow，
+   交给全局 2px 主色焦点环，边框变色只作第二通道 */
+.search-input-row input:focus-visible {
+  border-color: var(--color-accent);
 }
 .loading-icon { position: absolute; right: 10px; font-size: 14px; }
 
 .dropdown {
   position: absolute; top: 100%; left: 0; right: 0;
-  background: #fff; border: 1px solid #d9d9d9; border-top: none;
-  border-radius: 0 0 4px 4px; max-height: 280px; overflow-y: auto;
+  background: var(--color-bg-surface); border: 1px solid var(--color-border-strong);
+  border-top: none;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  max-height: 280px; overflow-y: auto;
   z-index: 1000; list-style: none; margin: 0; padding: 0;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-1);
 }
 .dropdown li {
   padding: 8px 12px; cursor: pointer; display: flex;
   gap: 12px; align-items: center; font-size: 14px;
 }
-.dropdown li:hover, .dropdown li.active { background: #e6f4ff; }
-.dropdown .code { font-weight: bold; color: #1677ff; min-width: 64px; }
-.dropdown .name { color: #333; }
+/* 历史记录的 li 现在包在真正的 ul 里（合法结构），
+   需要显式去掉浏览器默认的项目符号 */
+.dropdown ul { list-style: none; }
+.dropdown li:hover, .dropdown li.active { background: var(--color-accent-soft); }
+.dropdown .code { font-weight: bold; color: var(--color-accent); min-width: 64px; }
+.dropdown .name { color: var(--color-text-primary); }
 
 .dropdown-header {
   display: flex; justify-content: space-between; align-items: center;
-  padding: 8px 12px 4px; font-size: 12px; color: #999;
+  padding: 8px 12px 4px; font-size: 12px; color: var(--color-text-muted);
 }
 .dropdown-header .clear-btn {
-  background: none; border: none; color: #1677ff;
+  background: none; border: none; color: var(--color-accent);
   cursor: pointer; font-size: 12px; padding: 2px 6px;
 }
-.dropdown-header .clear-btn:hover { color: #4096ff; }
+.dropdown-header .clear-btn:hover { color: var(--color-accent-hover); }
 
-.empty-dropdown { color: #999; padding: 12px; text-align: center; font-size: 13px; }
+.empty-dropdown { color: var(--color-text-muted); padding: 12px; text-align: center; font-size: 13px; }
 </style>

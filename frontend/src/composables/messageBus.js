@@ -13,10 +13,16 @@ export const messageBus = reactive({
   handlers: [],
 
   connect() {
-    if (this.es) return
     const token = localStorage.getItem('token')
     if (!token) return
+    if (this.es) {
+      // 同一 token 的已有连接直接复用；换账号/换 token 时先关旧流再重建
+      if (this.es._token === token) return
+      this.es.close()
+      this.es = null
+    }
     this.es = new EventSource(`/api/v1/messages/stream?token=${encodeURIComponent(token)}`)
+    this.es._token = token
     this.es.addEventListener('message', (e) => {
       try {
         const msg = JSON.parse(e.data)
@@ -28,7 +34,12 @@ export const messageBus = reactive({
       }
     })
     this.es.onerror = () => {
-      // EventSource 自带重连；这里只负责重新同步未读数
+      // 已登出：主动断开，避免 EventSource 拿过期 token 无限重连打 401
+      if (!localStorage.getItem('token')) {
+        this.disconnect()
+        return
+      }
+      // 仍在线：EventSource 自带重连，这里只负责重新同步未读数
       this.refreshUnread()
     }
   },
@@ -38,6 +49,9 @@ export const messageBus = reactive({
       this.es.close()
       this.es = null
     }
+    this.handlers = []
+    this.unread = 0
+    this.latest = null
   },
 
   /** 订阅新消息，返回取消订阅函数 */

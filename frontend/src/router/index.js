@@ -8,6 +8,7 @@ import Messages from '../pages/Messages.vue'
 import Profile from '../pages/Profile.vue'
 import Strategies from '../pages/Strategies.vue'
 import StrategyDetail from '../pages/StrategyDetail.vue'
+import Memory from '../pages/Memory.vue'
 
 const routes = [
   { path: '/', redirect: '/dashboard' },
@@ -20,6 +21,7 @@ const routes = [
   { path: '/profile', component: Profile, meta: { requiresAuth: true } },
   { path: '/strategies', component: Strategies, meta: { requiresAuth: true } },
   { path: '/strategies/:id', component: StrategyDetail, meta: { requiresAuth: true } },
+  { path: '/memory', component: Memory, meta: { requiresAuth: true } },
 ]
 
 const router = createRouter({

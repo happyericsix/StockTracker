@@ -14,6 +14,8 @@ const totalPages = ref(0)
 const totalElements = ref(0)
 const loading = ref(false)
 const loadingMore = ref(false)
+// 加载失败状态：与空状态互斥，避免"加载失败"被显示成"暂无消息"
+const loadError = ref('')
 const hasMore = ref(true)
 let unsubscribe = null
 
@@ -45,6 +47,11 @@ const typeMeta = (type) => {
     default: return { icon: '📌', label: '系统通知' }
   }
 }
+
+// 整卡点击区按钮（.msg-card-hit）的可访问名称：未读时说明动作，已读时说明状态
+const cardHitLabel = (m) => (m.read
+  ? `${typeMeta(m.type).label}消息（已读）`
+  : `标记为已读：${typeMeta(m.type).label}消息`)
 
 const CONDITION_LABELS = {
   price_above: '📈 价格突破',
@@ -116,12 +123,16 @@ const knownSymbols = computed(() => {
 // 切换 tab 时，根据 tab 类型决定要不要传 type 给后端
 const load = async () => {
   loading.value = true
+  loadError.value = ''
   page.value = 0
   messages.value = []
   hasMore.value = true
   await loadPage()
   loading.value = false
 }
+
+/** 「重新加载」按钮：重置到第一页并重试 */
+const reload = () => load()
 
 const loadPage = async () => {
   if (loadingMore.value) return
@@ -148,7 +159,12 @@ const loadPage = async () => {
     totalElements.value = data.totalElements || 0
     hasMore.value = page.value < (data.totalPages || 0) - 1
   } catch (e) {
-    // 静默失败
+    // 只把「首屏加载失败」升级成页面级错误 —— 那才是"列表为什么是空的"的原因，
+    // 并给出「重新加载」这条恢复路径。
+    // 翻页失败时列表里已有的内容还在，不能整块替换成"消息加载失败"去误导用户。
+    if (page.value === 0) {
+      loadError.value = '请检查网络连接后重试，或稍后再试。'
+    }
   } finally {
     loadingMore.value = false
   }
@@ -237,12 +253,16 @@ onUnmounted(() => {
       <button class="read-all-btn" @click="handleReadAll">全部已读</button>
     </header>
 
+    <!-- 这三个只是筛选按钮（同一份列表的不同视图），不是 ARIA tab 组件：
+         没有 tabpanel，也就不加 role="tablist"/"tab"（加了反而要求方向键操作）。
+         用 aria-pressed 暴露"当前选中"状态即可。 -->
     <div class="tabs">
       <button
         v-for="t in tabs"
         :key="t.key"
         class="tab"
         :class="{ active: activeTab === t.key }"
+        :aria-pressed="activeTab === t.key"
         @click="activeTab = t.key; onTabChange()"
       >
         {{ t.label }}
@@ -255,6 +275,7 @@ onUnmounted(() => {
         <input
           v-model="symbolFilter"
           @input="onSymbolFilterChange"
+          aria-label="按股票代码过滤消息"
           placeholder="按股票代码过滤（如 AAPL）"
           list="known-symbols"
           class="symbol-input"
@@ -269,6 +290,7 @@ onUnmounted(() => {
           :key="r.key"
           class="time-btn"
           :class="{ active: timeRange === r.key }"
+          :aria-pressed="timeRange === r.key"
           @click="timeRange = r.key; onTimeRangeChange()"
         >
           {{ r.label }}
@@ -278,6 +300,14 @@ onUnmounted(() => {
 
     <main ref="mainRef" @scroll="onScroll">
       <div v-if="loading" class="empty">加载中...</div>
+      <!-- 加载失败必须说出来并给出恢复路径。
+           原来 catch 为空，断网时列表为空 → 页面显示「暂无消息」，
+           用户无法区分"确实没有消息"和"根本没加载成功"。 -->
+      <div v-else-if="loadError" class="empty" role="alert">
+        <p class="empty-title">消息加载失败</p>
+        <p class="empty-hint">{{ loadError }}</p>
+        <button type="button" class="retry-btn" @click="reload">重新加载</button>
+      </div>
       <div v-else-if="symbolFiltered.length === 0" class="empty">
         暂无消息<span v-if="symbolFilter">（已过滤）</span>
       </div>
@@ -287,13 +317,21 @@ onUnmounted(() => {
         :key="m.id"
         class="msg-card"
         :class="{ unread: !m.read }"
-        @click="handleRead(m)"
       >
+        <!-- 整卡点击标记已读：由铺满卡片的原生按钮承载。
+             原来的 div+@click 键盘不可达；而整卡改 <button> 又会把
+             「看 K 线」按钮嵌进按钮里（嵌套交互元素），所以用这层兄弟按钮。 -->
+        <button
+          type="button"
+          class="msg-card-hit"
+          :aria-label="cardHitLabel(m)"
+          @click="handleRead(m)"
+        ></button>
         <div class="msg-icon">{{ typeMeta(m.type).icon }}</div>
         <div class="msg-main">
           <div class="msg-top">
             <span class="msg-label">{{ typeMeta(m.type).label }}</span>
-            <span class="msg-time">{{ formatTime(m.createdAt) }}</span>
+            <span class="msg-time num">{{ formatTime(m.createdAt) }}</span>
           </div>
           <div class="msg-content">{{ m.content }}</div>
 
@@ -312,13 +350,13 @@ onUnmounted(() => {
           <div v-if="m.type === 'ALERT' && parseMetadata(m)" class="msg-alert-detail">
             <span class="alert-tag">{{ parseMetadata(m).conditionLabel }}</span>
             <span v-if="parseMetadata(m).triggerPrice != null" class="alert-item">
-              触发价 <b>{{ fmt(parseMetadata(m).triggerPrice) }}</b>
+              触发价 <b class="num">{{ fmt(parseMetadata(m).triggerPrice) }}</b>
             </span>
             <span v-if="parseMetadata(m).triggerValue != null" class="alert-item">
-              指标值 <b>{{ fmt(parseMetadata(m).triggerValue) }}</b>
+              指标值 <b class="num">{{ fmt(parseMetadata(m).triggerValue) }}</b>
             </span>
             <span v-if="parseMetadata(m).threshold != null" class="alert-item">
-              阈值 <b>{{ fmt(parseMetadata(m).threshold) }}</b>
+              阈值 <b class="num">{{ fmt(parseMetadata(m).threshold) }}</b>
             </span>
           </div>
         </div>
@@ -327,22 +365,29 @@ onUnmounted(() => {
 
       <div v-if="loadingMore" class="loading-more">加载中...</div>
       <div v-else-if="!hasMore && symbolFiltered.length > 0" class="no-more">
-        共 {{ totalElements }} 条，已加载完<span v-if="symbolFilter">（已过滤显示 {{ symbolFiltered.length }}）</span>
+        共 <span class="num">{{ totalElements }}</span> 条，已加载完<span v-if="symbolFilter">（已过滤显示 <span class="num">{{ symbolFiltered.length }}</span>）</span>
       </div>
 
       <button class="chat-entry" @click="goChat">
         <span>💬 去和智能助手聊聊</span>
-        <span class="arrow">›</span>
+        <span class="arrow" aria-hidden="true">›</span>
       </button>
     </main>
   </div>
 </template>
 
 <style scoped>
-.messages-page { min-height: 100vh; background: #f0f2f5; display: flex; flex-direction: column; }
+.messages-page {
+  /* 移动端地址栏会被算进 100vh，用 dvh 兜底 */
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--color-bg-page);
+  display: flex;
+  flex-direction: column;
+}
 .page-header {
-  background: #1a1a2e;
-  color: white;
+  background: var(--color-bg-inverse);
+  color: var(--color-text-inverse);
   padding: 14px 16px;
   display: flex;
   align-items: center;
@@ -352,18 +397,18 @@ onUnmounted(() => {
 .page-header h1 { margin: 0; font-size: 18px; flex: 1; }
 .back-btn, .read-all-btn {
   background: transparent;
-  border: 1px solid rgba(255,255,255,0.4);
-  color: white;
+  border: 1px solid var(--color-border-control);
+  color: var(--color-text-inverse);
   padding: 6px 12px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   font-size: 13px;
 }
 
 .tabs {
   display: flex;
-  background: white;
-  border-bottom: 1px solid #e8e8e8;
+  background: var(--color-bg-surface);
+  border-bottom: 1px solid var(--color-border);
   flex-shrink: 0;
 }
 .tab {
@@ -372,21 +417,22 @@ onUnmounted(() => {
   background: none;
   border: none;
   font-size: 14px;
-  color: #666;
+  color: var(--color-text-secondary);
   cursor: pointer;
   border-bottom: 2px solid transparent;
 }
 .tab.active {
-  color: #1677ff;
-  border-bottom-color: #1677ff;
+  /* 旧值 #1677ff 对白只有 4.10:1 */
+  color: var(--color-accent);
+  border-bottom-color: var(--color-accent);
   font-weight: 600;
 }
 
 /* 预警过滤器 */
 .filter-bar {
-  background: white;
+  background: var(--color-bg-surface);
   padding: 10px 16px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -395,25 +441,26 @@ onUnmounted(() => {
 .symbol-input {
   flex: 1;
   padding: 7px 10px;
-  border: 1px solid #d9d9d9;
-  border-radius: 4px;
+  border: 1px solid var(--color-border-control);
+  border-radius: var(--radius-sm);
   font-size: 13px;
 }
-.symbol-input:focus { outline: none; border-color: #1677ff; }
+/* 焦点：删掉 outline:none，交给全局 2px 主色焦点环 */
+.symbol-input:focus-visible { border-color: var(--color-accent); }
 .time-row { flex-wrap: wrap; }
 .time-btn {
   padding: 4px 10px;
-  background: #f5f5f5;
+  background: var(--color-bg-page);
   border: 1px solid transparent;
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   font-size: 12px;
-  color: #666;
+  color: var(--color-text-secondary);
   cursor: pointer;
 }
 .time-btn.active {
-  background: #1677ff;
-  color: white;
-  border-color: #1677ff;
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
+  border-color: var(--color-accent);
 }
 
 main {
@@ -430,30 +477,41 @@ main {
 }
 
 .msg-card {
-  background: white;
-  border-radius: 8px;
+  background: var(--color-bg-surface);
+  border-radius: var(--radius-lg);
   padding: 12px 14px;
   display: flex;
   align-items: flex-start;
   gap: 10px;
   cursor: pointer;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  box-shadow: var(--shadow-1);
   position: relative;
 }
-.msg-card.unread { background: #f0f7ff; }
+/* 整卡点击区：绝对定位的原生按钮，键盘可达（Tab + Enter/Space） */
+.msg-card-hit {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  border-radius: var(--radius-lg);
+}
+.msg-card.unread { background: var(--color-accent-soft); }
 .msg-icon { font-size: 22px; flex-shrink: 0; }
 .msg-main { flex: 1; min-width: 0; }
 .msg-top { display: flex; justify-content: space-between; align-items: center; }
-.msg-label { font-size: 12px; color: #1677ff; font-weight: 600; }
-.msg-time { font-size: 11px; color: #999; }
+.msg-label { font-size: 12px; color: var(--color-accent); font-weight: 600; }
+.msg-time { font-size: 11px; color: var(--color-text-muted); }
 .msg-content {
   font-size: 14px;
-  color: #333;
+  color: var(--color-text-primary);
   margin-top: 4px;
   word-break: break-word;
   white-space: pre-wrap;
 }
-.msg-symbol { font-size: 11px; color: #fa8c16; margin-top: 3px; }
+/* 旧值 #fa8c16 作文字对白只有 2.38:1 */
+.msg-symbol { font-size: 11px; color: var(--color-warning); margin-top: 3px; }
 .msg-symbol-row {
   display: flex;
   align-items: center;
@@ -462,14 +520,17 @@ main {
 }
 .chart-link {
   background: transparent;
-  border: 1px solid #1677ff;
-  color: #1677ff;
+  border: 1px solid var(--color-accent);
+  color: var(--color-accent);
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: var(--radius-xl);
   font-size: 11px;
   cursor: pointer;
+  /* 抬到整卡点击区之上，否则按钮点不到 */
+  position: relative;
+  z-index: 1;
 }
-.chart-link:hover { background: #1677ff; color: white; }
+.chart-link:hover { background: var(--color-accent); color: var(--color-text-on-accent); }
 .unread-dot {
   position: absolute;
   top: 12px;
@@ -477,7 +538,7 @@ main {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #ff4d4f;
+  background: var(--color-danger);
 }
 
 .msg-alert-detail {
@@ -487,36 +548,36 @@ main {
   align-items: center;
   margin-top: 8px;
   font-size: 12px;
-  color: #666;
-  background: linear-gradient(135deg, #fff7e6 0%, #fffbe6 100%);
-  border-left: 3px solid #fa8c16;
+  color: var(--color-text-muted);
+  background: var(--color-bg-subtle);
+  border-left: 3px solid var(--color-warning-mark);
   padding: 6px 10px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 .alert-tag {
-  background: #fa8c16;
-  color: white;
+  background: var(--color-warning);
+  color: var(--color-text-on-accent);
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: var(--radius-xl);
   font-size: 11px;
   font-weight: 600;
 }
-.alert-item { color: #555; }
-.alert-item b { color: #d4380d; font-weight: 600; margin-left: 2px; }
+.alert-item { color: var(--color-text-secondary); }
+.alert-item b { color: var(--color-danger); font-weight: 600; margin-left: 2px; }
 
 .loading-more, .no-more {
   text-align: center;
-  color: #999;
+  color: var(--color-text-muted);
   padding: 12px;
   font-size: 12px;
 }
 
 .chat-entry {
   margin-top: 6px;
-  background: #1677ff;
-  color: white;
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   padding: 13px 16px;
   font-size: 14px;
   cursor: pointer;
@@ -525,5 +586,32 @@ main {
   align-items: center;
 }
 .arrow { font-size: 18px; }
-.empty { color: #999; text-align: center; padding: 48px 16px; font-size: 14px; }
+.empty { color: var(--color-text-muted); text-align: center; padding: 48px 16px; font-size: 14px; }
+
+/* 加载失败分支：标题用主文字色（错误原因要看得清），提示用次级色 */
+.empty-title {
+  color: var(--color-text-primary);
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.empty-hint {
+  color: var(--color-text-muted);
+  margin-bottom: 16px;
+}
+
+.retry-btn {
+  padding: 8px 20px;
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  transition: background-color var(--duration-fast) var(--ease-out);
+}
+
+.retry-btn:hover {
+  background: var(--color-accent-hover);
+}
 </style>

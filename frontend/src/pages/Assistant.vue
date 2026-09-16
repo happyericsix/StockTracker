@@ -126,9 +126,11 @@ const onBusMessage = (msg) => {
     typing.value = false
   }
   if (msg.type === 'CHAT_BOT' || msg.type === 'CHAT_USER') {
+    // 乐观气泡 id 是本地 'local-<ts>'，与服务端 SSE 回显的数据库自增 id 永不相等，
+    // 纯按 id 替换永远不命中 → 同一条消息会渲染两份。改为按内容定位替换。
     if (msg.type === 'CHAT_USER' && pendingLocalId.value) {
       const pendingIndex = messages.value.findIndex((m) => m.id === pendingLocalId.value)
-      if (pendingIndex !== -1) {
+      if (pendingIndex !== -1 && messages.value[pendingIndex].content === msg.content) {
         messages.value.splice(pendingIndex, 1, msg)
         pendingLocalId.value = null
         scrollToBottom()
@@ -213,16 +215,18 @@ onUnmounted(() => {
   <div class="chat-page">
     <header class="chat-header">
       <button class="back-btn" @click="router.push('/dashboard')">← 返回</button>
-      <div class="bot-avatar">🤖</div>
+      <!-- 头像只是装饰：机器人身份已由右侧「智能助手」文字承载 -->
+      <div class="bot-avatar" aria-hidden="true">🤖</div>
       <div class="bot-info">
-        <div class="bot-name">智能助手</div>
+        <!-- 本页唯一的一级标题：原来是无标题的 div，页面标题大纲里什么都没有 -->
+        <h1 class="bot-name">智能助手</h1>
         <div class="bot-status">在线 · 行情分析中</div>
       </div>
     </header>
 
     <div class="chat-body" ref="listEl">
       <div v-if="messages.length === 0 && !typing" class="chat-empty">
-        <div class="empty-icon">🤖</div>
+        <div class="empty-icon" aria-hidden="true">🤖</div>
         <p>你好，我是智能助手</p>
         <p class="empty-hint">可以问我：现价查询、走势预测、持仓建议…</p>
       </div>
@@ -237,7 +241,7 @@ onUnmounted(() => {
         <div class="bubble-wrap">
         <div v-if="m.type !== 'CHAT_USER'" class="bubble markdown-body" v-html="renderMarkdown(m.content)"></div>
         <div v-else class="bubble">{{ m.content }}</div>
-          <div class="time">{{ formatTime(m.createdAt) }}</div>
+          <div class="time num">{{ formatTime(m.createdAt) }}</div>
           <div v-if="m.type !== 'CHAT_USER' && (getStrategyId(m) || hasStrategyContent(m.content))" class="strategy-action">
             <button class="strategy-btn" @click="goStrategy(m)">{{ getStrategyId(m) ? '查看回测与策略详情' : '查看策略库' }}</button>
           </div>
@@ -259,6 +263,7 @@ onUnmounted(() => {
       <input
         v-model="input"
         class="chat-input"
+        aria-label="输入消息"
         placeholder="输入消息，回车发送…"
         @keydown.enter="onEnter"
         @compositionstart="composing = true"
@@ -273,12 +278,17 @@ onUnmounted(() => {
 .chat-page {
   display: flex;
   flex-direction: column;
+  /* 移动端地址栏会被算进 100vh，用 dvh 兜底 */
   height: 100vh;
-  background: #f0f2f5;
+  height: 100dvh;
+  background: var(--color-bg-page);
+  /* App.vue 的安装横幅固定在底部（bottom: 20px + 安全区，高约 68px），
+     这里在页面底部预留 88px，保证横幅出现时不会盖住固定的 .chat-input-bar */
+  padding-bottom: 88px;
 }
 .chat-header {
-  background: #1a1a2e;
-  color: white;
+  background: var(--color-bg-inverse);
+  color: var(--color-text-inverse);
   padding: 12px 16px;
   display: flex;
   align-items: center;
@@ -287,10 +297,10 @@ onUnmounted(() => {
 }
 .back-btn {
   background: transparent;
-  border: 1px solid rgba(255,255,255,0.4);
-  color: white;
+  border: 1px solid var(--color-border-control);
+  color: var(--color-text-inverse);
   padding: 6px 12px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   font-size: 13px;
 }
@@ -298,7 +308,8 @@ onUnmounted(() => {
   width: 38px;
   height: 38px;
   border-radius: 50%;
-  background: #1677ff;
+  /* 纯装饰圆底：改用达标主色，避免 #1677ff 配白字只有 4.10:1 */
+  background: var(--color-accent);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -306,7 +317,7 @@ onUnmounted(() => {
 }
 .bot-info { display: flex; flex-direction: column; }
 .bot-name { font-size: 15px; font-weight: 600; }
-.bot-status { font-size: 11px; color: #9fa8c0; margin-top: 1px; }
+.bot-status { font-size: 11px; color: var(--color-text-inverse-muted); margin-top: 1px; }
 
 .chat-body {
   flex: 1;
@@ -318,11 +329,12 @@ onUnmounted(() => {
 }
 .chat-empty {
   text-align: center;
-  color: #999;
+  color: var(--color-text-muted);
   margin-top: 40px;
 }
 .empty-icon { font-size: 48px; margin-bottom: 8px; }
-.empty-hint { font-size: 12px; margin-top: 4px; color: #bbb; }
+/* 旧值 #bbb 对灰底只有 1.71:1，全站最差的一处 */
+.empty-hint { font-size: 12px; margin-top: 4px; color: var(--color-text-muted); }
 
 .msg-row {
   display: flex;
@@ -335,15 +347,15 @@ onUnmounted(() => {
   width: 34px;
   height: 34px;
   border-radius: 50%;
-  background: #1677ff;
-  color: white;
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 16px;
   flex-shrink: 0;
 }
-.mine-avatar { background: #fa8c16; font-size: 12px; }
+.mine-avatar { background: var(--color-warning); font-size: 12px; }
 
 .bubble-wrap { display: flex; flex-direction: column; gap: 3px; }
 .bubble {
@@ -354,15 +366,16 @@ onUnmounted(() => {
   white-space: pre-wrap;
 }
 .msg-row.theirs .bubble {
-  background: white;
+  background: var(--color-bg-surface);
   border-radius: 4px 12px 12px 12px;
-  color: #333;
-  box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+  color: var(--color-text-primary);
+  box-shadow: var(--shadow-1);
 }
 .msg-row.mine .bubble {
-  background: #1677ff;
+  /* 旧值 #1677ff 配白字只有 4.10:1，不达 AA */
+  background: var(--color-accent);
   border-radius: 12px 4px 12px 12px;
-  color: white;
+  color: var(--color-text-on-accent);
 }
 .bubble.markdown-body {
   white-space: normal;
@@ -391,15 +404,15 @@ onUnmounted(() => {
 }
 .bubble.markdown-body :deep(li) { margin: 2px 0; }
 .bubble.markdown-body :deep(code) {
-  background: rgba(0,0,0,0.06);
+  background: var(--color-border);
   border-radius: 3px;
   padding: 1px 4px;
   font-size: 12px;
 }
 .bubble.markdown-body :deep(pre) {
   margin: 8px 0;
-  background: #f5f5f5;
-  border-radius: 4px;
+  background: var(--color-bg-subtle);
+  border-radius: var(--radius-sm);
   padding: 8px 10px;
   overflow-x: auto;
   white-space: pre-wrap;
@@ -409,27 +422,27 @@ onUnmounted(() => {
   background: transparent;
   padding: 0;
 }
-.time { font-size: 10px; color: #bbb; }
+.time { font-size: 10px; color: var(--color-text-muted); }
 .msg-row.mine .time { text-align: right; }
 
 .strategy-action { margin-top: 4px; }
 .strategy-btn {
-  background: #f6ffed;
-  color: #389e0d;
-  border: 1px solid #b7eb8f;
-  border-radius: 4px;
+  background: var(--color-bg-subtle);
+  color: var(--color-success);
+  border: 1px solid var(--color-success-mark);
+  border-radius: var(--radius-sm);
   padding: 3px 10px;
   font-size: 12px;
   cursor: pointer;
 }
-.strategy-btn:hover { background: #d9f7be; }
+.strategy-btn:hover { background: var(--color-bg-page); }
 
 .typing-bubble { display: flex; align-items: center; gap: 4px; }
 .typing-bubble span {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #bbb;
+  background: var(--color-text-placeholder);
   animation: blink 1.2s infinite;
 }
 .typing-bubble span:nth-child(2) { animation-delay: 0.2s; }
@@ -439,33 +452,35 @@ onUnmounted(() => {
   30% { opacity: 1; }
 }
 
-.chat-error { color: #ff4d4f; font-size: 12px; text-align: center; }
+.chat-error { color: var(--color-danger); font-size: 12px; text-align: center; }
 
 .chat-input-bar {
   display: flex;
   gap: 8px;
   padding: 10px 12px;
-  background: white;
-  border-top: 1px solid #e8e8e8;
+  background: var(--color-bg-surface);
+  border-top: 1px solid var(--color-border);
   flex-shrink: 0;
+  /* 固定底栏避开 iOS 手势条 */
+  margin-bottom: env(safe-area-inset-bottom, 0px);
 }
 .chat-input {
   flex: 1;
-  border: 1px solid #d9d9d9;
+  border: 1px solid var(--color-border-control);
   border-radius: 18px;
   padding: 9px 14px;
   font-size: 14px;
-  outline: none;
 }
-.chat-input:focus { border-color: #1677ff; }
+/* 焦点：删掉 outline:none，交给全局 2px 主色焦点环；边框变色只作第二通道 */
+.chat-input:focus-visible { border-color: var(--color-accent); }
 .send-btn {
-  background: #1677ff;
-  color: white;
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
   border: none;
   border-radius: 18px;
   padding: 0 20px;
   font-size: 14px;
   cursor: pointer;
 }
-.send-btn:disabled { background: #9ec5ff; cursor: not-allowed; }
+.send-btn:disabled { background: var(--color-accent-soft); color: var(--color-text-muted); cursor: not-allowed; }
 </style>

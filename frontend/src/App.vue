@@ -1,4 +1,4 @@
-﻿<script setup>
+<script setup>
 import { ref, onMounted } from 'vue'
 import { RouterView } from 'vue-router'
 
@@ -35,58 +35,121 @@ const dismissInstall = () => {
 
 <template>
   <RouterView />
-  
+
   <!-- PWA 安装横幅 -->
   <div v-if="showInstall" class="install-banner">
     <div class="install-info">
-      <span class="install-icon">📊</span>
+      <span class="install-icon" aria-hidden="true">📊</span>
       <div>
         <div class="install-title">安装 Stock Tracker</div>
         <div class="install-desc">添加到桌面，快速查看行情</div>
       </div>
     </div>
     <div class="install-actions">
-      <button class="install-btn" @click="handleInstall">安装</button>
-      <button class="dismiss-btn" @click="dismissInstall">✕</button>
+      <button type="button" class="install-btn" @click="handleInstall">安装</button>
+      <button type="button" class="dismiss-btn" @click="dismissInstall" aria-label="关闭安装提示">
+        <span aria-hidden="true">✕</span>
+      </button>
     </div>
   </div>
 </template>
 
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-</style>
-
 <style scoped>
 .install-banner {
   position: fixed;
-  bottom: 20px;
+  /* 旧值 bottom: 20px 在带 Home Indicator 的机型上会压到手势条区域 */
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
   left: 50%;
   transform: translateX(-50%);
-  background: #1a1a2e;
-  color: white;
+  background: var(--color-bg-inverse);
+  color: var(--color-text-inverse);
   padding: 14px 20px;
-  border-radius: 12px;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.35);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-3);
   display: flex;
   align-items: center;
   gap: 16px;
   z-index: 9999;
-  max-width: 420px;
-  width: calc(100% - 32px);
-  animation: slideUp 0.3s ease;
+  /* 旧值 width: calc(100% - 32px) 配 max-width:420px；
+     这里用 min() 让窄屏（320px）与宽屏都不会溢出 */
+  width: min(420px, calc(100% - 32px));
+  animation: slideUp var(--duration-base) var(--ease-out);
 }
+
 @keyframes slideUp {
-  from { transform: translateX(-50%) translateY(20px); opacity: 0; }
-  to { transform: translateX(-50%) translateY(0); opacity: 1; }
+  from {
+    transform: translateX(-50%) translateY(12px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(-50%) translateY(0);
+    opacity: 1;
+  }
 }
-.install-info { display: flex; align-items: center; gap: 10px; flex: 1; }
-.install-icon { font-size: 28px; }
-.install-title { font-size: 14px; font-weight: 600; }
-.install-desc { font-size: 12px; color: #aaa; margin-top: 2px; }
-.install-actions { display: flex; align-items: center; gap: 8px; }
-.install-btn { background: #1677ff; color: white; border: none; padding: 8px 18px; border-radius: 6px; font-size: 13px; cursor: pointer; white-space: nowrap; }
-.install-btn:hover { background: #4096ff; }
-.dismiss-btn { background: transparent; border: none; color: #888; font-size: 16px; cursor: pointer; padding: 4px; }
-.dismiss-btn:hover { color: white; }
+
+.install-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.install-icon {
+  font-size: 28px;
+  flex-shrink: 0;
+}
+
+.install-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.install-desc {
+  font-size: 12px;
+  color: var(--color-text-inverse-muted);
+  margin-top: 2px;
+}
+
+.install-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.install-btn {
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
+  border: none;
+  padding: 8px 18px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  white-space: nowrap;
+  transition: background-color var(--duration-fast) var(--ease-out);
+}
+
+.install-btn:hover {
+  background: var(--color-accent-hover);
+}
+
+.dismiss-btn {
+  background: transparent;
+  border: none;
+  color: var(--color-text-inverse-muted);
+  font-size: 16px;
+  padding: 4px 6px;
+  /* 旧值只有 4px 内边距，命中区远小于 24×24 的 AA 下限 */
+  min-width: 32px;
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  transition: color var(--duration-fast) var(--ease-out);
+}
+
+.dismiss-btn:hover {
+  color: var(--color-text-inverse);
+}
 </style>

@@ -31,14 +31,24 @@ const diagnosticError = ref('')
 const backtestChartRef = ref(null)
 let backtestChart = null
 
-const unwrap = (res) => {
-  const payload = res?.data
-  if (payload && typeof payload === 'object' && 'data' in payload) return payload.data
-  return payload
-}
+// 响应形状（Result 信封 vs 裸 DTO）由 api/request.js 的响应拦截器统一处理，
+// 信封会被剥掉，所以这里一律直接读 res.data —— 不再需要本地 unwrap()。
 
+// 只认后端返回的中文业务提示，其次是本地的 fallback。
+// 不再回落到 e?.message —— 那是 axios 的英文原文
+// （如 "Request failed with status code 500"），会直接泄漏给用户且没说怎么恢复。
 const errorMessage = (e, fallback) =>
-  e?.response?.data?.message || e?.message || fallback
+  e?.response?.data?.message || fallback
+
+// 图表颜色与 CSS 令牌同源，避免在 JS 里再抄一遍字面颜色。
+// 读不到令牌时返回 undefined，交给 ECharts 默认色板兜底，
+// 不会因为令牌缺失而画出不可读的线。
+const colorToken = (name) => {
+  if (typeof document === 'undefined') return undefined
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+  // 万一拿到没被替换的 "var(...)" 也当作取不到，不能把非法颜色交给 ECharts
+  return value && !value.startsWith('var(') ? value : undefined
+}
 
 const formatTime = (iso) => {
   if (!iso) return 'N/A'
@@ -74,6 +84,15 @@ const pnlClass = (value) => {
   return n > 0 ? 'positive' : 'negative'
 }
 
+// 交易方向在界面上统一显示中文。接口可能返回 buy/BUY/sell/SELL，
+// 同一页的两个交易列表必须用同一套文案（原来模拟盘列表直接把英文原样显示）。
+const sideLabel = (side) => {
+  const s = String(side ?? '').toLowerCase()
+  if (s === 'buy') return '买入'
+  if (s === 'sell') return '卖出'
+  return side || 'N/A'
+}
+
 const prettyConfig = computed(() => {
   const cfg = strategy.value?.configJson
   if (!cfg) return '{}'
@@ -93,10 +112,10 @@ const backtestResult = computed(() => {
     try {
       return JSON.parse(backtestData.value)
     } catch (e) {
-      return { error: '回测结果解析失败' }
+      return { error: '回测结果解析失败，请重新运行回测' }
     }
   }
-  if (backtestData.value.valid === false) return { error: backtestData.value.error || '策略校验失败' }
+  if (backtestData.value.valid === false) return { error: backtestData.value.error || '策略校验失败，请检查策略配置后重试' }
   return backtestData.value.backtest || backtestData.value
 })
 
@@ -124,6 +143,11 @@ const renderBacktestChart = async () => {
   const benchmarkCurve = Array.isArray(result.benchmark_equity_curve) ? result.benchmark_equity_curve : []
   const dates = strategyCurve.map((point) => point.date || '')
 
+  // 从 :root 读语义令牌：主色（策略曲线）、主色浅底（面积填充）、最弱一级文字（基准曲线）
+  const accentColor = colorToken('--color-accent')
+  const accentSoftColor = colorToken('--color-accent-soft')
+  const mutedColor = colorToken('--color-text-muted')
+
   backtestChart.setOption({
     tooltip: { trigger: 'axis', confine: true },
     legend: { data: ['策略权益', '买入持有'], top: 0 },
@@ -137,8 +161,8 @@ const renderBacktestChart = async () => {
         showSymbol: false,
         smooth: true,
         data: strategyCurve.map((point) => point.equity),
-        lineStyle: { width: 2, color: '#1677ff' },
-        areaStyle: { color: 'rgba(22,119,255,0.08)' }
+        lineStyle: { width: 2, color: accentColor },
+        areaStyle: { color: accentSoftColor }
       },
       {
         name: '买入持有',
@@ -146,7 +170,7 @@ const renderBacktestChart = async () => {
         showSymbol: false,
         smooth: true,
         data: benchmarkCurve.map((point) => point.equity),
-        lineStyle: { width: 1.5, type: 'dashed', color: '#999' }
+        lineStyle: { width: 1.5, type: 'dashed', color: mutedColor }
       }
     ]
   }, { notMerge: true })
@@ -155,13 +179,13 @@ const renderBacktestChart = async () => {
 const loadPaper = async () => {
   try {
     const res = await getPaperAccount(strategy.value.id)
-    account.value = unwrap(res)
+    account.value = res.data
   } catch (e) {
     account.value = null
   }
   try {
     const res = await getPaperTrades(strategy.value.id)
-    const data = unwrap(res)
+    const data = res.data
     trades.value = Array.isArray(data) ? data : []
   } catch (e) {
     trades.value = []
@@ -173,7 +197,7 @@ const loadDetail = async () => {
   error.value = ''
   try {
     const res = await listStrategies()
-    const data = unwrap(res)
+    const data = res.data
     const list = Array.isArray(data) ? data : []
     const found = list.find((item) => String(item.id) === String(route.params.id))
     if (found) {
@@ -183,7 +207,7 @@ const loadDetail = async () => {
       notFound.value = true
     }
   } catch (e) {
-    error.value = errorMessage(e, '策略详情加载失败')
+    error.value = errorMessage(e, '策略详情加载失败，请检查网络后重试')
   } finally {
     loading.value = false
   }
@@ -195,7 +219,7 @@ const handleBacktest = async () => {
   backtestData.value = null
   try {
     const res = await runBacktest(strategy.value.id)
-    backtestData.value = unwrap(res)
+    backtestData.value = res.data
   } catch (e) {
     error.value = errorMessage(e, '回测失败，请稍后重试')
   } finally {
@@ -211,7 +235,7 @@ const loadDiagnostic = async () => {
   diagnosticData.value = null
   try {
     const res = await getStrategyDiagnostic(strategy.value.id)
-    diagnosticData.value = unwrap(res)
+    diagnosticData.value = res.data
   } catch (e) {
     diagnosticError.value = errorMessage(e, '模型诊断加载失败，请稍后重试')
   } finally {
@@ -252,21 +276,27 @@ onUnmounted(() => {
     <header>
       <h1>策略详情</h1>
       <div class="header-actions">
-        <button class="nav-btn" @click="goBack">← 返回策略库</button>
+        <button type="button" class="nav-btn" @click="goBack">← 返回策略库</button>
       </div>
     </header>
 
     <main>
-      <p v-if="error" class="error">{{ error }}</p>
-
+      <!-- 状态互斥，顺序为：加载中 → 出错 → 未找到 → 有数据。
+           加载失败时不再渲染任何"空"状态，
+           否则会出现"没拿到数据"和"未找到该策略"同时成立的矛盾提示。 -->
       <div v-if="loading" class="empty">加载中...</div>
+
+      <p v-else-if="error && !strategy" class="error" role="alert">{{ error }}</p>
 
       <div v-else-if="notFound" class="empty">
         未找到该策略
-        <button class="back-link" @click="goBack">← 返回策略库</button>
+        <button type="button" class="back-link" @click="goBack">← 返回策略库</button>
       </div>
 
       <template v-else-if="strategy">
+        <!-- 操作类错误（回测 / 模拟盘 / 诊断）在内容区提示，不影响已加载的数据 -->
+        <p v-if="error" class="error" role="alert">{{ error }}</p>
+
         <section class="card">
           <div class="detail-title">
             <div>
@@ -277,10 +307,11 @@ onUnmounted(() => {
               </span>
             </div>
             <div class="detail-actions">
-              <button class="btn-backtest" :disabled="backtestLoading" @click="handleBacktest">
+              <button type="button" class="btn-backtest" :disabled="backtestLoading" @click="handleBacktest">
                 {{ backtestLoading ? '运行中...' : '运行回测' }}
               </button>
               <button
+                type="button"
                 class="btn-paper"
                 :class="{ running: strategy.paperEnabled }"
                 :disabled="paperLoading"
@@ -291,7 +322,7 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div class="meta">
+          <div class="meta num">
             <span>创建: {{ formatTime(strategy.createdAt) }}</span>
             <span>更新: {{ formatTime(strategy.updatedAt) }}</span>
             <span v-if="strategy.lastBacktestAt">最近回测: {{ formatTime(strategy.lastBacktestAt) }}</span>
@@ -306,7 +337,8 @@ onUnmounted(() => {
           <div v-if="backtestLoading" class="empty">回测运行中...</div>
           <div v-else-if="backtestResult && backtestResult.error" class="empty">{{ backtestResult.error }}</div>
           <template v-else-if="backtestResult">
-            <div class="metric-grid">
+            <!-- .num 让块内所有数字用等宽字形，行情/指标刷新时不会左右抖动 -->
+            <div class="metric-grid num">
               <div class="metric">
                 <span>策略收益</span>
                 <strong :class="pnlClass(backtestResult.total_return_pct)">{{ formatPct(backtestResult.total_return_pct) }}</strong>
@@ -345,9 +377,9 @@ onUnmounted(() => {
 
             <div v-if="backtestResult.trade_log && backtestResult.trade_log.length" class="backtest-trades">
               <h4>回测交易明细</h4>
-              <div v-for="(trade, index) in backtestResult.trade_log" :key="index" class="trade-row">
+              <div v-for="(trade, index) in backtestResult.trade_log" :key="index" class="trade-row num">
                 <span class="trade-date">{{ trade.date }}</span>
-                <span class="trade-side" :class="trade.side">{{ trade.side === 'buy' ? '买入' : '卖出' }}</span>
+                <span class="trade-side" :class="trade.side">{{ sideLabel(trade.side) }}</span>
                 <span>价格: {{ formatNumber(trade.price, 3) }}</span>
                 <span>数量: {{ formatNumber(trade.shares, 2) }}</span>
                 <span>金额: {{ formatMoney(trade.amount) }}</span>
@@ -363,18 +395,18 @@ onUnmounted(() => {
               <h3>模型诊断</h3>
               <p>仅作低权重参考，不参与策略买卖决策</p>
             </div>
-            <button class="btn-diagnostic" :disabled="diagnosticLoading" @click="loadDiagnostic">
+            <button type="button" class="btn-diagnostic" :disabled="diagnosticLoading" @click="loadDiagnostic">
               {{ diagnosticLoading ? '加载中...' : diagnosticData ? '重新加载' : '加载模型诊断' }}
             </button>
           </div>
 
-          <p v-if="diagnosticError" class="error">{{ diagnosticError }}</p>
+          <p v-if="diagnosticError" class="error" role="alert">{{ diagnosticError }}</p>
 
           <template v-if="diagnostic">
             <div class="diagnostic-grid">
               <div class="diagnostic-group">
                 <span class="group-label">风险指标</span>
-                <div v-if="diagnostic.risk && !diagnostic.risk.error" class="diagnostic-meta">
+                <div v-if="diagnostic.risk && !diagnostic.risk.error" class="diagnostic-meta num">
                   <span>波动率: {{ formatNumber(diagnostic.risk.annual_volatility_pct, 2) }}%</span>
                   <span>最大回撤: {{ formatPct(diagnostic.risk.max_drawdown_pct) }}</span>
                   <span>当前回撤: {{ formatPct(diagnostic.risk.current_drawdown_pct) }}</span>
@@ -386,7 +418,7 @@ onUnmounted(() => {
 
               <div class="diagnostic-group">
                 <span class="group-label">模型状态</span>
-                <div v-if="diagnostic.model_status" class="diagnostic-meta">
+                <div v-if="diagnostic.model_status" class="diagnostic-meta num">
                   <span>可用: {{ diagnostic.model_status.available ? '是' : '否' }}</span>
                   <span>缓存命中: {{ diagnostic.model_status.cache_hit ? '是' : '否' }}</span>
                   <span>磁盘模型: {{ diagnostic.model_status.disk_model_available ? '有' : '无' }}</span>
@@ -397,7 +429,7 @@ onUnmounted(() => {
 
               <div class="diagnostic-group">
                 <span class="group-label">模型共识</span>
-                <div v-if="diagnostic.model_consensus" class="diagnostic-meta">
+                <div v-if="diagnostic.model_consensus" class="diagnostic-meta num">
                   <span>共识: <b>{{ diagnostic.model_consensus.consensus || 'neutral' }}</b></span>
                   <span>置信度: <b>{{ diagnostic.model_consensus.confidence || 'N/A' }}</b></span>
                   <span>参与决策: {{ diagnostic.model_consensus.decision_use ? '是' : '否' }}</span>
@@ -411,7 +443,7 @@ onUnmounted(() => {
 
         <section class="card">
           <h3>模拟盘账户</h3>
-          <div v-if="account" class="account-grid">
+          <div v-if="account" class="account-grid num">
             <div><span>总权益</span><strong>{{ formatMoney(account.equity) }}</strong></div>
             <div><span>现金</span><strong>{{ formatMoney(account.cash) }}</strong></div>
             <div><span>持仓市值</span><strong>{{ formatMoney(account.shares * account.avgCost) }}</strong></div>
@@ -419,6 +451,14 @@ onUnmounted(() => {
             <div><span>持仓数量</span><strong>{{ account.shares }}</strong></div>
             <div><span>平均成本</span><strong>{{ formatMoney(account.avgCost) }}</strong></div>
             <div><span>最高水位</span><strong>{{ formatMoney(account.highWatermark) }}</strong></div>
+            <div><span>最新价格</span><strong>{{ formatMoney(account.lastPrice) }}</strong></div>
+            <div>
+              <span>最新信号</span>
+              <strong>
+                {{ account.lastSignal === 'buy' ? '买入' : account.lastSignal === 'sell' ? '卖出' : account.lastSignal === 'hold' ? '持有' : (account.lastSignal || 'N/A') }}
+              </strong>
+            </div>
+            <div><span>最近评估</span><strong>{{ formatTime(account.lastEvalAt) }}</strong></div>
           </div>
           <div v-else class="empty">暂无模拟盘账户</div>
         </section>
@@ -426,10 +466,10 @@ onUnmounted(() => {
         <section class="card">
           <h3>模拟盘交易记录</h3>
           <div v-if="trades.length === 0" class="empty">暂无交易记录</div>
-          <div v-else class="trades-list">
+          <div v-else class="trades-list num">
             <div v-for="(trade, index) in trades" :key="index" class="trade-row">
-              <span class="trade-date">{{ formatTime(trade.tradeDate) }}</span>
-              <span class="trade-side" :class="trade.side">{{ trade.side }}</span>
+              <span class="trade-date">{{ formatTime(trade.createdAt || trade.tradeDate) }}</span>
+              <span class="trade-side" :class="trade.side">{{ sideLabel(trade.side) }}</span>
               <span>{{ trade.symbol }}</span>
               <span>价格: {{ trade.price }}</span>
               <span>数量: {{ trade.shares }}</span>
@@ -444,11 +484,18 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.app-layout { min-height: 100vh; background: #f0f2f5; }
+.app-layout {
+  /* 移动浏览器地址栏会算进 100vh，底部会被顶出可视区；补 100dvh 兜底 */
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--color-bg-page);
+}
 header {
-  background: #1a1a2e;
-  color: white;
+  background: var(--color-bg-inverse);
+  color: var(--color-text-inverse);
   padding: 16px 24px;
+  /* iOS 独立模式（index.html 声明了 black-translucent）内容会顶到状态栏下，补顶部安全区 */
+  padding-top: calc(16px + env(safe-area-inset-top, 0px));
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -456,61 +503,71 @@ header {
 header h1 { margin: 0; font-size: 20px; }
 .header-actions { display: flex; gap: 8px; }
 .nav-btn {
-  background: rgba(255,255,255,0.15);
+  /* 深色导航上的半透明胶囊：语义层没有"深底上的浮起表面"这个角色，
+     用 color-mix 从 --color-text-inverse 派生，避免写死半透明白色。
+     不支持 color-mix 时该声明失效、背景回落为透明，白字直接压在深色导航上
+     仍是 17.06:1，不会出现读不清的文字。 */
+  background: color-mix(in srgb, var(--color-text-inverse) 15%, transparent);
   border: none;
-  color: white;
+  color: var(--color-text-inverse);
   padding: 6px 14px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   font-size: 13px;
 }
-.nav-btn:hover { background: rgba(255,255,255,0.25); }
+.nav-btn:hover { background: color-mix(in srgb, var(--color-text-inverse) 25%, transparent); }
 
 main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }
 .card {
-  background: white;
-  border-radius: 8px;
+  background: var(--color-bg-surface);
+  border-radius: var(--radius-lg);
   padding: 18px 20px;
   margin-bottom: 16px;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  box-shadow: var(--shadow-1);
 }
 .detail-title { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .detail-title h2 { margin: 0 0 6px; font-size: 20px; }
-.symbol-code { font-size: 13px; color: #999; }
+.symbol-code { font-size: 13px; color: var(--color-text-muted); }
+/* 徽章文字对浅底 4.97 / 4.98:1 达标；状态另有文字（模拟盘中/未启动），不靠颜色单独表意。
+   语义层没有"危险/成功的浅色底"令牌，底色统一用 --color-bg-subtle，色相交给文字与边框。 */
 .paper-badge {
   display: inline-block;
   margin-left: 8px;
   font-size: 11px;
   padding: 2px 7px;
-  border-radius: 10px;
-  background: #fff1f0;
-  color: #ff4d4f;
-  border: 1px solid #ffa39e;
+  border-radius: var(--radius-pill);
+  background: var(--color-bg-subtle);
+  /* "未启动"是普通关闭态而非错误：原来用危险红会把中性状态渲染成故障提示
+     （危险色用在非破坏性状态上）。关闭态用中性色，只有启用才用成功色。 */
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-strong);
 }
 .paper-badge.enabled {
-  background: #f6ffed;
-  color: #52c41a;
-  border-color: #b7eb8f;
+  color: var(--color-success);
+  background: var(--color-success-soft);
+  border-color: var(--color-success-mark);
 }
 .detail-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .detail-actions button {
   padding: 7px 14px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-size: 13px;
   cursor: pointer;
-  color: white;
+  color: var(--color-text-on-accent);
 }
 .detail-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-backtest { background: #722ed1; }
-.btn-paper { background: #fa8c16; }
-.btn-paper.running { background: #52c41a; }
+/* 回测沿用原来的紫色：语义层没有"次级动作"色，只能取原始色板 --c-purple-700，白字 6.94:1 */
+.btn-backtest { background: var(--c-purple-700); }
+/* 旧的橙色、绿色配白字只有 2.38:1 / 2.27:1，都不达 AA */
+.btn-paper { background: var(--color-warning); }
+.btn-paper.running { background: var(--color-success); }
 
 .meta {
   display: flex;
   flex-wrap: wrap;
   gap: 16px;
-  color: #888;
+  color: var(--color-text-secondary);
   font-size: 12px;
   margin: 12px 0 16px;
 }
@@ -518,9 +575,9 @@ main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }
 
 .config-block {
   margin: 0;
-  background: #1f1f2e;
-  color: #e6e6f0;
-  border-radius: 6px;
+  background: var(--color-bg-inverse);
+  color: var(--color-text-inverse);
+  border-radius: var(--radius-md);
   padding: 12px 14px;
   font-size: 12px;
   line-height: 1.5;
@@ -537,18 +594,23 @@ main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }
   margin-bottom: 16px;
 }
 .metric {
-  background: #fafafa;
-  border: 1px solid #f0f0f0;
-  border-radius: 6px;
+  background: var(--color-bg-subtle);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
-.metric span { font-size: 12px; color: #888; }
-.metric strong { font-size: 18px; color: #333; }
-.metric strong.positive { color: #cf1322; }
-.metric strong.negative { color: #389e0d; }
+.metric span { font-size: 12px; color: var(--color-text-secondary); }
+.metric strong { font-size: 18px; color: var(--color-text-primary); }
+/* A 股习惯红涨绿跌：涨用红、跌用绿。
+   注意这里用 --color-gain / --color-loss 而不是 --color-danger / --color-success：
+   涨跌是"行情方向"，与"成功/危险"是两个不同的语义，虽然恰好落到同一批色相。
+   直接引用 danger/success 会让"红色=危险"的既有含义漂移（better-colors：一个颜色一个含义）。
+   两者对浅底的实测对比度：gain 4.97:1、loss 4.98:1，均达正文要求。 */
+.metric strong.positive { color: var(--color-gain); }
+.metric strong.negative { color: var(--color-loss); }
 
 .equity-chart {
   width: 100%;
@@ -558,7 +620,7 @@ main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }
 
 .backtest-trades h4 { margin: 4px 0 10px; font-size: 14px; }
 
-.diagnostic-card { border-left: 3px solid #d9d9d9; }
+.diagnostic-card { border-left: 3px solid var(--color-border-strong); }
 .diagnostic-head {
   display: flex;
   justify-content: space-between;
@@ -567,17 +629,19 @@ main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }
   flex-wrap: wrap;
 }
 .diagnostic-head h3 { margin: 0; }
-.diagnostic-head p { margin: 4px 0 0; color: #999; font-size: 12px; }
+.diagnostic-head p { margin: 4px 0 0; color: var(--color-text-muted); font-size: 12px; }
 .btn-diagnostic {
   padding: 7px 14px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-size: 13px;
   cursor: pointer;
-  color: white;
-  background: #8c8c8c;
+  /* 旧的中灰配白字仅 3.36:1，不达 AA。语义层没有"中性实心按钮"色，
+     取最接近的原始色板 --c-neutral-800，白字 7.00:1 */
+  background: var(--c-neutral-800);
+  color: var(--color-text-inverse);
 }
-.btn-diagnostic:hover { background: #595959; }
+.btn-diagnostic:hover { background: var(--color-bg-inverse); }
 .btn-diagnostic:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .diagnostic-grid {
@@ -587,23 +651,23 @@ main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }
   margin-top: 14px;
 }
 .diagnostic-group {
-  background: #fafafa;
-  border: 1px solid #f0f0f0;
-  border-radius: 6px;
+  background: var(--color-bg-subtle);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
   padding: 12px;
 }
-.group-label { display: block; font-size: 12px; color: #888; margin-bottom: 8px; }
+.group-label { display: block; font-size: 12px; color: var(--color-text-secondary); margin-bottom: 8px; }
 .diagnostic-meta {
   display: flex;
   flex-direction: column;
   gap: 6px;
   font-size: 13px;
-  color: #555;
+  color: var(--color-text-secondary);
 }
-.diagnostic-meta b { color: #333; }
+.diagnostic-meta b { color: var(--color-text-primary); }
 .disclaimer {
   margin: 12px 0 0;
-  color: #999;
+  color: var(--color-text-muted);
   font-size: 12px;
 }
 
@@ -613,16 +677,16 @@ main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }
   gap: 10px;
 }
 .account-grid > div {
-  background: #fafafa;
-  border: 1px solid #f0f0f0;
-  border-radius: 6px;
+  background: var(--color-bg-subtle);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
-.account-grid span { font-size: 12px; color: #888; }
-.account-grid strong { font-size: 16px; color: #333; }
+.account-grid span { font-size: 12px; color: var(--color-text-secondary); }
+.account-grid strong { font-size: 16px; color: var(--color-text-primary); }
 
 .trades-list { display: flex; flex-direction: column; gap: 8px; }
 .trade-row {
@@ -631,26 +695,29 @@ main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }
   gap: 10px;
   align-items: center;
   padding: 8px 10px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--color-border);
   font-size: 12px;
-  color: #555;
+  color: var(--color-text-secondary);
 }
 .trade-row:last-child { border-bottom: none; }
-.trade-date { color: #888; }
-.trade-side { font-weight: 600; padding: 1px 6px; border-radius: 4px; }
-.trade-side.BUY, .trade-side.buy { color: #cf1322; background: #fff1f0; }
-.trade-side.SELL, .trade-side.sell { color: #389e0d; background: #f6ffed; }
-.trade-reason { color: #999; width: 100%; }
+.trade-date { color: var(--color-text-secondary); }
+.trade-side { font-weight: 600; padding: 1px 6px; border-radius: var(--radius-sm); }
+/* 买卖方向沿用同一套"方向"语义（红买绿卖），文字对浅底 4.97 / 4.98:1；
+   方向另有文字标注，不靠颜色单独表意 */
+.trade-side.BUY, .trade-side.buy { color: var(--color-gain); background: var(--color-bg-subtle); }
+.trade-side.SELL, .trade-side.sell { color: var(--color-loss); background: var(--color-bg-subtle); }
+.trade-reason { color: var(--color-text-muted); width: 100%; }
 
-.empty { color: #999; text-align: center; padding: 40px 16px; font-size: 14px; }
-.error { color: #ff4d4f; font-size: 13px; margin-bottom: 12px; }
+/* 旧灰字对灰底仅 2.54:1 */
+.empty { color: var(--color-text-muted); text-align: center; padding: 40px 16px; font-size: 14px; }
+.error { color: var(--color-danger); font-size: 13px; margin-bottom: 12px; }
 .back-link {
   display: inline-block;
   margin-top: 10px;
-  background: #1677ff;
-  color: white;
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 6px 12px;
   cursor: pointer;
 }

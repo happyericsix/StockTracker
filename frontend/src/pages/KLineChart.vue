@@ -73,6 +73,24 @@ const lastUpdate = ref('')
 const chartRef = ref(null)
 let chart = null
 
+// ============ 设计令牌读取 ============
+// ECharts 在 canvas 上绘制，不认 CSS 变量，必须在 JS 里取出 style.css 语义令牌的
+// 实际色值再用。结果做缓存，避免每次重绘都读一遍计算样式。
+// 取不到时回退到令牌定义值，保证图表照常渲染。
+const tokenCache = new Map()
+const token = (name, fallback) => {
+  if (!tokenCache.has(name)) {
+    let value = fallback
+    try {
+      value = getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
+    } catch {
+      value = fallback
+    }
+    tokenCache.set(name, value)
+  }
+  return tokenCache.get(name)
+}
+
 const handleResize = () => chart?.resize()
 
 const disposeChart = () => {
@@ -161,8 +179,8 @@ const loadData = async (sym) => {
     let list = []
     if (period.value === 'minute') {
       const res = await getMinuteKline(sym, minutePeriod.value).catch(() => null)
-      // 后端返回的是 List<DailyStockResponse>，res.data 直接是 list
-      const data = Array.isArray(res?.data) ? res.data : (Array.isArray(res) ? res : [])
+      // 后端返回的是 List<DailyStockResponse>（裸 DTO），拦截器不会动它，res.data 直接是 list
+      const data = Array.isArray(res?.data) ? res.data : []
       list = data.map(r => ({
         date: r.date, open: r.open, close: r.close, high: r.high, low: r.low, volume: r.volume
       }))
@@ -200,7 +218,11 @@ const loadData = async (sym) => {
     renderChart(sym, data)
     window.addEventListener('resize', handleResize)
   } catch (e) {
-    error.value = '加载失败：' + (e?.message || '未知错误')
+    // 只采用后端返回的消息；去掉 axios 的 e.message —— 那是英文
+    // ("Request failed with status code 500")，会原样显示给用户。
+    // 兜底文案必须说清怎么恢复，不能只有"失败了"。
+    error.value = e?.response?.data?.message
+      || 'K 线数据加载失败，请检查股票代码是否正确，或确认网络后重试'
   } finally {
     loading.value = false
   }
@@ -210,6 +232,12 @@ const loadData = async (sym) => {
 const renderChart = (sym, data) => {
   const dates = data.map(d => d.date)
   const isMinute = period.value === 'minute'
+
+  // 涨红跌绿（A 股习惯）。原值 #ff4d4f / #52c41a 对白只有 3.27 / 2.27，不达标。
+  // 用 --color-gain / --color-loss 而不是 danger / success：涨跌是"行情方向"，
+  // 与"成功/危险"是两个语义，虽然恰好落到同一批色相（对白 5.57 / 5.59）。
+  const COLOR_UP = token('--color-gain', '#cf1322')
+  const COLOR_DOWN = token('--color-loss', '#237804')
 
   // series 数据准备
   const series = []
@@ -221,8 +249,8 @@ const renderChart = (sym, data) => {
       name: 'K线', type: 'candlestick', data: kline,
       tooltip: { valueFormatter: (v) => (Array.isArray(v) ? v.map(x => (+x).toFixed(3)).join(' / ') : (+v).toFixed(3)) },
       itemStyle: {
-        color: '#ff4d4f', color0: '#52c41a',
-        borderColor: '#ff4d4f', borderColor0: '#52c41a'
+        color: COLOR_UP, color0: COLOR_DOWN,
+        borderColor: COLOR_UP, borderColor0: COLOR_DOWN
       }
     })
     legend.push('K线')
@@ -234,8 +262,10 @@ const renderChart = (sym, data) => {
       name: lineName, type: 'line', data: closes,
       tooltip: { valueFormatter: (v) => (+v).toFixed(3) },
       smooth: true, showSymbol: false,
-      lineStyle: { width: 2, color: '#1677ff' },
-      areaStyle: { color: 'rgba(22,119,255,0.08)' }
+      lineStyle: { width: 2, color: token('--color-accent', '#0958d9') },
+      // 原 rgba(22,119,255,0.08) 是主色淡影；令牌层没有半透明主色，
+      // 图表底色是白色，直接用主色浅底令牌等价
+      areaStyle: { color: token('--color-accent-soft', '#e6f4ff') }
     })
     legend.push(lineName)
   } else { // ohlc
@@ -250,7 +280,7 @@ const renderChart = (sym, data) => {
         const high = api.value(3)
         const halfWidth = Math.max(2, api.size([1, 0])[0] * 0.3)
         const isUp = close >= open
-        const color = isUp ? '#ff4d4f' : '#52c41a'
+        const color = isUp ? COLOR_UP : COLOR_DOWN
         return {
           type: 'group',
           children: [
@@ -284,10 +314,13 @@ const renderChart = (sym, data) => {
       tooltip: { valueFormatter: (v) => (+v).toFixed(3) },
       lineStyle: { width: 1, color }
     })
-    push('MA5', ma5, '#ffa940'); legend.push('MA5')
-    push('MA10', ma10, '#1677ff'); legend.push('MA10')
-    push('MA20', ma20, '#722ed1'); legend.push('MA20')
-    if (ma60) { push('MA60', ma60, '#13c2c2'); legend.push('MA60') }
+    // 均线是"数据系列"色，走 --color-chart-* 这一组独立令牌
+    // （不要借用表示状态的 warning-mark 等；原 MA60 的青色 #13c2c2 对白仅 2.21:1，
+    //  连图形对象的 3:1 都不到，故换成 3.46:1 的绿）
+    push('MA5', ma5, token('--color-chart-ma5', '#d46b08')); legend.push('MA5')
+    push('MA10', ma10, token('--color-chart-ma10', '#0958d9')); legend.push('MA10')
+    push('MA20', ma20, token('--color-chart-ma20', '#722ed1')); legend.push('MA20')
+    if (ma60) { push('MA60', ma60, token('--color-chart-ma60', '#389e0d')); legend.push('MA60') }
   }
 
   // 布林带（仅日/周/月）
@@ -306,9 +339,14 @@ const renderChart = (sym, data) => {
       lower.push(+(m - 2 * s).toFixed(2))
     }
     const bollFmt = { valueFormatter: (v) => (+v).toFixed(3) }
-    series.push({ name: 'BOLL上', type: 'line', data: upper, showSymbol: false, tooltip: bollFmt, lineStyle: { width: 1, color: '#eb2f96', opacity: 0.6 } })
-    series.push({ name: 'BOLL中', type: 'line', data: middle, showSymbol: false, tooltip: bollFmt, lineStyle: { width: 1, color: '#eb2f96', type: 'dashed' } })
-    series.push({ name: 'BOLL下', type: 'line', data: lower, showSymbol: false, tooltip: bollFmt, lineStyle: { width: 1, color: '#eb2f96', opacity: 0.6 } })
+    // 布林带原为粉色 #eb2f96，对白 3.90:1 —— 满足图形对象的 3:1，
+    // 所以它原本就是达标的，不该被换成中性灰（换掉会让布林带失去可辨识度）。
+    // 现收进图表系列令牌组，1px 细线由 opacity 控制视觉权重。
+    const bollBand = token('--color-chart-boll', '#eb2f96')
+    const bollMid = token('--color-text-secondary', '#595959')
+    series.push({ name: 'BOLL上', type: 'line', data: upper, showSymbol: false, tooltip: bollFmt, lineStyle: { width: 1, color: bollBand, opacity: 0.6 } })
+    series.push({ name: 'BOLL中', type: 'line', data: middle, showSymbol: false, tooltip: bollFmt, lineStyle: { width: 1, color: bollMid, type: 'dashed' } })
+    series.push({ name: 'BOLL下', type: 'line', data: lower, showSymbol: false, tooltip: bollFmt, lineStyle: { width: 1, color: bollBand, opacity: 0.6 } })
     legend.push('BOLL上', 'BOLL中', 'BOLL下')
   }
 
@@ -320,7 +358,8 @@ const renderChart = (sym, data) => {
 
   const subPeriodLabel = isMinute ? `${minutePeriod.value}分K` : { day: '日K', week: '周K', month: '月K' }[period.value]
   const stockName = stockInfo.value?.name || sym
-  const priceStr = stockInfo.value?.price ? `$${stockInfo.value.price}` : (data.length ? `$${data[data.length-1].close}` : 'N/A')
+  // 本应用是 A 股行情（贵州茅台 600519 等），价格单位是人民币，用 ¥ 而不是 $
+  const priceStr = stockInfo.value?.price ? `¥${stockInfo.value.price}` : (data.length ? `¥${data[data.length-1].close}` : 'N/A')
 
   chart.setOption({
     title: {
@@ -333,8 +372,8 @@ const renderChart = (sym, data) => {
     },
     tooltip: {
       trigger: 'axis', axisPointer: { type: 'cross' },
-      backgroundColor: 'rgba(50, 50, 50, 0.9)', borderWidth: 0,
-      textStyle: { color: '#fff', fontSize: 12 }, confine: true
+      backgroundColor: token('--color-bg-inverse', '#1a1a2e'), borderWidth: 0,
+      textStyle: { color: token('--color-text-inverse', '#ffffff'), fontSize: 12 }, confine: true
     },
     legend: { data: legend, top: 46, textStyle: { fontSize: 12 } },
     grid: [
@@ -360,12 +399,12 @@ const renderChart = (sym, data) => {
       { type: 'inside', xAxisIndex: [0, 1], start: 50, end: 100,
         moveOnMouseMove: false, zoomOnMouseWheel: true },
       { show: true, xAxisIndex: [0, 1], type: 'slider', top: '94%', height: 18, start: 50, end: 100,
-        handleStyle: { color: '#1677ff' } }
+        handleStyle: { color: token('--color-accent', '#0958d9') } }
     ],
     series: [
       ...series,
       { name: '成交量', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: volumes,
-        itemStyle: { color: (p) => (p.data[2] > 0 ? '#ff4d4f' : '#52c41a') } }
+        itemStyle: { color: (p) => (p.data[2] > 0 ? COLOR_UP : COLOR_DOWN) } }
     ]
   }, { notMerge: true })
 }
@@ -409,9 +448,18 @@ watch(() => route.params.symbol, (newSym) => {
   }
 })
 
-// 指标颜色辅助
-const rsiColor = (v) => v == null ? '#999' : v >= 70 ? '#ff4d4f' : v <= 30 ? '#52c41a' : '#1677ff'
-const macdColor = (h) => h == null ? '#999' : h >= 0 ? '#ff4d4f' : '#52c41a'
+// 指标颜色辅助（同样走令牌，不留字面颜色）
+// RSI 的超买/超卖是"值得注意的状态"，不是成功/失败：超买给警示色、超卖给主色。
+// 原来用 danger/success 会和涨跌共用色相，让"绿=跌"与"绿=超卖"撞义。
+// 中性值用主文字色（保持数据可读的权重），不借交互蓝——主色在本应用表示"可点击"。
+// 状态含义另有「超买/超卖/中性」文字承载，颜色只是强化。
+const rsiColor = (v) => v == null
+  ? token('--color-text-muted', '#666666')
+  : v >= 70 ? token('--color-warning', '#ad4e00') : v <= 30 ? token('--color-accent', '#0958d9') : token('--color-text-primary', '#1a1a2e')
+// MACD 柱是"方向"（正负），与 K 线涨跌同语义 → 用 gain/loss
+const macdColor = (h) => h == null
+  ? token('--color-text-muted', '#666666')
+  : h >= 0 ? token('--color-gain', '#cf1322') : token('--color-loss', '#237804')
 </script>
 
 <template>
@@ -423,10 +471,12 @@ const macdColor = (h) => h == null ? '#999' : h >= 0 ? '#ff4d4f' : '#52c41a'
 
     <div class="toolbar">
       <form class="symbol-form" @submit.prevent="onSubmit">
+        <!-- 视觉上不需要外露标签，用 aria-label 给可访问名称（placeholder 不能当标签） -->
         <input
           v-model="symbol"
           placeholder="输入股票代码（如 600519）"
           class="symbol-input"
+          aria-label="股票代码"
         />
         <button type="submit" class="btn-primary">查看</button>
       </form>
@@ -485,29 +535,29 @@ const macdColor = (h) => h == null ? '#999' : h >= 0 ? '#ff4d4f' : '#52c41a'
     </div>
 
     <main>
-      <p v-if="error" class="error-msg">{{ error }}</p>
+      <p v-if="error" class="error-msg" role="alert">{{ error }}</p>
       <div v-if="loading && !chart" class="empty-state">加载中...</div>
       <div ref="chartRef" class="chart-container"></div>
 
       <div v-if="indicators" class="indicator-panel">
         <div class="indicator">
           <span class="ind-label">RSI(14)</span>
-          <span class="ind-value" :style="{ color: rsiColor(indicators.rsi) }">{{ indicators.rsi }}</span>
+          <span class="ind-value num" :style="{ color: rsiColor(indicators.rsi) }">{{ indicators.rsi }}</span>
           <span class="ind-hint">{{ indicators.rsi >= 70 ? '超买' : indicators.rsi <= 30 ? '超卖' : '中性' }}</span>
         </div>
         <div class="indicator">
           <span class="ind-label">MACD</span>
-          <span class="ind-value">
-            <span style="color:#1677ff">DIF {{ indicators.macd.dif }}</span>
-            <span style="color:#722ed1;margin-left:6px">DEA {{ indicators.macd.dea }}</span>
+          <span class="ind-value num">
+            <span style="color: var(--color-chart-ma10)">DIF {{ indicators.macd.dif }}</span>
+            <span style="color: var(--color-chart-ma20); margin-left: 6px">DEA {{ indicators.macd.dea }}</span>
           </span>
-          <span class="ind-hint" :style="{ color: macdColor(indicators.macd.hist) }">
+          <span class="ind-hint num" :style="{ color: macdColor(indicators.macd.hist) }">
             HIST {{ indicators.macd.hist >= 0 ? '+' : '' }}{{ indicators.macd.hist }}
           </span>
         </div>
         <div class="indicator">
           <span class="ind-label">BOLL(20)</span>
-          <span class="ind-value" style="color:#eb2f96">
+          <span class="ind-value num" style="color: var(--color-text-secondary)">
             {{ indicators.bollinger.lower }} / {{ indicators.bollinger.middle }} / {{ indicators.bollinger.upper }}
           </span>
           <span class="ind-hint">下轨 / 中轨 / 上轨</span>
@@ -515,19 +565,27 @@ const macdColor = (h) => h == null ? '#999' : h >= 0 ? '#ff4d4f' : '#52c41a'
       </div>
 
       <p v-if="stockInfo" class="price-info">
-        {{ stockInfo.name || symbol }} 当前价: <b>${{ stockInfo.price || 'N/A' }}</b>
-        <span class="update"> | {{ stockInfo.lastUpdated || 'N/A' }}</span>
+        {{ stockInfo.name || symbol }} 当前价: <b class="num">¥{{ stockInfo.price || 'N/A' }}</b>
+        <span class="update num"> | {{ stockInfo.lastUpdated || 'N/A' }}</span>
       </p>
     </main>
   </div>
 </template>
 
 <style scoped>
-.kline-page { min-height: 100vh; background: #f0f2f5; display: flex; flex-direction: column; }
+.kline-page {
+  min-height: 100vh;
+  /* 移动端地址栏高度算进 100vh，会顶出底部，补 dvh 兜底 */
+  min-height: 100dvh;
+  background: var(--color-bg-page);
+  display: flex;
+  flex-direction: column;
+}
 header {
-  background: #1a1a2e;
-  color: white;
-  padding: 14px 16px;
+  background: var(--color-bg-inverse);
+  color: var(--color-text-inverse);
+  /* iOS 独立模式（black-translucent）内容会顶到状态栏下，让出顶部安全区 */
+  padding: calc(14px + env(safe-area-inset-top, 0px)) 16px 14px;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -536,18 +594,18 @@ header {
 header h1 { margin: 0; font-size: 18px; flex: 1; }
 .back {
   background: transparent;
-  border: 1px solid rgba(255,255,255,0.4);
-  color: white;
+  border: 1px solid var(--color-border-control);
+  color: var(--color-text-inverse);
   padding: 6px 12px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   font-size: 13px;
 }
 
 .toolbar {
-  background: white;
+  background: var(--color-bg-surface);
   padding: 12px 16px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -557,57 +615,63 @@ header h1 { margin: 0; font-size: 18px; flex: 1; }
 .symbol-input {
   flex: 1;
   padding: 8px 12px;
-  border: 1px solid #d9d9d9;
-  border-radius: 4px;
+  /* 输入控件边界要 ≥3:1（1.4.11），原 #d9d9d9 对白只有 1.41:1 */
+  border: 1px solid var(--color-border-control);
+  border-radius: var(--radius-sm);
   font-size: 14px;
 }
-.symbol-input:focus { outline: none; border-color: #1677ff; }
+/* 原来在这里写了 outline: none，只用 1px 边框变色代替焦点环（且那个颜色
+   对白 2.99:1）。现在交给全局 :focus-visible（2px 主色环 + 偏移），
+   这里只保留边框变色作第二通道。 */
+.symbol-input:focus-visible { border-color: var(--color-accent); }
 .btn-primary {
-  background: #1677ff;
-  color: white;
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
   border: none;
   padding: 0 18px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-size: 14px;
   cursor: pointer;
 }
-.btn-primary:hover { background: #4096ff; }
+.btn-primary:hover { background: var(--color-accent-hover); }
 
 .control-row { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
 .control-group { display: flex; align-items: center; gap: 6px; }
-.control-label { font-size: 12px; color: #888; margin-right: 2px; }
+/* 原 #888 对白 3.54:1，不达 AA */
+.control-label { font-size: 12px; color: var(--color-text-secondary); margin-right: 2px; }
 .btn-group { display: flex; gap: 4px; }
 .pill {
   padding: 4px 10px;
-  background: #f5f5f5;
+  background: var(--color-bg-subtle);
   border: 1px solid transparent;
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   font-size: 12px;
-  color: #666;
+  color: var(--color-text-muted);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all var(--duration-fast) var(--ease-out);
 }
-.pill:hover { border-color: #1677ff; color: #1677ff; }
+.pill:hover { border-color: var(--color-accent); color: var(--color-accent); }
 .pill.active {
-  background: #1677ff;
-  color: white;
-  border-color: #1677ff;
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
+  border-color: var(--color-accent);
 }
 
 .range-bar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .range-btn {
   padding: 4px 12px;
-  background: #f5f5f5;
+  background: var(--color-bg-subtle);
   border: 1px solid transparent;
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   font-size: 12px;
-  color: #666;
+  color: var(--color-text-muted);
   cursor: pointer;
 }
+/* 原 #1677ff + 白字只有 4.10:1，不达 AA */
 .range-btn.active {
-  background: #1677ff;
-  color: white;
-  border-color: #1677ff;
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
+  border-color: var(--color-accent);
 }
 
 main {
@@ -622,23 +686,25 @@ main {
   box-sizing: border-box;
 }
 .chart-container {
-  background: white;
-  border-radius: 8px;
+  background: var(--color-bg-surface);
+  border-radius: var(--radius-lg);
   padding: 8px;
   height: 560px;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  box-shadow: var(--shadow-1);
 }
-.error-msg { color: #ff4d4f; text-align: center; padding: 24px; font-size: 14px; }
-.empty-state { color: #999; text-align: center; padding: 48px 24px; font-size: 14px; }
+/* 原 #ff4d4f 对浅灰底仅 2.91:1 */
+.error-msg { color: var(--color-danger); text-align: center; padding: 24px; font-size: 14px; }
+/* 原 #999 对灰底 2.54:1 */
+.empty-state { color: var(--color-text-muted); text-align: center; padding: 48px 24px; font-size: 14px; }
 
 .indicator-panel {
-  background: white;
-  border-radius: 8px;
+  background: var(--color-bg-surface);
+  border-radius: var(--radius-lg);
   padding: 12px 16px;
   display: flex;
   gap: 16px;
   flex-wrap: wrap;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  box-shadow: var(--shadow-1);
 }
 .indicator {
   display: flex;
@@ -646,19 +712,20 @@ main {
   gap: 2px;
   min-width: 180px;
 }
-.ind-label { font-size: 12px; color: #888; }
+.ind-label { font-size: 12px; color: var(--color-text-secondary); }
 .ind-value { font-size: 14px; font-weight: 600; }
-.ind-hint { font-size: 11px; color: #999; }
+.ind-hint { font-size: 11px; color: var(--color-text-muted); }
 
 .price-info {
-  background: white;
-  border-radius: 8px;
+  background: var(--color-bg-surface);
+  border-radius: var(--radius-lg);
   padding: 12px 16px;
   text-align: center;
   font-size: 14px;
-  color: #555;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  color: var(--color-text-secondary);
+  box-shadow: var(--shadow-1);
 }
-.price-info b { color: #fa8c16; font-size: 18px; margin: 0 4px; }
-.update { color: #999; font-size: 12px; }
+/* 原 #fa8c16 作文字对白仅 2.38:1 */
+.price-info b { color: var(--color-warning); font-size: 18px; margin: 0 4px; }
+.update { color: var(--color-text-muted); font-size: 12px; }
 </style>

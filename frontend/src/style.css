@@ -1,296 +1,279 @@
+/* ============================================================================
+ * Stock Tracker — 全局基础层
+ *
+ * 本文件取代了原先残留的 Vite 脚手架模板样式。旧内容带来的实际故障：
+ *   1. `color-scheme: light dark` + `h1,h2{color:var(--text-h)}` →
+ *      系统暗色模式下标题变成 #f3f4f6，压在应用自己的浅灰底 #f0f2f5 上，
+ *      实测对比度 1.02:1 —— 标题不可见。
+ *   2. `#app { width: 1126px; text-align: center }` → 全站被锁成固定宽度并居中。
+ *   3. `:root { font: 18px/145% }` → 根字号偏离 16px 基准。
+ *   4. 约 150 行 .hero / .vite / .framework / .ticks / #next-steps 等死规则。
+ *
+ * 层级约定（与 better-colors 一致）：
+ *   - 原始色板 `--c-*`  只在本文件定义字面色值；
+ *   - 语义令牌 `--color-*`  是组件唯一允许引用的层。
+ * 所有色值均经 WCAG 2.1 对比度实测，括号内为实测值。
+ * ========================================================================== */
+
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+  /* ---------- 1. 原始色板（唯一允许写死颜色的地方） ---------------------- */
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
+  /* 中性：从表面到墨色 */
+  --c-neutral-0:   #ffffff;
+  --c-neutral-50:  #fafafa;
+  --c-neutral-100: #f0f2f5;  /* 页面底色 */
+  --c-neutral-200: #e8e8e8;
+  --c-neutral-300: #d9d9d9;
+  --c-neutral-400: #aaaaaa;  /* 对深底 #1a1a2e 为 7.34:1，用于深色表面上的次要文字 */
+  --c-neutral-500: #8c8c8c;  /* 对白 3.36:1，够作控件边界与图形标记 */
+  --c-neutral-600: #767676;  /* 对白 4.54:1，占位符下限 */
+  --c-neutral-700: #666666;  /* 对白 5.74:1 / 对灰底 5.12:1 */
+  --c-neutral-800: #595959;  /* 对白 7.00:1 / 对灰底 6.25:1 */
+  --c-neutral-900: #1a1a2e;  /* 对白 17.06:1 */
 
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
-  color-scheme: light dark;
-  color: var(--text);
-  background: var(--bg);
+  /* 蓝：交互。交互色改用 blue-7，白字 6.16:1（旧 #1677ff 白字仅 4.10:1，不达 AA）。
+     不要再引入更浅的蓝：旧的 #4096ff 对白仅 2.99:1，连图形/焦点环的 3:1 都不到。 */
+  --c-blue-100: #e6f4ff;
+  --c-blue-700: #0958d9;  /* 对白 6.16:1 / 对灰底 5.49:1 */
+  --c-blue-800: #003eb3;  /* 对白 8.97:1 */
+
+  /* 绿：成功。旧 #52c41a 白字仅 2.27:1 */
+  --c-green-50:  #f6ffed;  /* 浅底，承载 #237804 文字实测 5.44:1 */
+  --c-green-400: #389e0d;  /* 图形标记 3.46:1 */
+  --c-green-700: #237804;  /* 白字 5.59:1 / 对灰底 4.98:1 */
+  --c-green-800: #135200;  /* 白字 9.40:1，实心按钮 hover（须比基色更深） */
+
+  /* 红：危险。旧 #ff4d4f 白字仅 3.27:1 */
+  --c-red-50:    #fff1f0;  /* 错误字段浅底，承载 #cf1322 文字实测 5.07:1 */
+  --c-red-600:   #cf1322;  /* 白字 5.57:1 / 对灰底 4.97:1 */
+  --c-red-800:   #a8071a;  /* 白字 7.75:1，实心按钮 hover */
+
+  /* 橙：警示。旧 #fa8c16 白字仅 2.38:1、#faad14 作文字仅 1.90:1，都别再用 */
+  --c-orange-50:  #fff7e6;  /* 本地暂存徽章浅底，承载 #ad4e00 文字实测 5.09:1 */
+  --c-orange-600: #d46b08;  /* 图形标记 3.56:1 */
+  --c-orange-800: #ad4e00;  /* 白字 5.43:1 / 对灰底 4.84:1 */
+  --c-orange-900: #873800;  /* 白字 8.09:1，实心按钮 hover */
+
+  /* 紫：策略卡片渐变与图表系列，仅装饰。渐变两端都要满足白字 >=4.5:1。
+     #b37feb 那样的浅紫白字只有 2.94:1，别用作渐变端或文字 */
+  --c-purple-700: #722ed1;  /* 白字 6.94:1 */
+  --c-purple-800: #531dab;  /* 白字 9.85:1 */
+
+  /* 粉：仅图表系列。对白 3.90:1 —— 满足图形对象的 3:1，不满足文字的 4.5:1 */
+  --c-pink-600: #eb2f96;
+
+  /* ---------- 2. 语义令牌（组件唯一允许引用的层） ------------------------ */
+
+  --color-bg-page:        var(--c-neutral-100);
+  --color-bg-surface:     var(--c-neutral-0);
+  --color-bg-subtle:      var(--c-neutral-50);
+  --color-bg-inverse:     var(--c-neutral-900);
+
+  --color-text-primary:   var(--c-neutral-900);
+  --color-text-secondary: var(--c-neutral-800);
+  --color-text-muted:     var(--c-neutral-700);
+  --color-text-placeholder: var(--c-neutral-600);
+  --color-text-on-accent: var(--c-neutral-0);
+  --color-text-inverse:   var(--c-neutral-0);
+  --color-text-inverse-muted: var(--c-neutral-400);  /* 对 #1a1a2e 实测 7.34:1 */
+
+  --color-border:         var(--c-neutral-200);  /* 装饰性分隔 */
+  --color-border-strong:  var(--c-neutral-300);
+  --color-border-control: var(--c-neutral-500);  /* 输入控件边界，3.36:1 满足 WCAG 1.4.11 */
+
+  --color-accent:         var(--c-blue-700);
+  --color-accent-hover:   var(--c-blue-800);
+  --color-accent-soft:    var(--c-blue-100);
+
+  --color-success:        var(--c-green-700);
+  --color-success-hover:  var(--c-green-800);
+  --color-success-mark:   var(--c-green-400);
+  --color-success-soft:   var(--c-green-50);
+  --color-warning:        var(--c-orange-800);
+  --color-warning-hover:  var(--c-orange-900);
+  --color-warning-mark:   var(--c-orange-600);
+  --color-warning-soft:   var(--c-orange-50);
+  --color-danger:         var(--c-red-600);
+  --color-danger-hover:   var(--c-red-800);
+  --color-danger-soft:    var(--c-red-50);
+
+  /* 行情涨跌：与"成功/危险"是两个不同的语义，虽然在本应用里用到了同一批色相。
+     红涨绿跌是中国市场约定 —— 涨用红色表示"上涨"，与 danger 的"危险"含义无关，
+     所以必须独立成令牌；直接引用 --color-danger 会让语义漂移
+     （正是 better-colors「一个颜色一个含义」要避免的）。 */
+  --color-gain:           var(--c-red-600);    /* 对白 5.57:1 */
+  --color-loss:           var(--c-green-700);  /* 对灰底 4.98:1 */
+
+  /* 图表数据系列色（K线、均线、布林带、成交量）。
+     这是"数据系列"这一角色，不是状态色 —— 所以独立成组，组件只引用这一层，
+     不要去借用 --color-warning-mark 之类表示状态的令牌（那会让"橙色=警示"的含义漂移）。
+     门槛：图形对象对白底 ≥3:1；标「仅图形」的两项 <4.5:1，不可用作文字。
+     组内需两两可区分，改动前请确认没有撞色。 */
+  --color-chart-ma5:      var(--c-orange-600);  /* #d46b08  3.56:1  仅图形 */
+  --color-chart-ma10:     var(--c-blue-700);    /* #0958d9  6.16:1  兼作图例文字 */
+  --color-chart-ma20:     var(--c-purple-700);  /* #722ed1  6.94:1  兼作图例文字 */
+  --color-chart-ma60:     var(--c-green-400);   /* #389e0d  3.46:1  仅图形 */
+  --color-chart-boll:     var(--c-pink-600);    /* #eb2f96  3.90:1  仅图形 */
+
+  --color-focus-ring:     var(--c-blue-700);
+
+  --color-overlay:        rgb(0 0 0 / 0.45);
+
+  /* ---------- 3. 形状 / 阴影 / 动效 -------------------------------------- */
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-pill: 999px;
+
+  --shadow-1: 0 1px 4px rgb(0 0 0 / 0.08);
+  --shadow-3: 0 4px 20px rgb(0 0 0 / 0.35);
+
+  --duration-fast: 150ms;
+  --duration-base: 200ms;
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ---------- 4. 文档级设置 ---------------------------------------------- */
+
+  /* 应用是纯浅色界面（组件层全部写死浅色），因此显式声明 light。
+     阴影滚动条/原生控件会跟随系统暗色，与写死的浅色卡片混在一起。
+     将来要做暗色模式：只需覆盖第 2 节的语义令牌，组件层无需改动。 */
+  color-scheme: light;
+
+  font-size: 16px;
+  line-height: 1.5;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  color: var(--color-text-primary);
+  background-color: var(--color-bg-page);
+
   font-synthesis: none;
-  text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-
-  @media (max-width: 1024px) {
-    font-size: 16px;
-  }
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-  }
+/* ============================================================================
+ * 基础重置（与原 App.vue 中的全局样式保持等价，避免布局回归）
+ * ========================================================================== */
 
-  #social .button-icon {
-    filter: invert(1) brightness(2);
-  }
-}
-
-body {
-  margin: 0;
-}
-
-h1,
-h2 {
-  font-family: var(--heading);
-  font-weight: 500;
-  color: var(--text-h);
-}
-
-h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
-  }
-}
-h2 {
-  font-size: 24px;
-  line-height: 118%;
-  letter-spacing: -0.24px;
-  margin: 0 0 8px;
-  @media (max-width: 1024px) {
-    font-size: 20px;
-  }
-}
-p {
-  margin: 0;
-}
-
-code,
-.counter {
-  font-family: var(--mono);
-  display: inline-flex;
-  border-radius: 4px;
-  color: var(--text-h);
-}
-
-code {
-  font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
-}
-
-.counter {
-  font-size: 16px;
-  padding: 5px 10px;
-  border-radius: 5px;
-  color: var(--accent);
-  background: var(--accent-bg);
-  border: 2px solid transparent;
-  transition: border-color 0.3s;
-  margin-bottom: 24px;
-
-  &:hover {
-    border-color: var(--accent-border);
-  }
-  &:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-  }
-}
-
-.hero {
-  position: relative;
-
-  .base,
-  .framework,
-  .vite {
-    inset-inline: 0;
-    margin: 0 auto;
-  }
-
-  .base {
-    width: 170px;
-    position: relative;
-    z-index: 0;
-  }
-
-  .framework,
-  .vite {
-    position: absolute;
-  }
-
-  .framework {
-    z-index: 1;
-    top: 34px;
-    height: 28px;
-    transform: perspective(2000px) rotateZ(300deg) rotateX(44deg) rotateY(39deg)
-      scale(1.4);
-  }
-
-  .vite {
-    z-index: 0;
-    top: 107px;
-    height: 26px;
-    width: auto;
-    transform: perspective(2000px) rotateZ(300deg) rotateX(40deg) rotateY(39deg)
-      scale(0.8);
-  }
-}
-
-#app {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
-  min-height: 100svh;
-  display: flex;
-  flex-direction: column;
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
-#center {
+* {
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  min-height: 100dvh;
+  background-color: var(--color-bg-page);
+  color: var(--color-text-primary);
+}
+
+#app {
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
-  gap: 25px;
-  place-content: center;
-  place-items: center;
-  flex-grow: 1;
+  /* 旧脚手架在此处锁死 width:1126px + text-align:center + 左右竖边框，已移除 */
+}
 
-  @media (max-width: 1024px) {
-    padding: 32px 20px 24px;
-    gap: 18px;
+img,
+svg,
+video,
+canvas {
+  display: block;
+  max-width: 100%;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+/* 数值类文本统一等宽数字：价格、涨跌幅、计数变化时不会左右抖动。
+   用法：<span class="num"> 或给容器加 .num 让全部后代生效。 */
+.num,
+.num * {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================================
+ * 键盘焦点指示器
+ *
+ * 旧代码在 9 处写了 `outline: none`，只把 1px 边框换个颜色（且那个颜色
+ * #4096ff 对白仅 2.99:1），既达不到 2px 周长，也不满足 3:1 对比度要求。
+ * 这里统一给一个不可被 outline:none 悄悄抹掉的可视焦点环。
+ * 用 :focus-visible 而非 :focus —— 键盘用户看得到，鼠标点击不出现。
+ * ========================================================================== */
+
+:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* 输入类控件额外给出边框色变化，双通道提示 */
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+  border-color: var(--color-accent);
+}
+
+::placeholder {
+  color: var(--color-text-placeholder);
+  opacity: 1;
+}
+
+/* ============================================================================
+ * 减弱动效
+ *
+ * 旧代码全站 0 处 prefers-reduced-motion，而 App.vue 有 slideUp 关键帧、
+ * 各页面有大量 transition。这里做全局兜底：把动效压到近乎瞬间，
+ * 但保留状态变化的静态结果（颜色/位置仍然改变），
+ * 确保"状态变化不依赖动效本身"。
+ * ========================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 
-#next-steps {
-  display: flex;
-  border-top: 1px solid var(--border);
-  text-align: left;
+/* ============================================================================
+ * 小工具
+ * ========================================================================== */
 
-  & > div {
-    flex: 1 1 0;
-    padding: 32px;
-    @media (max-width: 1024px) {
-      padding: 24px 20px;
-    }
-  }
-
-  .icon {
-    margin-bottom: 16px;
-    width: 22px;
-    height: 22px;
-  }
-
-  @media (max-width: 1024px) {
-    flex-direction: column;
-    text-align: center;
-  }
-}
-
-#docs {
-  border-right: 1px solid var(--border);
-
-  @media (max-width: 1024px) {
-    border-right: none;
-    border-bottom: 1px solid var(--border);
-  }
-}
-
-#next-steps ul {
-  list-style: none;
+/* 视觉隐藏但保留给屏幕阅读器（用于给图标按钮补可访问名称的补充文本） */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
   padding: 0;
-  display: flex;
-  gap: 8px;
-  margin: 32px 0 0;
-
-  .logo {
-    height: 18px;
-  }
-
-  a {
-    color: var(--text-h);
-    font-size: 16px;
-    border-radius: 6px;
-    background: var(--social-bg);
-    display: flex;
-    padding: 6px 12px;
-    align-items: center;
-    gap: 8px;
-    text-decoration: none;
-    transition: box-shadow 0.3s;
-
-    &:hover {
-      box-shadow: var(--shadow);
-    }
-    .button-icon {
-      height: 18px;
-      width: 18px;
-    }
-  }
-
-  @media (max-width: 1024px) {
-    margin-top: 20px;
-    flex-wrap: wrap;
-    justify-content: center;
-
-    li {
-      flex: 1 1 calc(50% - 8px);
-    }
-
-    a {
-      width: 100%;
-      justify-content: center;
-      box-sizing: border-box;
-    }
-  }
-}
-
-#spacer {
-  height: 88px;
-  border-top: 1px solid var(--border);
-  @media (max-width: 1024px) {
-    height: 48px;
-  }
-}
-
-.ticks {
-  position: relative;
-  width: 100%;
-
-  &::before,
-  &::after {
-    content: '';
-    position: absolute;
-    top: -4.5px;
-    border: 5px solid transparent;
-  }
-
-  &::before {
-    left: 0;
-    border-left-color: var(--border);
-  }
-  &::after {
-    right: 0;
-    border-right-color: var(--border);
-  }
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
