@@ -96,7 +96,7 @@ class BacktestEngine:
         )
 
     def _simulate_signal(self, prices: list, signal: dict):
-        """信号交易模拟：signal='买入'→全仓买，'卖出'→全仓卖。"""
+        """信号交易模拟：每个交易日只用该日之前的历史数据生成信号，避免前视偏差。"""
         prices = np.array(prices, dtype=float)
         n = len(prices)
         cash = self.initial_capital
@@ -105,14 +105,18 @@ class BacktestEngine:
         trades = []
         daily_returns = []
 
-        # 简化：用最后一个信号判断整体策略
-        sig = signal.get("signal", "持有")
-        score = signal.get("score", 0)
-
         for i in range(1, n):
             price = prices[i]
 
-            # 交易逻辑：score > 20 买入，score < -20 卖出
+            score = 0
+            if i >= 20:
+                try:
+                    from quant_model import generate_signal
+                    score = generate_signal(prices[:i].tolist()).get("score", 0)
+                except Exception as e:
+                    logger.warning("signal generation failed at bar %s: %s", i, e)
+
+            # 交易逻辑：score > 10 买入，score < -10 卖出
             if score > 10 and shares == 0:
                 # 买入
                 actual_price = price * (1 + self.slippage)
@@ -181,16 +185,14 @@ class BacktestEngine:
         trades = []
         daily_returns = []
 
-        consensus = predictions.get("consensus", "hold")
-        confidence = predictions.get("confidence", 0)
-
-        # 只在置信度高时交易
-        trade_threshold = 0.55
+        consensus = predictions.get("consensus", "neutral")
+        confidence = predictions.get("confidence", "low")
+        confident = isinstance(confidence, str) and confidence in ("high", "medium")
 
         for i in range(1, n):
             price = prices[i]
 
-            if consensus == "up" and confidence > trade_threshold and shares == 0:
+            if consensus in ("bullish", "up") and confident and shares == 0:
                 actual_price = price * (1 + self.slippage)
                 max_shares = cash * (1 - self.commission) / actual_price
                 shares = max_shares
@@ -200,7 +202,7 @@ class BacktestEngine:
                     "shares": shares, "value": shares * price + cash,
                 })
 
-            elif consensus == "down" and confidence > trade_threshold and shares > 0:
+            elif consensus in ("bearish", "down") and confident and shares > 0:
                 actual_price = price * (1 - self.slippage)
                 cash += shares * actual_price * (1 - self.commission)
                 trades.append({
@@ -237,42 +239,26 @@ class BacktestEngine:
         prices_arr = np.array(prices, dtype=float)
         n = len(prices_arr)
 
-        # Use DQN's own return
-        total_return = rl_result.get("total_return_pct", 0) / 100
-        trades_log = rl_result.get("trades", [])
-        trade_count = rl_result.get("trade_count", 0)
+        # DQN 必须返回真实逐日净值；没有净值曲线时视为不可回测，禁止用噪声编造。
+        raw_equity = rl_result.get("equity_curve")
+        if not isinstance(raw_equity, list) or len(raw_equity) < 2:
+            return self._empty_result(symbol, "rl")
 
-        # Build equity curve: assume trades spread evenly across period
-        equity = [self.initial_capital]
+        equity = [float(v) for v in raw_equity]
+        trades = rl_result.get("trades", [])
+        if not isinstance(trades, list):
+            trades = []
         daily_rets = []
-        step_count = max(trade_count, 1)
-        step_return = total_return / max(step_count, 1)
-
-        # Simulate realistic equity with some volatility
-        for i in range(1, n):
-            # Add some noise and occasional steps
-            noise = np.random.normal(0, 0.005)
-            if i % max(n // (trade_count + 1), 1) == 0 and trade_count > 0:
-                equity.append(equity[-1] * (1 + step_return + noise))
-            else:
-                equity.append(equity[-1] * (1 + noise))
-            if equity[-2] > 0:
-                daily_rets.append((equity[-1] - equity[-2]) / equity[-2])
-
-        # Clamp final value to match total return
-        target_final = self.initial_capital * (1 + total_return)
-        scale = target_final / equity[-1] if equity[-1] != 0 else 1
-        equity = [e * scale for e in equity]
-
-        trades = [{"day": 0, "action": "RL_START", "price": prices_arr[0],
-                    "shares": 0, "value": self.initial_capital}]
+        for i in range(1, len(equity)):
+            if equity[i - 1] > 0:
+                daily_rets.append((equity[i] - equity[i - 1]) / equity[i - 1])
 
         result = self._build_result(
             symbol, "rl", equity, trades, daily_rets,
             buy_and_hold, prices_arr
         )
-        result.total_trades = trade_count
-        result.trade_log = trades_log
+        result.total_trades = len(trades)
+        result.trade_log = trades
         return result
 
     # ==================== Metrics ====================
@@ -312,26 +298,36 @@ class BacktestEngine:
         # 卡玛比率
         calmar = annualized / max_dd if max_dd > 0 else 0.0
 
-        # 交易统计
-        profit_trades = sum(1 for t in trades if t.get("action") == "SELL")
-        total_trades = max(len(trades), 1)
-
-        win_rate = profit_trades / max(total_trades - 1, 1) if total_trades > 1 else 0
-
-        # 盈亏比
+        # 交易统计：按 (BUY, SELL) 配对成"已平仓回合"再统计。
+        # 旧实现把所有 SELL 都算盈利（单轮往返胜率恒 100%），并把 (SELL,BUY)
+        # 相邻对也当一轮亏损参与盈亏比，指标完全失真。
         profits = []
         losses = []
-        for i in range(1, len(trades)):
-            prev_val = trades[i-1]["value"]
-            curr_val = trades[i]["value"]
-            if curr_val > prev_val:
-                profits.append(curr_val - prev_val)
+        i = 0
+        while i + 1 < len(trades):
+            t0 = trades[i]
+            t1 = trades[i + 1]
+            if t0.get("action") == "BUY" and t1.get("action") == "SELL":
+                try:
+                    delta = float(t1.get("value") or 0.0) - float(t0.get("value") or 0.0)
+                except (TypeError, ValueError):
+                    delta = 0.0
+                if delta > 0:
+                    profits.append(delta)
+                else:
+                    losses.append(-delta)
+                i += 2
             else:
-                losses.append(prev_val - curr_val)
+                i += 1
 
-        avg_profit = np.mean(profits) if profits else 0
-        avg_loss = np.mean(losses) if losses else 0
-        profit_factor = (sum(profits) / sum(losses)) if losses and sum(losses) > 0 else 0
+        closed_rounds = len(profits) + len(losses)
+        profit_trades = len(profits)
+        win_rate = (len(profits) / closed_rounds) if closed_rounds else 0.0
+        total_trades = max(len(trades), 1)
+
+        avg_profit = float(np.mean(profits)) if profits else 0.0
+        avg_loss = float(np.mean(losses)) if losses else 0.0
+        profit_factor = (sum(profits) / sum(losses)) if losses else 0.0
 
         excess_return = total_return - buy_and_hold
 

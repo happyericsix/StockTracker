@@ -14,6 +14,13 @@ class GlobalQuote(BaseModel):
     lastTradingDay: str = Field(default="", alias="07. latest trading day")
     name: str = Field(default="")
 
+    # 涨跌三兄弟。akshare_client.get_quote() 从腾讯行情里已经解析出「昨收」「涨跌额」「涨跌幅」，
+    # 但此前没有出现在这个模型里，于是到了 Java 就被 Jackson 丢掉、前端拿不到涨跌方向。
+    # 编号沿用本文件既有的 Alpha Vantage 风格，Java 侧用同名 @JsonProperty 对齐。
+    previousClose: Optional[str] = Field(default=None, alias="08. previous close")
+    change: Optional[str] = Field(default=None, alias="09. change")
+    changePercent: Optional[str] = Field(default=None, alias="10. change percent")
+
     model_config = {"populate_by_name": True}
 
 

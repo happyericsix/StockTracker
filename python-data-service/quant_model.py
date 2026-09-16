@@ -156,7 +156,7 @@ def generate_signal(prices: list) -> dict:
 # ==================== 机器学习预测 ====================
 
 class StockPredictor:
-    """LightGBM ??????????????"""
+    """LightGBM 分窗口回归器（short/mid/long 三套差异化参数）"""
 
     def __init__(self, window_days: int = None, label: str = "", seed: int = 42):
         if window_days and window_days <= 60: params = dict(n_estimators=100, max_depth=4, num_leaves=24, min_child_samples=12, learning_rate=0.03, reg_alpha=0.02, reg_lambda=0.5)
@@ -226,7 +226,6 @@ class StockPredictor:
 
         # Target: next day return
         df["target"] = df["close"].pct_change(1).shift(-1)
-        df = df.dropna()
 
         if len(df) < 20:
             return None, None, None
@@ -242,6 +241,13 @@ class StockPredictor:
         if X is None or len(X) < 20:
             logger.warning("训练数据不足")
             return False
+
+        valid = ~np.isnan(y)
+        if valid.sum() < 20:
+            logger.warning("训练目标数据不足")
+            return False
+        X = X[valid]
+        y = y[valid]
 
         # Temporal split: train on older 80%, validate on recent 20%
         split_idx = int(len(X) * 0.8)
@@ -264,7 +270,7 @@ class StockPredictor:
         if not self.trained:
             return None
 
-        # ?????????????????????????
+        # 预测窗口与训练窗口保持一致，特征在窗口内重新计算
         window_prices = prices[-self.window_days:] if self.window_days and len(prices) > self.window_days else prices
         result = self._prepare_features(window_prices)
         if result is None or result[0] is None:
@@ -277,7 +283,7 @@ class StockPredictor:
         latest_features = X[-1].reshape(1, -1)
         pred_return = self.model.predict(latest_features)[0]
 
-        # ?????
+        # 最新一根 K 线（target 未知的那行）作为预测特征
         importance = {}
         for name, imp in zip(
             feature_cols,
@@ -285,7 +291,7 @@ class StockPredictor:
         ):
             importance[name] = float(round(imp, 4))
 
-        # ????
+        # 方向映射：阈值外的才算多头/空头
         direction = "bullish" if pred_return > 0.005 else "bearish" if pred_return < -0.005 else "neutral"
 
         return {
@@ -299,7 +305,7 @@ class StockPredictor:
 
 
 
-# ==================== ?????? ====================
+# ==================== 多窗口预测 ====================
 
 class MultiWindowPredictor:
     """Three-window predictor: short(60d), mid(120d), long(all)"""
@@ -371,14 +377,14 @@ class MultiWindowPredictor:
             "advice": advice,
         }
 
-# ==================== ???? ====================
+# ==================== 缓存与磁盘模型 ====================
 
 import time
 import threading
 
 _model_cache: dict = {}       # {symbol: {"models": {...}, "last_train": timestamp, "prices": [...], "prices_len": 0}}
 _cache_lock = threading.Lock()
-CACHE_TTL = 3600  # 1??????
+CACHE_TTL = 3600  # 1 小时
 MODEL_DIR = Path(__file__).parent / 'models'
 MODEL_DIR.mkdir(exist_ok=True)
 DISK_MODEL_MAX_AGE = 6 * 3600  # Retrain if model older than 6 hours (covers daily market close at 15:00)
@@ -416,26 +422,7 @@ def _try_load_disk(symbol: str, prices: list):
         lgb_pred = multi.predict(prices)
 
         tf_result = None
-        tf_path = MODEL_DIR / (symbol + "_transformer.pkl")
-        if tf_path.exists():
-            tf = MiniTransformer.load(str(tf_path))
-            tf_prices = prices[-200:] if len(prices) > 200 else prices
-            p = StockPredictor()
-            X_tf, y_tf, _ = p._prepare_features(tf_prices)
-            if X_tf is not None and len(X_tf) >= tf.seq_len:
-                tf_pred_val = tf.predict(X_tf)
-                if tf_pred_val is not None:
-                    tf_result = {
-                        "predicted_change_pct": round(float(tf_pred_val * 100), 2),
-                        "note": "Transformer model loaded from disk",
-                    }
-
         dqn_result = None
-        dqn_path = MODEL_DIR / (symbol + "_dqn.pkl")
-        if dqn_path.exists():
-            dqn = DQNAgent.load(str(dqn_path))
-            if dqn.trained:
-                dqn_result = dqn.get_strategy()
 
         logger.info("Loaded models from disk for " + symbol)
         return {
@@ -465,8 +452,8 @@ def _save_to_disk(symbol: str, multi: MultiWindowPredictor, tf, dqn):
 
 
 def _get_cached_or_train(symbol: str, prices: list) -> dict:
-    """?????????????????"""
-    prices_key = len(prices)  # ?????????????
+    """读取内存缓存或磁盘模型，均未命中则现场训练并落盘。"""
+    prices_key = len(prices)  # 缓存键（仅按价格条数粗判，后续建议换最后交易日指纹）
 
     with _cache_lock:
         cached = _model_cache.get(symbol)
@@ -488,7 +475,7 @@ def _get_cached_or_train(symbol: str, prices: list) -> dict:
             }
         return disk_result
 
-    # ?????????????
+    # 未命中磁盘 → 现场训练（首次访问某标的会较慢，耗时在请求线程内）
     logger.info(f"Training models for {symbol}...")
     t0 = time.time()
 
@@ -497,41 +484,11 @@ def _get_cached_or_train(symbol: str, prices: list) -> dict:
     multi.train(prices)
     lgb_pred = multi.predict(prices)
 
-    # --- Transformer ---
-    try:
-        from deep_models import MiniTransformer
-        tf = MiniTransformer()
-        tf_prices = prices[-200:] if len(prices) > 200 else prices
-        p = StockPredictor()
-        X_tf, y_tf, _ = p._prepare_features(tf_prices)
-        if X_tf is not None and len(X_tf) >= 35:
-            tf.train(tf_prices, X_tf, y_tf, epochs=80, lr=0.005)
-            tf_pred_val = tf.predict(X_tf)
-            tf_result = {
-                "predicted_change_pct": round(float(tf_pred_val * 100), 2) if tf_pred_val else None,
-                "note": "Transformer??????????LightGBM??",
-            }
-        else:
-            tf_result = None
-    except Exception as e:
-        logger.warning(f"Transformer??: {e}")
-        tf_result = None
-
-    # --- DQN ---
-    try:
-        from deep_models import DQNAgent
-        dqn = DQNAgent()
-        dqn_prices = prices[-120:] if len(prices) > 120 else prices
-        p2 = StockPredictor()
-        X_dqn, y_dqn, _ = p2._prepare_features(dqn_prices)
-        if X_dqn is not None and len(dqn_prices) >= 60:
-            dqn.train(dqn_prices, X_dqn, y_dqn, episodes=120, lr=0.02)
-            dqn_result = dqn.get_strategy()
-        else:
-            dqn_result = None
-    except Exception as e:
-        logger.warning(f"DQN??: {e}")
-        dqn_result = None
+    # Transformer 与 DQN 尚未通过严格的前向验证，暂时不再作为用户可见的预测/收益来源。
+    tf = None
+    tf_result = None
+    dqn = None
+    dqn_result = None
 
     models = {
         "prediction": lgb_pred,
@@ -555,7 +512,7 @@ def _get_cached_or_train(symbol: str, prices: list) -> dict:
 
 
 
-def analyze_stock(prices: list, symbol: str = "") -> dict:
+def analyze_stock(prices: list, symbol: str = "", include_models: bool = False) -> dict:
     """对一只股票进行完整量化分析
 
     Args:
@@ -610,21 +567,18 @@ def analyze_stock(prices: list, symbol: str = "") -> dict:
         },
     }
 
-    # --- ML models (cached, 1h TTL) ---
-    cached = _get_cached_or_train(symbol, close)
-    prediction = cached["prediction"]
-    tf_result = cached.get("transformer")
-    dqn_result = cached.get("rl_strategy")
-
-
     result = {
         "symbol": symbol,
         "stats": stats,
         "signal": tech_signal,
         "indicators": indicators,
-        "prediction": prediction,
-        "transformer": tf_result,
-        "rl_strategy": dqn_result,
     }
+
+    # 预测模型只在显式实验场景加载；默认的技术分析/聊天/回测路径不暴露模型输出。
+    if include_models:
+        cached = _get_cached_or_train(symbol, close)
+        result["prediction"] = cached["prediction"]
+        result["transformer"] = cached.get("transformer")
+        result["rl_strategy"] = cached.get("rl_strategy")
 
     return result

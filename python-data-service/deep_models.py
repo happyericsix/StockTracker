@@ -211,9 +211,49 @@ class DQNAgent:
         h = np.maximum(0, state @ self.W1 + self.b1)
         return h @ self.W2 + self.b2
 
+    def _build_state(self, cash, shares, close, ret_1, ret_5, price_ret, t):
+        state = np.zeros(self.state_dim)
+        state[0] = cash
+        state[1] = shares * close[t]
+        for j in range(5):
+            idx = t - 4 + j
+            if 0 <= idx < len(close):
+                state[2 + j * 5] = ret_1[idx]
+                state[3 + j * 5] = ret_5[idx]
+                state[4 + j * 5] = price_ret[idx]
+        return state
+
+    def _apply_action(self, action, cash, shares, close, t):
+        if action == 0 and shares > 0:
+            cash += shares * close[t] * 0.999
+            shares = 0.0
+        elif action == 2 and cash > 0.01:
+            shares += cash * 0.999 / close[t]
+            cash = 0.0
+        return cash, shares
+
+    def _update_q(self, state, action, reward, next_state, lr, gamma):
+        qvals = self._forward(state)
+        next_qvals = self._forward(next_state)
+        target = qvals.copy()
+        target[action] = reward + gamma * np.max(next_qvals)
+
+        grad_q = qvals - target
+        h = np.maximum(0, state @ self.W1 + self.b1)
+        grad_h = grad_q @ self.W2.T
+        grad_z = grad_h * (h > 0)
+
+        self.W2 -= lr * (h.reshape(-1, 1) @ grad_q.reshape(1, -1))
+        self.b2 -= lr * grad_q
+        self.W1 -= lr * (state.reshape(-1, 1) @ grad_z.reshape(1, -1))
+        self.b1 -= lr * grad_z
+
     def train(self, prices, features_X, features_y, episodes=200, lr=0.01, gamma=0.95):
         """
-        在历史数据上训练交易策略
+        在历史数据上训练交易策略。
+
+        DQN 通过 TD 目标更新 Q 网络；训练结束后用确定性策略做一次同周期回放，
+        输出真实净值曲线，而不是把随机探索中的最佳 episode 包装成收益。
 
         Args:
             prices: 历史收盘价
@@ -225,42 +265,25 @@ class DQNAgent:
             logger.warning("DQN: 数据不足")
             return False
 
-        # 选5个关键特征来做状态
-        key_feat_names = ['ret_1', 'ret_5', 'rsi', 'macd_hist', 'ma_divergence']
-        # 从 feature_cols 中找对应索引需要从 StockPredictor 传入
-        # 简化：直接用原始特征的前几维 + 手动算
-        close = np.array(prices)
-        ret_1 = np.diff(close) / close[:-1]
-        ret_5 = np.zeros_like(close)
-        ret_5[5:] = (close[5:] - close[:-5]) / close[:-5]
-
-        # 归一化价格用于构建状态
-        norm_close = close / close[0]
-
-        best_reward = -float('inf')
-        self.trade_log = []
+        close = np.asarray(prices, dtype=float)
+        ret_1 = np.zeros(n)
+        ret_1[1:] = np.diff(close) / close[:-1]
+        ret_5 = np.zeros(n)
+        if n > 5:
+            ret_5[5:] = (close[5:] - close[:-5]) / close[:-5]
+        price_ret = np.zeros(n)
+        price_ret[1:] = np.diff(close) / close[:-1]
 
         for ep in range(episodes):
             # epsilon-greedy
-            epsilon = max(0.05, 1.0 - ep / 150)
+            epsilon = max(0.05, 1.0 - ep / max(episodes, 1))
 
             cash = 1.0   # 归一化现金
             shares = 0.0
             total_reward = 0
-            episode_trades = []
 
             for t in range(30, n - 1):
-                # 构建状态
-                state = np.zeros(self.state_dim)
-                state[0] = cash
-                state[1] = shares * close[t]
-                # 最近5天的特征
-                for j in range(5):
-                    idx = t - 4 + j
-                    if idx >= 0 and idx < len(ret_1):
-                        state[2 + j*5] = ret_1[idx] if idx < len(ret_1) else 0
-                        state[3 + j*5] = ret_5[idx] if idx < len(ret_5) else 0
-                        state[4 + j*5] = norm_close[idx] / norm_close[max(0, idx-1)] - 1
+                state = self._build_state(cash, shares, close, ret_1, ret_5, price_ret, t)
 
                 # 选择动作
                 if np.random.random() < epsilon:
@@ -271,63 +294,72 @@ class DQNAgent:
 
                 # 执行交易
                 old_value = cash + shares * close[t]
-                if action == 0 and shares > 0:    # 卖出
-                    cash += shares * close[t] * 0.999
-                    shares = 0
-                    episode_trades.append(f"第{t}天 卖出 @{close[t]:.2f}")
-                elif action == 2 and cash > 0.01:  # 买入
-                    shares += cash * 0.999 / close[t]
-                    cash = 0
-                    episode_trades.append(f"第{t}天 买入 @{close[t]:.2f}")
+                cash, shares = self._apply_action(action, cash, shares, close, t)
 
                 # 计算奖励（下一日净值变化）
                 new_value = cash + shares * close[t+1]
                 reward = (new_value - old_value) / old_value
                 total_reward += reward
 
-                # TD更新
-                next_state = np.zeros_like(state)
-                next_state[0] = cash
-                next_state[1] = shares * close[t+1]
-                # 简单更新下一个状态的最近5天特征（略）
-                for j in range(5):
-                    idx = t - 3 + j
-                    if idx >= 0 and idx < len(ret_1):
-                        next_state[2 + j*5] = ret_1[idx] if idx < len(ret_1) else 0
-
-                qvals = self._forward(state)
-                next_qvals = self._forward(next_state)
-                target = qvals.copy()
-                # ????
-                grad_q = qvals - target  # (3,)
-                h = np.maximum(0, state @ self.W1 + self.b1)  # (hidden,)
-                self.W2 -= lr * h.reshape(-1, 1) @ grad_q.reshape(1, -1)
-                self.b2 -= lr * grad_q
-
-            if total_reward > best_reward:
-                best_reward = total_reward
-                self.trade_log = episode_trades
+                next_state = self._build_state(cash, shares, close, ret_1, ret_5, price_ret, t + 1)
+                self._update_q(state, action, reward, next_state, lr, gamma)
 
             if ep % 50 == 0:
-                logger.info(f"DQN ep {ep}: reward={total_reward:.4f}, trades={len(episode_trades)}")
+                logger.info(f"DQN ep {ep}: reward={total_reward:.4f}")
 
         self.trained = True
-        self.final_return = best_reward
-        logger.info(f"DQN 训练完成, 最佳收益={best_reward:.4f} ({best_reward*100:.1f}%)")
+        self.evaluation = self._evaluate(close, ret_1, ret_5, price_ret)
+        logger.info(f"DQN 训练完成, 确定性回放收益={self.evaluation['total_return_pct']:.2f}%")
         return True
 
+    def _evaluate(self, close, ret_1, ret_5, price_ret):
+        """用训练后的确定性策略回放历史，输出真实净值与交易记录。"""
+        n = len(close)
+        cash = 1.0
+        shares = 0.0
+        equity = [cash]
+        trades = []
+
+        for t in range(30, n - 1):
+            state = self._build_state(cash, shares, close, ret_1, ret_5, price_ret, t)
+            action = int(np.argmax(self._forward(state)))
+            old_value = cash + shares * close[t]
+            cash, shares = self._apply_action(action, cash, shares, close, t)
+            new_value = cash + shares * close[t + 1]
+            equity.append(new_value)
+
+            if action != 1:
+                trades.append({
+                    "day": t,
+                    "action": self.ACTION_NAMES[action],
+                    "price": float(close[t]),
+                    "shares": float(shares),
+                    "value": float(new_value),
+                })
+
+        final_value = equity[-1] if equity else 1.0
+        return {
+            "total_return_pct": round((final_value - 1.0) * 100, 2),
+            "equity_curve": [round(float(v), 6) for v in equity],
+            "trade_count": len(trades),
+            "trades": trades,
+        }
+
     def get_strategy(self):
-        """返回训练得到的最佳交易记录，供 LLM 解读"""
+        """返回确定性回放结果，不再返回随机探索中的最佳 episode。"""
         if not self.trained:
             return None
+        evaluation = getattr(self, "evaluation", None) or {}
+        trade_count = evaluation.get("trade_count", 0)
         return {
-            "total_return_pct": round(self.final_return * 100, 2),
-            "trade_count": len(self.trade_log),
-            "trades": self.trade_log[:10],  # 最多展示10条
+            "total_return_pct": evaluation.get("total_return_pct", 0.0),
+            "trade_count": trade_count,
+            "equity_curve": evaluation.get("equity_curve", []),
+            "trades": evaluation.get("trades", [])[:10],
             "interpretation": (
-                f"强化学习在历史数据上模拟交易，最终收益 {self.final_return*100:.1f}%。"
-                f"共执行 {len(self.trade_log)} 次买卖。"
-                "策略偏好: " + ("频繁交易" if len(self.trade_log) > 10 else "低频择时")
+                f"强化学习在历史数据上确定性回放，最终收益 {evaluation.get('total_return_pct', 0):.1f}%。"
+                f"共执行 {trade_count} 次动作。"
+                "策略偏好: " + ("频繁交易" if trade_count > 10 else "低频择时")
             ),
         }
 

@@ -83,37 +83,11 @@ def train_stock(symbol: str) -> dict:
         })
         mlflow.set_tag("lgb_consensus", lgb_pred.get("consensus", "?"))
 
-        # --- 2. MiniTransformer ---
-        logger.info("  [2/3] Training MiniTransformer...")
-        tf = MiniTransformer()
-        tf_prices = prices[-200:] if len(prices) > 200 else prices
-        p = StockPredictor()
-        X_tf, y_tf, _ = p._prepare_features(tf_prices)
+        # Transformer 与 DQN 暂不作为预测/收益来源，保留以后重做。
+        tf = None
         tf_result = None
-        if X_tf is not None and len(X_tf) >= 35:
-            tf.train(tf_prices, X_tf, y_tf, epochs=80, lr=0.005)
-            tf_pred = tf.predict(X_tf)
-            if tf_pred is not None:
-                tf_result = round(float(tf_pred * 100), 2)
-                mlflow.log_metrics({"tf_predicted_change_pct": tf_result})
-        else:
-            logger.warning("  Transformer: insufficient features")
-
-        # --- 3. DQN ---
-        logger.info("  [3/3] Training DQNAgent...")
-        dqn = DQNAgent()
-        dqn_prices = prices[-120:] if len(prices) > 120 else prices
-        p2 = StockPredictor()
-        X_dqn, y_dqn, _ = p2._prepare_features(dqn_prices)
+        dqn = None
         dqn_result = None
-        if X_dqn is not None and len(dqn_prices) >= 60:
-            dqn.train(dqn_prices, X_dqn, y_dqn, episodes=150, lr=0.02)
-            dqn_result = dqn.get_strategy()
-            if dqn_result:
-                mlflow.log_metrics({
-                    "dqn_return_pct": dqn_result.get("total_return_pct", 0),
-                    "dqn_trades": dqn_result.get("trade_count", 0),
-                })
 
         # --- Save to disk ---
         logger.info("  Saving models to %s ...", MODEL_DIR)
@@ -127,13 +101,12 @@ def train_stock(symbol: str) -> dict:
         logger.info("  [4/4] Running backtest...")
         engine = BacktestEngine(initial_capital=100_000)
         signal = analysis.get("signal", {})
-        predictions = analysis.get("prediction", {})
 
         bt_results = run_comprehensive_backtest(
             symbol, prices,
             signal=signal,
-            predictions=predictions,
-            rl_result=dqn_result,
+            predictions=None,
+            rl_result=None,
         )
 
         # Log backtest metrics to MLflow
@@ -202,14 +175,9 @@ def run_backtest_only(symbols: list[str]):
 
         analysis = analyze_stock(prices, sym)
         signal = analysis.get("signal", {})
-        predictions = analysis.get("prediction", {})
 
         bt_result = engine.run_signal_backtest(sym, prices, signal)
         logger.info(engine.report(bt_result))
-
-        if predictions:
-            bt_pred = engine.run_prediction_backtest(sym, prices, predictions)
-            logger.info(engine.report(bt_pred))
 
 
 def main():
