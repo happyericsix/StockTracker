@@ -8,6 +8,11 @@ import akshare_client
 import agent.tool_registry
 import app as main
 
+# 服务间鉴权：.env 里配了 INTERNAL_API_TOKEN 时，不带请求头会一律 401。
+# 这些用例曾经因为没带头而"看起来像接口坏了"，其实请求压根没进业务逻辑。
+TOKEN = getattr(main, "INTERNAL_API_TOKEN", "") or ""
+HEADERS = {"X-Internal-Token": TOKEN} if TOKEN else {}
+
 VALID_STRATEGY = {
     "schema_version": "1.0",
     "name": "ma",
@@ -37,13 +42,13 @@ def make_bars(n=30, start=100.0, step=1.0):
 def test_validate_endpoint():
     c = TestClient(main.app)
     payload = {"strategy_json": VALID_STRATEGY}
-    r = c.post("/api/v1/strategies/validate", json=payload)
+    r = c.post("/api/v1/strategies/validate", json=payload, headers=HEADERS)
     assert r.status_code == 200
     assert r.json()["valid"] is True
 
 def test_validate_rejects_non_object_strategy_json():
     c = TestClient(main.app)
-    r = c.post("/api/v1/strategies/validate", json={"strategy_json": []})
+    r = c.post("/api/v1/strategies/validate", json={"strategy_json": []}, headers=HEADERS)
     assert r.status_code == 200
     body = r.json()
     assert body["valid"] is False
@@ -55,7 +60,7 @@ def test_backtest_with_fixed_history():
     original = akshare_client.get_history
     akshare_client.get_history = lambda symbol, *args, **kwargs: make_bars()
     try:
-        r = c.post("/api/v1/strategies/backtest", json={"strategy_json": VALID_STRATEGY})
+        r = c.post("/api/v1/strategies/backtest", json={"strategy_json": VALID_STRATEGY}, headers=HEADERS)
     finally:
         akshare_client.get_history = original
     assert r.status_code == 200
@@ -68,7 +73,7 @@ def test_evaluate_bar_empty_history():
     original = akshare_client.get_history
     akshare_client.get_history = lambda symbol, *args, **kwargs: None
     try:
-        r = c.post("/api/v1/strategies/evaluate-bar", json={"strategy_json": VALID_STRATEGY})
+        r = c.post("/api/v1/strategies/evaluate-bar", json={"strategy_json": VALID_STRATEGY}, headers=HEADERS)
     finally:
         akshare_client.get_history = original
     assert r.status_code == 200
@@ -90,7 +95,7 @@ def test_agent_diagnostic_endpoint():
 
     agent.tool_registry.execute_tool = fake_execute
     try:
-        r = c.get("/api/v1/agent/diagnostic/600519")
+        r = c.get("/api/v1/agent/diagnostic/600519", headers=HEADERS)
     finally:
         agent.tool_registry.execute_tool = original
 
@@ -101,6 +106,58 @@ def test_agent_diagnostic_endpoint():
     assert body["model_status"]["decision_use"] is False
     assert body["model_consensus"]["decision_use"] is False
     assert "disclaimer" in body
+
+
+def test_health_reports_memory_subsystem():
+    """健康检查要说清楚"语义召回到底在工作没有"。
+
+    向量后端与 embedding 都是可缺失的增强：缺了不报错、只是静默退化成关键词检索，
+    这类"功能静默降级"最难排查，所以状态必须能从 /health 一眼看到。
+    """
+    c = TestClient(main.app)
+    r = c.get("/health")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    memory = body["memory"]
+    assert memory["vector_backend"] in ("numpy", "chroma")
+    assert isinstance(memory["semantic_recall_enabled"], bool)
+    assert memory["embedding_model"]
+    assert "index" in memory
+
+
+def test_health_survives_a_broken_memory_subsystem(monkeypatch):
+    """子系统探测失败不能把整个健康检查带崩（那会让运维误判整个服务挂了）。"""
+    from agent import vector_index
+
+    monkeypatch.setattr(vector_index, "stats", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    c = TestClient(main.app)
+    r = c.get("/health")
+
+    assert r.status_code == 200
+    assert r.json()["memory"] == {"error": "memory subsystem unavailable"}
+
+
+def test_health_reports_the_objective_fact_channel():
+    """客观事实通道（W1）必须能从 /health 一眼看到。
+
+    为什么把键清单放进健康检查：它是**跨语言的契约**（Java 侧 ObjectiveFactKeys），
+    两边名字对不上时取代链会静默失效 —— 摆到台面上，漂移就现形。
+    逐字比对在 tests/test_objective_facts.py，这里只负责"它有没有被接进运行时自检"。
+    """
+    from agent import objective
+
+    c = TestClient(main.app)
+    r = c.get("/health")
+
+    assert r.status_code == 200
+    described = r.json()["objective_facts"]
+    assert described["provenance"] == "system"
+    assert described["trust"] == "high"
+    assert described["confirmed"] is True
+    assert described["predicates"] == list(objective.PREDICATES)
 
 
 if __name__ == "__main__":
