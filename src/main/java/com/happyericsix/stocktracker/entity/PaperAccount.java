@@ -46,6 +46,22 @@ public class PaperAccount {
     @Column
     private Double highWatermark;
 
+    @Column
+    private Double lastPrice;
+
+    @Column
+    private String lastSignal;
+
+    @Column
+    private LocalDateTime lastEvalAt;
+
+    @Column
+    private String lastBarTime;
+
+    /** T+1 守卫：最近一次买入对应的 bar 时间（realtime 路径），卖出遇同一自然日被阻止 */
+    @Column(name = "last_buy_bar")
+    private String lastBuyBar;
+
     @Column(nullable = false, updatable = false)
     private LocalDateTime createdAt;
 

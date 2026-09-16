@@ -10,7 +10,8 @@ import java.time.LocalDateTime;
  * 核心三步（每次评估都跑）：
  *   1) 若 armed=false，检查价格回落 / 时间衰减，二选一即重置 armed=true
  *   2) 若 armed=true 且条件满足，触发（armed=false，返回 true）
- *   3) 无论是否触发，都更新 lastEvaluatedAt（供下次时间衰减用）
+ *   3) 仅在 armed 状态更新 lastEvaluatedAt（供下次时间衰减用）；
+ *      disarmed 期间不得刷新，否则衰减基准会被持续评估不断推后而永不生效
  *
  * 副作用：直接修改 alert.armed / alert.lastEvaluatedAt
  * 设计上不接受 Spring 注入，全部 static；测试时手动传 now 即可
@@ -56,8 +57,12 @@ public final class ArmedResetPolicy {
             return true;
         }
 
-        // 3) 每次都刷新 lastEvaluatedAt
-        alert.setLastEvaluatedAt(now);
+        // 3) 仅在 armed 状态刷新 lastEvaluatedAt。
+        //    注意：disarmed 期间绝不能刷新——评估每 5 分钟一次，若每次把基准推到现在，
+        //    时间衰减重置（now - lastEvaluatedAt >= reArmHours）将永远无法成立（见 isTimeReset）。
+        if (armed) {
+            alert.setLastEvaluatedAt(now);
+        }
         return false;
     }
 

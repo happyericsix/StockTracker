@@ -20,8 +20,13 @@ public class StrategyClient {
     private final ObjectMapper mapper;
 
     public StrategyClient(@Value("${akshare.api.base-url:http://localhost:8000}") String baseUrl,
+                          @Value("${internal.api-token:}") String internalToken,
                           ObjectMapper mapper) {
-        this.webClient = WebClient.builder().baseUrl(baseUrl).build();
+        WebClient.Builder builder = WebClient.builder().baseUrl(baseUrl);
+        if (internalToken != null && !internalToken.isBlank()) {
+            builder.defaultHeader("X-Internal-Token", internalToken);
+        }
+        this.webClient = builder.build();
         this.mapper = mapper;
     }
 
@@ -42,6 +47,15 @@ public class StrategyClient {
         body.put("strategy_json", raw(configJson));
         body.put("symbol", symbol);
         body.put("date", date);
+        if (position != null) body.put("position", position);
+        return post("/api/v1/strategies/evaluate-bar", body);
+    }
+
+    public JsonNode evaluateBarRealtime(String configJson, String symbol, JsonNode position) {
+        var body = new HashMap<String, Object>();
+        body.put("strategy_json", raw(configJson));
+        body.put("symbol", symbol);
+        body.put("period", "5");
         if (position != null) body.put("position", position);
         return post("/api/v1/strategies/evaluate-bar", body);
     }

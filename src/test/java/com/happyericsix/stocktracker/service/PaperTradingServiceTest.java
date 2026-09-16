@@ -1,6 +1,8 @@
 package com.happyericsix.stocktracker.service;
 
 import com.happyericsix.stocktracker.client.StrategyClient;
+import com.happyericsix.stocktracker.dto.MemoryFactRequest;
+import com.happyericsix.stocktracker.dto.PaperAccountResponse;
 import com.happyericsix.stocktracker.entity.PaperAccount;
 import com.happyericsix.stocktracker.entity.PaperTrade;
 import com.happyericsix.stocktracker.entity.Strategy;
@@ -21,7 +23,9 @@ import tools.jackson.databind.ObjectMapper;
 
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -56,6 +60,12 @@ class PaperTradingServiceTest {
     @Mock
     private PlatformTransactionManager transactionManager;
 
+    @Mock
+    private MemoryFactService memoryFactService;
+
+    @Mock
+    private MemoryService memoryService;
+
     @InjectMocks
     private PaperTradingService paperTradingService;
 
@@ -83,8 +93,6 @@ class PaperTradingServiceTest {
 
         when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
         when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
-        when(paperTradeRepository.existsByStrategyIdAndTradeDate(eq(10L), any(LocalDate.class)))
-                .thenReturn(false);
         when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.empty());
         when(paperAccountRepository.save(any(PaperAccount.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
@@ -135,8 +143,6 @@ class PaperTradingServiceTest {
 
         when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
         when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
-        when(paperTradeRepository.existsByStrategyIdAndTradeDate(eq(10L), any(LocalDate.class)))
-                .thenReturn(false);
         when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.empty());
         when(paperAccountRepository.save(any(PaperAccount.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
@@ -191,5 +197,110 @@ class PaperTradingServiceTest {
         verifyNoInteractions(strategyClient);
         verify(paperAccountRepository, never()).save(any(PaperAccount.class));
         verify(paperTradeRepository, never()).save(any(PaperTrade.class));
+    }
+
+    @Test
+    void startPaperEvaluatesImmediatelyWhenNoTradeToday() throws Exception {
+        String configJson = "{\"initial_capital\":10000.0,"
+                + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0},"
+                + "\"position\":{\"type\":\"full\",\"size_pct\":100.0}}";
+        User user = User.builder()
+                .id(1L)
+                .username("alice")
+                .password("secret")
+                .email("alice@example.com")
+                .build();
+        Strategy strategy = Strategy.builder()
+                .id(10L)
+                .name("MACD cross")
+                .symbol("AAPL")
+                .configJson(configJson)
+                .user(user)
+                .paperEnabled(false)
+                .build();
+
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(user));
+        when(strategyRepository.findByIdAndUserId(10L, 1L)).thenReturn(Optional.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(strategyRepository.save(any(Strategy.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(paperTradeRepository.save(any(PaperTrade.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        JsonNode result = mapper.readTree(
+                "{\"signal\":\"buy\",\"price\":10.0,\"matched_conditions\":[\"ma_cross\"],\"bar_time\":\"2026-09-03 10:00:00\"}");
+        when(strategyClient.evaluateBarRealtime(eq(configJson), eq("AAPL"), isNull()))
+                .thenReturn(result);
+
+        PaperAccountResponse response = paperTradingService.startPaper("alice", 10L);
+
+        assertEquals(1000.0, response.getShares(), 0.0001);
+        assertEquals(10.0, response.getLastPrice(), 0.0001);
+        assertEquals("buy", response.getLastSignal());
+        assertTrue(response.getLastEvalAt() != null);
+        verify(strategyClient, times(1)).evaluateBarRealtime(eq(configJson), eq("AAPL"), isNull());
+    }
+
+    /**
+     * 每日结算要把账户状态记成**客观事实**（W1），而且**只在每日结算里记**。
+     *
+     * <p>为什么这条用例重要：实时结算由价格刷新触发（一天几十上百次）。
+     * 如果那里也写事实，同一个键上一天会出现上百个值，取代链会被冲成噪声 ——
+     * "净值什么时候真的变了"这个问题就再也答不出来了。所以这里同时钉住
+     * "记了"和"只记一次"。
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void dailySettlementRecordsObjectiveFacts() throws Exception {
+        String configJson = "{\"initial_capital\":10000.0,"
+                + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0},"
+                + "\"position\":{\"type\":\"full\",\"size_pct\":100.0}}";
+        User user = User.builder()
+                .id(1L)
+                .username("alice")
+                .password("secret")
+                .email("alice@example.com")
+                .build();
+        Strategy strategy = Strategy.builder()
+                .id(10L)
+                .name("MACD cross")
+                .symbol("AAPL")
+                .configJson(configJson)
+                .user(user)
+                .paperEnabled(true)
+                .build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(paperTradeRepository.save(any(PaperTrade.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(memoryService.currentSessionKey(1L)).thenReturn("1:2026-09-17");
+
+        JsonNode result = mapper.readTree(
+                "{\"signal\":\"buy\",\"price\":10.0,\"matched_conditions\":[\"ma_cross\"]}");
+        when(strategyClient.evaluateBar(eq(configJson), eq("AAPL"), anyString(), isNull()))
+                .thenReturn(result);
+
+        paperTradingService.evaluateDaily();
+
+        ArgumentCaptor<List<MemoryFactRequest>> captor = ArgumentCaptor.forClass(List.class);
+        verify(memoryFactService, times(1)).recordObjective(eq(1L), eq("1:2026-09-17"), captor.capture());
+
+        Map<String, MemoryFactRequest> sent = captor.getValue().stream()
+                .collect(Collectors.toMap(MemoryFactRequest::getPredicate, fact -> fact));
+        assertEquals("strategy:10", sent.get(ObjectiveFactKeys.PAPER_EQUITY).getSubject());
+        // 整数值的浮点归一成整数：避免"值没变、取代链却多一条"的假变更
+        assertEquals("10000", sent.get(ObjectiveFactKeys.PAPER_EQUITY).getObject());
+        assertEquals("0", sent.get(ObjectiveFactKeys.PAPER_CASH).getObject());
+        assertEquals("1000", sent.get(ObjectiveFactKeys.PAPER_SHARES).getObject());
+        // 收益率口径在服务里算，不让调用方各算一遍：买满仓后净值等于本金
+        assertEquals("0", sent.get(ObjectiveFactKeys.PAPER_RETURN_PCT).getObject());
+        assertTrue(sent.containsKey(ObjectiveFactKeys.PAPER_LAST_EVAL_AT));
     }
 }

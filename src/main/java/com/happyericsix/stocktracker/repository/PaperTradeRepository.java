@@ -9,6 +9,6 @@ import java.util.List;
 
 @Repository
 public interface PaperTradeRepository extends JpaRepository<PaperTrade, Long> {
-    List<PaperTrade> findByStrategyIdOrderByTradeDateDesc(Long strategyId);
+    List<PaperTrade> findByStrategyIdOrderByTradeDateDescCreatedAtDesc(Long strategyId);
     boolean existsByStrategyIdAndTradeDate(Long strategyId, LocalDate tradeDate);
 }
