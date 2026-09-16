@@ -55,6 +55,8 @@ def test_number_without_evidence_is_flagged():
     assert audit["verdict"] == "review"
     finding = _findings(audit, tool_audit.KIND_UNSUPPORTED_CLAIM)[0]
     assert finding["severity"] == tool_audit.SEVERITY_MEDIUM
+    # 上下文片段必须带上：否则事后只能重跑一轮才能判断这是编造还是合法推导
+    assert "回撤 18.3%" in finding["detail"]
 
 
 def test_numbers_the_user_said_are_not_claims():
@@ -149,6 +151,61 @@ def test_system_prompt_is_deliberately_not_support():
         tool_contents=[],
     )
     assert set(audit["unsupported_numbers"]) == {"100000", "250", "-8"}
+
+
+# ==================== 1b. 真实一轮抓到的两个误报（回归） ====================
+
+# 这两条不是构造出来的用例，是 2026-09-17 真跑 `tool_eval --arm with` 时抓到的：
+# 审计第一版把它们判成"编造"，实际都是**合法推导**。误报会摧毁审计的可信度，
+# 所以它们变成回归用例钉在这里。
+_QUOTE_SEEN = ('{"ok": true, "data": {"quote": {"代码": "300750", "最新价": "305.48", '
+               '"成交额": "2398035", "涨跌幅": "-3.44", "涨跌额": "-10.88"}}}')
+
+
+def test_direction_word_carries_the_sign():
+    """工具给 涨跌额=-10.88，模型写"跌 10.88 元" —— 符号由"跌"这个字承担。"""
+    audit = tool_audit.audit_turn(
+        replies=["最新价 305.48 元，跌 10.88 元，跌幅 -3.44%。"],
+        tool_contents=[{"tool": "get_quote", "content": _QUOTE_SEEN}],
+    )
+    assert audit["unsupported_numbers"] == []
+    assert audit["verdict"] == "clean"
+
+
+def test_unit_conversion_is_allowed():
+    """工具给的成交额是 2398035（万元），模型写"成交额约 239.8 亿元" —— 这是对的。"""
+    audit = tool_audit.audit_turn(
+        replies=["成交额约 239.8 亿元。"],
+        tool_contents=[{"tool": "get_quote", "content": _QUOTE_SEEN}],
+    )
+    assert audit["unsupported_numbers"] == []
+
+
+def test_unit_conversion_does_not_mask_a_wrong_magnitude():
+    """宽容必须只在"确实换得出同一个数"时生效，不能变成万能借口。"""
+    audit = tool_audit.audit_turn(
+        replies=["成交额约 999 亿元。"],
+        tool_contents=[{"tool": "get_quote", "content": _QUOTE_SEEN}],
+    )
+    assert audit["unsupported_numbers"] == ["999"]
+
+
+def test_factor_ten_error_without_unit_word_is_still_flagged():
+    """没有单位词就不享受换算宽容：价格差 10 倍必须报出来。"""
+    audit = tool_audit.audit_turn(
+        replies=["价格约 30.548。"],
+        tool_contents=[{"tool": "get_quote", "content": _QUOTE_SEEN}],
+    )
+    assert audit["unsupported_numbers"] == ["30.548"]
+
+
+def test_fabricated_metric_is_still_flagged_after_the_tolerances():
+    """宽容加完之后，真正的编造仍然必须被报（这是审计存在的理由）。"""
+    audit = tool_audit.audit_turn(
+        replies=["现价 305.48 元，最大回撤 18.3%，胜率 42%。"],
+        tool_contents=[{"tool": "get_quote", "content": _QUOTE_SEEN}],
+    )
+    assert set(audit["unsupported_numbers"]) == {"18.3", "42"}
 
 
 # ==================== 2. 合规（确定性黑名单） ====================

@@ -77,6 +77,10 @@ _NUMBER_RE = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
 
 # 单位/标记：带这些的数字几乎一定是事实断言
 _CLAIM_UNITS = ("%", "％", "元", "块", "万", "亿", "倍", "点", "手", "股")
+# 允许按 10 的幂换算的单位词（A 股惯例：成交额常用万元、市值常用亿元）。
+# 没有单位词的数字不享受这条宽容 —— 否则差 10 倍的错会被放过。
+_SCALABLE_UNITS = ("元", "块", "万", "亿", "手", "股")
+_UNIT_SCALES = (1e-8, 1e-4, 1e-3, 1e-2, 1e2, 1e3, 1e4, 1e8)
 # 指标词：出现在数字附近即视为断言（"回撤 18"）
 _METRIC_WORDS = ("回撤", "收益", "胜率", "夏普", "涨", "跌", "价", "成交", "量", "额", "率",
                  "净值", "市值", "市盈", "利润", "营收", "波动", "仓位", "成本")
@@ -115,6 +119,11 @@ def extract_numbers(text: str) -> list[dict]:
     return found
 
 
+def _window(text: str, item: dict, *, before: int = 12, after: int = 3) -> str:
+    """数字周围的一小段文字（判"它像不像在陈述事实"、以及"有没有单位词"都用它）。"""
+    return text[max(0, item["start"] - before): item["end"] + after]
+
+
 def _claim_like(text: str, item: dict, strict: bool) -> bool:
     """这个数字像不像"在陈述一个事实"。
 
@@ -126,12 +135,11 @@ def _claim_like(text: str, item: dict, strict: bool) -> bool:
     value = abs(item["value"])
     if item["decimals"] > 0:
         return True
-    window = text[max(0, item["start"] - 12): item["end"] + 3]
-    if any(unit in window for unit in _CLAIM_UNITS):
+    if any(unit in _window(text, item) for unit in _CLAIM_UNITS):
         return True
     if value >= APPROX_MIN_MAGNITUDE:
         return True
-    nearby = text[max(0, item["start"] - 12): item["end"] + 12]
+    nearby = _window(text, item, before=12, after=12)
     return any(word in nearby for word in _METRIC_WORDS)
 
 
@@ -139,12 +147,36 @@ def _matches(value: float, decimals: int, support: float) -> bool:
     """模型写的这个数字，能不能由 support 里某个值支撑。"""
     if abs(value - support) < 1e-9:
         return True
+    # 符号由文字承担：工具给 涨跌额=-10.88，模型写"跌 10.88 元"是正确用法。
+    # （真实一轮里抓到过这一条：不加这个规则，"跌 10.88 元"会被判成编造。）
+    if abs(abs(value) - abs(support)) < 1e-9:
+        return True
     # 按模型的显示精度舍入后相等：18.34 → "18.3" 属于合法呈现
     if round(support, decimals) == round(value, decimals):
         return True
     # 近似复述："约 1500 元" 对应 1498.5。只对量级 ≥ 100 的数生效。
     if abs(value) >= APPROX_MIN_MAGNITUDE and support:
         return abs(value - support) / abs(support) <= APPROX_TOLERANCE
+    return False
+
+
+def _unit_scales_supported(value: float, decimals: int, support_values: list) -> bool:
+    """A 股数据里最常见的合法推导：**单位换算**。
+
+    真实一轮里抓到过：行情工具给的成交额是 `2398035`（万元），模型写成
+    "成交额约 239.8 亿元" —— 这是对的（2398035 万 = 239.8035 亿），
+    而按"字面必须出现"的规则它会被判成编造。
+
+    所以只在**文本里带单位词**时才允许按 10 的幂换算（元/万/亿/手/股），
+    否则一个差 10 倍的错会被悄悄放过。
+    """
+    if not support_values:
+        return False
+    for scale in _UNIT_SCALES:
+        scaled = value / scale
+        for support in support_values:
+            if _matches(scaled, decimals, support):
+                return True
     return False
 
 
@@ -186,7 +218,15 @@ def unsupported_claims(replies, support_texts, *, strict: bool = False) -> list[
                 continue
             if any(_matches(item["value"], item["decimals"], value) for value in support):
                 continue
-            out.append({"number": item["raw"], "value": item["value"]})
+            # 带单位词的数字允许一次单位换算（"成交额 239.8 亿元" ↔ 工具给的 2398035 万元）
+            window = _window(reply, item)
+            if (any(unit in window for unit in _SCALABLE_UNITS)
+                    and _unit_scales_supported(item["value"], item["decimals"], support)):
+                continue
+            # 带上上下文片段：没有它，事后判断"这是编造还是合法推导"必须重跑一轮
+            # （真实 triage 时踩过这个坑：只看到 "16.2"，无法判断它从哪来）
+            out.append({"number": item["raw"], "value": item["value"],
+                        "context": _window(reply, item, before=14, after=8).replace("\n", " ").strip()})
     return out
 
 
@@ -404,11 +444,12 @@ def audit_turn(replies=None, tool_log=None, tool_contents=None, *,
         findings = []
         unsupported = unsupported_claims(replies, support, strict=strict)
         if unsupported:
-            numbers = "、".join(item["number"] for item in unsupported)
+            numbers = "、".join(item["number"] for item in unsupported[:5])
+            contexts = " ｜ ".join(f"…{item['context']}…" for item in unsupported[:3])
             findings.append({
                 "kind": KIND_UNSUPPORTED_CLAIM,
                 "severity": SEVERITY_MEDIUM,
-                "detail": f"回答里的这些数字找不到依据：{numbers}",
+                "detail": f"回答里的这些数字找不到依据：{numbers}（上下文：{contexts}）",
                 "evidence": numbers,
             })
         findings.extend(compliance_findings(replies))
