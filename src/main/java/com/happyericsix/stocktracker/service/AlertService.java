@@ -48,17 +48,24 @@ public class AlertService {
             threshold = (threshold != null) ? -Math.abs(threshold) : -10.0;
         }
 
-        Alert alert = Alert.builder()
+        Alert.AlertBuilder alertBuilder = Alert.builder()
                 .stockSymbol(request.getSymbol().toUpperCase())
                 .conditionType(conditionType)
                 .threshold(threshold)
                 .enabled(request.getEnabled() != null ? request.getEnabled() : true)
-                .user(user)
-                // v1 新字段：null 走 @Builder.Default（5min / 0.5 / 2h）
-                .cooldownMinutes(request.getCooldownMinutes())
-                .resetRatio(request.getResetRatio())
-                .reArmHours(request.getReArmHours())
-                .build();
+                .user(user);
+        // v1 新字段：仅当请求显式传值才覆盖 @Builder.Default（5min / 0.5 / 2h）。
+        // 不能无条件赋值：显式 null 会覆盖默认值并违反 NOT NULL 列约束。
+        if (request.getCooldownMinutes() != null) {
+            alertBuilder.cooldownMinutes(request.getCooldownMinutes());
+        }
+        if (request.getResetRatio() != null) {
+            alertBuilder.resetRatio(request.getResetRatio());
+        }
+        if (request.getReArmHours() != null) {
+            alertBuilder.reArmHours(request.getReArmHours());
+        }
+        Alert alert = alertBuilder.build();
 
         alert = alertRepo.save(alert);
         log.info("User {} added alert for {} (type={}, threshold={})",

@@ -14,6 +14,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 
+import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -32,13 +33,21 @@ public class AkshareStockClient {
 
     private final WebClient webClient;
 
-    public AkshareStockClient(@Value("${akshare.api.base-url:http://localhost:8000}") String baseUrl) {
-        this.webClient = WebClient.builder()
+    public AkshareStockClient(@Value("${akshare.api.base-url:http://localhost:8000}") String baseUrl,
+                              @Value("${internal.api-token:}") String internalToken) {
+        WebClient.Builder builder = WebClient.builder()
                 .baseUrl(baseUrl)
-                .defaultHeader("Accept-Charset", "utf-8")
-                .build();
-        log.info("AkshareStockClient initialized, base URL: {}", baseUrl);
+                .defaultHeader("Accept-Charset", "utf-8");
+        if (internalToken != null && !internalToken.isBlank()) {
+            builder.defaultHeader("X-Internal-Token", internalToken);
+        }
+        this.webClient = builder.build();
+        log.info("AkshareStockClient initialized, base URL: {}, internal auth: {}",
+                baseUrl, internalToken != null && !internalToken.isBlank());
     }
+
+    /** 单次调用 Python 服务的整体超时，防止 Python 假死时无限挂起 Tomcat/调度线程 */
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);
 
     // ==================== 股票搜索 (Autocomplete) ====================
 
@@ -54,6 +63,7 @@ public class AkshareStockClient {
                             .build())
                     .retrieve()
                     .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                    .timeout(REQUEST_TIMEOUT)
                     .block();
 
             if (raw == null) {
@@ -85,6 +95,7 @@ public class AkshareStockClient {
                     .uri("/api/v1/quote/{symbol}", symbol)
                     .retrieve()
                     .bodyToMono(StockQuoteResponse.class)
+                    .timeout(REQUEST_TIMEOUT)
                     .block();
         } catch (WebClientResponseException e) {
             log.warn("akshare quote error for {}: HTTP {} {}", symbol, e.getStatusCode(), e.getResponseBodyAsString());
@@ -97,7 +108,10 @@ public class AkshareStockClient {
 
     private StockQuoteResponse emptyQuote(String symbol) {
         return new StockQuoteResponse(
-                new StockQuoteResponse.GlobalQuote(symbol, null, java.time.LocalDate.now().toString(), symbol),
+                new StockQuoteResponse.GlobalQuote(
+                        symbol, null, java.time.LocalDate.now().toString(), symbol,
+                        // 降级时明确给出 null，前端按"无涨跌信息"处理中性色，不要猜方向
+                        null, null, null),
                 null
         );
     }
@@ -110,6 +124,7 @@ public class AkshareStockClient {
                     .uri("/api/v1/overview/{symbol}", symbol)
                     .retrieve()
                     .bodyToMono(StockOverviewResponse.class)
+                    .timeout(REQUEST_TIMEOUT)
                     .block();
         } catch (WebClientResponseException e) {
             log.warn("akshare overview error for {}: HTTP {} {}", symbol, e.getStatusCode(), e.getResponseBodyAsString());
@@ -142,6 +157,7 @@ public class AkshareStockClient {
                             .build(symbol))
                     .retrieve()
                     .bodyToMono(StockHistoryResponse.class)
+                    .timeout(REQUEST_TIMEOUT)
                     .block();
         } catch (WebClientResponseException e) {
             log.warn("akshare history error for {} (period={}): HTTP {} {}", symbol, period, e.getStatusCode(), e.getResponseBodyAsString());
@@ -165,6 +181,7 @@ public class AkshareStockClient {
                     .retrieve()
                     .bodyToFlux(DailyStockResponse.class)
                     .collectList()
+                    .timeout(REQUEST_TIMEOUT)
                     .block();
             return data == null ? List.of() : data;
         } catch (WebClientResponseException e) {
@@ -197,6 +214,7 @@ public class AkshareStockClient {
                     .uri("/api/v1/indicators/{symbol}", symbol)
                     .retrieve()
                     .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                    .timeout(REQUEST_TIMEOUT)
                     .block();
         } catch (WebClientResponseException e) {
             log.warn("akshare indicators error for {}: HTTP {} {}", symbol, e.getStatusCode(), e.getResponseBodyAsString());

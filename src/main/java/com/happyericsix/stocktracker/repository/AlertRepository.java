@@ -1,6 +1,7 @@
 package com.happyericsix.stocktracker.repository;
 
 import com.happyericsix.stocktracker.entity.Alert;
+import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 
@@ -13,6 +14,7 @@ public interface AlertRepository extends JpaRepository<Alert, Long> {
     Optional<Alert> findByIdAndUserId(Long id, Long userId);
     List<Alert> findByUserIdAndEnabledTrue(Long userId);
     List<Alert> findByUserIdAndStockSymbol(Long userId, String stockSymbol);
-    /** Job 用：拉所有启用的预警 */
+    /** Job 用：拉所有启用的预警；fetch join user，避免调度线程上 LAZY 代理触发 LazyInitializationException */
+    @EntityGraph(attributePaths = "user")
     List<Alert> findByEnabledTrue();
 }

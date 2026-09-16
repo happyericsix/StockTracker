@@ -14,9 +14,7 @@ import java.util.List;
 @RequiredArgsConstructor
 @RequestMapping("/api/v1/chat")
 public class ChatController {
-
     private final MessageService messageService;
-
     /** 发送后立即返回，回复由 ChatService 异步计算并通过 SSE 推送 */
     @PostMapping("/send")
     public Result<String> send(@RequestBody ChatSendRequest request, Authentication authentication) {
@@ -26,7 +24,6 @@ public class ChatController {
         messageService.handleChatSend(authentication.getName(), request);
         return Result.success("processing");
     }
-
     @GetMapping("/history")
     public List<MessageResponse> history(Authentication authentication) {
         return messageService.getChatHistory(authentication.getName());

@@ -31,15 +31,17 @@ public class MessageService {
     private final SseEmitterService sseService;
     private final ChatService chatService;
     private final StockService stockService;
+    private final MemoryService memoryService;
 
     public MessageService(MessageRepository messageRepo, UserRepository userRepository,
                           SseEmitterService sseService, ChatService chatService,
-                          StockService stockService) {
+                          StockService stockService, MemoryService memoryService) {
         this.messageRepo = messageRepo;
         this.userRepository = userRepository;
         this.sseService = sseService;
         this.chatService = chatService;
         this.stockService = stockService;
+        this.memoryService = memoryService;
     }
 
     /** 给消息响应补股票名称（解析失败回退为代码） */
@@ -134,7 +136,8 @@ public class MessageService {
     /**
      * 发送聊天消息：
      * 1. 立即落库 CHAT_USER 并回显推送
-     * 2. 异步交给 ChatService 调 LLM，回复通过 saveAndPush 回来
+     * 2. 写记忆账本（用户说了什么，这是"前情提要"的原料，只追加）
+     * 3. 异步交给 ChatService 调 LLM，回复通过 saveAndPush 回来
      */
     @Transactional
     public void handleChatSend(String username, ChatSendRequest request) {
@@ -148,7 +151,22 @@ public class MessageService {
         userMsg = messageRepo.save(userMsg);
         sseService.push(user.getId(), withSymbolName(userMsg));
 
+        appendUserEventToLedger(user.getId(), request.getMessage());
+
         chatService.processAsync(user.getId(), username, request.getMessage());
+    }
+
+    /**
+     * 用户消息入账。失败只记日志 —— 记忆是增强功能，
+     * 账本写不进去也绝不能让用户发不出消息。
+     */
+    private void appendUserEventToLedger(Long userId, String content) {
+        try {
+            memoryService.appendChat(userId, memoryService.currentSessionKey(userId),
+                    "chat_user", "user", content, null);
+        } catch (Exception e) {
+            log.warn("记忆账本写入失败 user={}: {}", userId, e.getMessage());
+        }
     }
 
     /** 内部统一入口：落库 + SSE 推送（预警任务与聊天回复共用） */

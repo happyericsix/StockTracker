@@ -21,9 +21,7 @@ public class StockController {
     private final AlertService alertService;
 
     private static final Logger log = LoggerFactory.getLogger(StockController.class);
-
     // ==================== 股票搜索 (Autocomplete) ====================
-
     @GetMapping("/search")
     public Result<StockSearchResponse> searchStocks(@RequestParam(defaultValue = "") String keyword) {
         long startTime = System.currentTimeMillis();
@@ -32,9 +30,7 @@ public class StockController {
         log.info("GET /search?keyword={} returned {} results in {}ms", keyword, response.count(), duration);
         return Result.success(response);
     }
-
     // ==================== 实时行情 ====================
-
     @GetMapping("/{stockSymbol}")
     public StockResponse getStock(@PathVariable("stockSymbol") String stockSymbol) {
         long startTime = System.currentTimeMillis();
@@ -74,7 +70,7 @@ public class StockController {
     }
 
     @PostMapping("/favorites")
-    public ResponseEntity<FavoriteStock> saveFavoriteStock(
+    public ResponseEntity<Result<FavoriteStockResponse>> saveFavoriteStock(
             @RequestBody FavoriteStockRequest request,
             Authentication authentication) {
 
@@ -83,8 +79,9 @@ public class StockController {
                 request.getBuyPrice(),
                 request.getQuantity());
 
-        return ResponseEntity.ok().body(saved);
-
+        FavoriteStockResponse dto = FavoriteStockResponse.from(
+                saved.getStockSymbol(), saved.getBuyPrice(), saved.getQuantity(), saved.getBuyDate());
+        return ResponseEntity.ok().body(Result.success("已添加自选", dto));
     }
 
     @GetMapping("/favorites")
@@ -100,12 +97,15 @@ public class StockController {
     public Result<String> deleteFavoriteStocks(
             @PathVariable String symbol,
             Authentication authentication) {
-        boolean deleted = stockService.deleteFavorite(symbol.toUpperCase(), authentication.getName());
+        final String normalized = symbol.trim().toUpperCase();
+        boolean deleted = stockService.deleteFavorite(normalized, authentication.getName());
         if (deleted) {
-            alertService.deleteByUserAndSymbol(authentication.getName(), symbol);
-            return Result.success("Favorite deleted successfully", symbol.toUpperCase());
+            alertService.deleteByUserAndSymbol(authentication.getName(), normalized);
+            return Result.success("已删除自选", normalized);
         } else {
-            return Result.error(404, "Favorite not found: " + symbol.toUpperCase());
+            // 中文产品不该给用户看英文；这条消息现在会经由 request.js 的拦截器
+            // 以 reject 的形式出现在界面上，所以必须是可读的中文。
+            return Result.error(404, "自选股中不存在该股票：" + normalized);
         }
     }
 }

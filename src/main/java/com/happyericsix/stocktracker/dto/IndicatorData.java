@@ -1,13 +1,17 @@
 package com.happyericsix.stocktracker.dto;
 
+import java.io.Serializable;
+
 /**
  * 技术指标快照：一次评估所需的全部指标值
  * 字段命名与 Python 服务 /api/v1/indicators/{symbol} 返回的 indicators.* 对齐
  *
  * 来源：StockService.getIndicators() 从 Python akshare 服务拉取（已缓存 5 分钟）
+ * 实现 Serializable：Redis 缓存使用 JdkSerializationRedisSerializer，被缓存对象必须可序列化。
  */
-public class IndicatorData {
+public class IndicatorData implements Serializable {
 
+    private static final long serialVersionUID = 1L;
     private Double rsi;            // 14 日 RSI，0~100
     private Double macdDif;        // MACD 快线
     private Double macdDea;        // MACD 慢线（信号线）

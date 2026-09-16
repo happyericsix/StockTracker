@@ -1,11 +1,8 @@
-﻿services:
+services:
   redis:
     image: redis:7-alpine
     container_name: stock-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
+    # 不发布宿主端口：仅内部网络可达（避免 Redis 无口令裸奔到宿主机/外网）
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -16,8 +13,7 @@
   mysql:
     image: mysql:8.0
     container_name: stock-mysql
-    ports:
-      - "3307:3306"  # 宿主机 3306 已被本地 MySQL 占用,改用 3307 映射到容器 3306
+    # 不发布宿主端口：仅内部网络可达
     environment:
       - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-123456}
       - MYSQL_DATABASE=stockdb
@@ -35,15 +31,16 @@
   python-data:
     build: ./python-data-service
     container_name: stock-python-data
-    ports:
-      - "8000:8000"
+    # 不发布宿主端口：只允许 Java 后端经内部网络调用；
+    # 服务间鉴权由 INTERNAL_API_TOKEN 保证
+    environment:
+      - INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN:-stock-tracker-internal-2026}
     restart: unless-stopped
 
   app:
     build: .
     container_name: stock-tracker
-    ports:
-      - "8080:8080"
+    # 不发布宿主端口：由 frontend(nginx) 在内部网络反代 /api
     environment:
       - SPRING_DATA_REDIS_HOST=redis
       - SPRING_DATA_REDIS_PORT=6379
@@ -51,6 +48,13 @@
       - SPRING_DATASOURCE_USERNAME=root
       - SPRING_DATASOURCE_PASSWORD=${MYSQL_PASSWORD:-123456}
       - AKSHARE_API_BASE_URL=http://python-data:8000
+      - INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN:-stock-tracker-internal-2026}
+      # RSA 签名密钥走运行时挂载（镜像内不含密钥）
+      - RSA_PRIVATE_KEY_PATH=/run/secrets/app.key
+      - RSA_PUBLIC_KEY_PATH=/run/secrets/app.pub
+    volumes:
+      - ./secrets/app.key:/run/secrets/app.key:ro
+      - ./secrets/app.pub:/run/secrets/app.pub:ro
     depends_on:
       redis:
         condition: service_healthy

@@ -34,6 +34,15 @@ public interface MessageRepository extends JpaRepository<Message, Long> {
     /** 聊天历史：升序展示，类型限定 CHAT_USER / CHAT_BOT */
     List<Message> findByUserIdAndTypeInOrderByCreatedAtAsc(Long userId, List<String> types);
 
+    /**
+     * 聊天历史：只取最近 N 条（倒序），用于喂给 agent 的会话上下文。
+     *
+     * 不要用 {@link #findByUserIdAndTypeInOrderByCreatedAtAsc} 代替它：那个方法会把用户
+     * 全部聊天记录一次读进内存，聊天越久越慢（每条消息都要付这个代价）。
+     * N 取得比 ChatService.MAX_HISTORY_MESSAGES 大一些，留出"剔除当前消息"的余量。
+     */
+    List<Message> findTop20ByUserIdAndTypeInOrderByIdDesc(Long userId, List<String> types);
+
     /** 消息中心：按 type 过滤（如 type=ALERT 看预警历史） */
     List<Message> findByUserIdAndTypeOrderByCreatedAtDesc(Long userId, String type);
 

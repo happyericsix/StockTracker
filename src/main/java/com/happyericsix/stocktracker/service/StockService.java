@@ -90,6 +90,10 @@ public class StockService {
                 .name(quoteName == null || quoteName.isBlank() ? stockSymbol : quoteName)
                 .price(response.globalQuote().price())
                 .lastUpdated(response.globalQuote().lastTradingDay())
+                // 透传涨跌三项：Python 侧已解析，这里必须带上，否则前端拿不到方向
+                .previousClose(response.globalQuote().previousClose())
+                .change(response.globalQuote().change())
+                .changePercent(response.globalQuote().changePercent())
                 .build();
     }
 
@@ -224,17 +228,27 @@ public class StockService {
         return new PagedResponse<>(pageContent, page, size, totalElements, totalPages);
     }
 
+    /**
+     * 代码统一规范化：trim + 大写（A/B 股、港股、美股均按此存储与比对）。
+     * 避免 "aapl" 与 "AAPL" 被当成两只不同股票、去重/删除失效。
+     */
+    private static String normalizeSymbol(String s) {
+        if (s == null) return null;
+        return s.trim().toUpperCase(java.util.Locale.ROOT);
+    }
+
     @Transactional
     public FavoriteStock addFavorite(final String stockSymbol, final String username, final Double buyPrice, final Integer quantity) {
+        final String symbol = normalizeSymbol(stockSymbol);
         User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> new IllegalArgumentException("用户不存在"));
 
-        if (favoriteStockRepository.existsByStockSymbolAndUserId(stockSymbol, user.getId())) {
-            throw new FavoriteAlreadyExistsException(stockSymbol);
+        if (favoriteStockRepository.existsByStockSymbolAndUserId(symbol, user.getId())) {
+            throw new FavoriteAlreadyExistsException(symbol);
         }
 
         FavoriteStock favoriteStock = FavoriteStock.builder()
-                .stockSymbol(stockSymbol)
+                .stockSymbol(symbol)
                 .user(user)
                 .buyPrice(buyPrice)
                 .quantity(quantity)
@@ -245,15 +259,16 @@ public class StockService {
 
     @Transactional
     public boolean deleteFavorite(final String stockSymbol, final String username) {
+        final String symbol = normalizeSymbol(stockSymbol);
         User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> new IllegalArgumentException("用户不存在"));
 
-        if (favoriteStockRepository.existsByStockSymbolAndUserId(stockSymbol, user.getId())) {
-            favoriteStockRepository.deleteByStockSymbolAndUserId(stockSymbol, user.getId());
-            log.info("Deleted favorite: {} for user: {}", stockSymbol, username);
+        if (favoriteStockRepository.existsByStockSymbolAndUserId(symbol, user.getId())) {
+            favoriteStockRepository.deleteByStockSymbolAndUserId(symbol, user.getId());
+            log.info("Deleted favorite: {} for user: {}", symbol, username);
             return true;
         }
-        log.warn("Favorite not found: {} for user: {}", stockSymbol, username);
+        log.warn("Favorite not found: {} for user: {}", symbol, username);
         return false;
     }
 
