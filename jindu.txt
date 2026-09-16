@@ -13,8 +13,7 @@
    - 股票名称展示 (搜索输入代码,其余位置显示名称)
 
 2. 文件结构 (python-data-service/)
-   - app.py                  # FastAPI 业务核心 (行情/搜索/量化/聊天, 端口 8000)
-   - chat_handler.py         # 站内聊天助手核心 (意图路由: 行情/分析/历史/对比/闲聊)
+   - app.py                  # FastAPI 业务核心 (行情/搜索/量化/策略 Agent, 端口 8000)
    - llm_service.py          # DeepSeek LLM 客户端 (含 .env 自动加载)
    - quant_model.py          # 技术指标 + 量化模型
    - akshare_client.py       # 行情 API 客户端
@@ -24,7 +23,7 @@
 3. 后端 (Spring Boot)
    - JWT 认证 + MySQL + Redis 缓存
    - 预警评估: 价格刷新事件驱动 (每 5 分钟)
-   - 聊天链路: /api/v1/chat -> Python /api/v1/chat
+   - 聊天链路: /api/v1/chat/send -> Python /api/v1/agent/chat
 
 4. 已修复问题
    - 股票代码前缀: 添加 bj 支持 (920xxx 北交所)

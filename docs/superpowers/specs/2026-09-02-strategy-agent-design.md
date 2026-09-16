@@ -94,7 +94,9 @@ Python FastAPI (:8000)
 ### Python 新增
 
 - `agent/tool_registry.py`：工具注册表，工具含 `name`、`description`、参数 schema、执行函数。
-- `agent/react_agent.py`：ReAct 循环，最多 6 步；LLM 输出“思考 + 工具调用”或“最终答案”。
+- `agent/react_agent.py`：ReAct 循环，最多 12 步（`MAX_STEPS = 12`，本行原先写 6，已按代码修正）；LLM 输出"思考 + 工具调用"或"最终答案"。
+- `agent/memory.py` / `agent/recall.py` / `agent/consolidate.py`：记忆系统（账本、前情提要、
+  事实与经验），设计见 `2026-09-16-memory-system-design.md`。
 - `agent/strategy_schema.py`：pydantic 校验策略 JSON。
 - `agent/strategy_engine.py`：指标计算、规则求值、回测执行、单日求值。
 - 新端点：
