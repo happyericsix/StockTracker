@@ -103,6 +103,32 @@ def is_ok(payload: Any) -> bool:
     return bool(isinstance(payload, dict) and payload.get("ok"))
 
 
+def error_code(payload: Any) -> str:
+    """取出信封里的错误码。成功、或结构不对时返回空串。
+
+    为什么必须有这个取法：本模块开头就写明"错误码是分类依据，别再用自由文本判断"，
+    但在它之前没有任何地方能**取出**这个码 —— 于是日志与审计只能去 grep 一段中文消息。
+    一类最常见的后果：`source_unavailable`（上游挂了，模型不许重试）与 `tool_error`
+    （工具坏了）在文本上分不开，审计也就无法回答"它有没有对着一个停用的源反复重试"。
+    """
+    if not isinstance(payload, dict):
+        return ""
+    error = payload.get("error")
+    if isinstance(error, dict):
+        return str(error.get("code") or "")
+    return ""
+
+
+def error_retryable(payload: Any) -> bool:
+    """这次失败是否声明了"可以重试"。审计用它区分"该重试却没重试"与"不该重试却重试"。"""
+    if not isinstance(payload, dict):
+        return False
+    error = payload.get("error")
+    if isinstance(error, dict):
+        return bool(error.get("retryable"))
+    return False
+
+
 def data_of(payload: Any) -> Any:
     """取出工具负载；传进来的不是信封时按老契约原样返回。"""
     if is_envelope(payload):

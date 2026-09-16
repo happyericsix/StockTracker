@@ -37,6 +37,10 @@ SELECTION_GATE = 0.75        # 选择正确率下限
 ARGS_VALID_GATE = 0.9        # 参数一次通过率下限
 SEMANTIC_GATE = 0.8          # 复杂参数语义正确率下限（schema 合法 ≠ 填对位置）
 SPURIOUS_GATE = 0             # 该不调工具时乱调的次数
+# 无据数字（W3）：回答里出现的、任何一次工具调用都没支持过的数字。
+# 门禁是 0 而不是"某比例"，因为这类错的代价不是"答案差一点"，
+# 而是"用户按一个编造的数字做了决定"—— 它不该有容忍度。
+UNSUPPORTED_CLAIM_GATE = 0
 
 
 def load_cases() -> list:
@@ -85,11 +89,17 @@ def _run_loop_case(case: dict, *, include_examples: bool) -> dict:
 
     ra.execute_tool = recording_execute
     try:
-        ra.run_agent("tool-eval", case["message"], history=case.get("history") or [],
-                     session_id="tool-eval:2026-09-16", memory_user_id=None,
-                     scopes=list(DEFAULT_USER_SCOPES))
+        result = ra.run_agent("tool-eval", case["message"], history=case.get("history") or [],
+                              session_id="tool-eval:2026-09-16", memory_user_id=None,
+                              scopes=list(DEFAULT_USER_SCOPES))
     finally:
         ra.execute_tool = original_execute
+
+    # 一轮真跑顺带把"确定性体检"的结果带出来（agent/tool_audit.py）：
+    # 选择对不对看 picked，**说得对不对**看这里 —— 两者是不同的问题，
+    # 而"选对了工具却编了个数字"正是最危险的那种错。
+    audit = result.get("audit") if isinstance(result, dict) else None
+    audit = audit if isinstance(audit, dict) else {}
 
     picked = [name for name, _args in recorded]
     args_problems, semantic_problems = _check_args(case, recorded)
@@ -100,6 +110,8 @@ def _run_loop_case(case: dict, *, include_examples: bool) -> dict:
         "args_problems": args_problems, "semantic_problems": semantic_problems,
         "semantic_expected": bool(case.get("expect_args_kv") or case.get("expect_args_contains")),
         "no_tool_expected": False, "kind": "select",
+        "unsupported_numbers": audit.get("unsupported_numbers") or [],
+        "audit_verdict": audit.get("verdict"),
         "ok": hit and not args_problems and not semantic_problems,
     }
 
@@ -197,6 +209,8 @@ def summarize(rows: list) -> dict:
     selection_ok = sum(1 for row in selection if row["ok"])
     args_ok = sum(1 for row in called if not row["args_problems"])
     semantic_ok = sum(1 for row in with_semantic if not row["semantic_problems"])
+    claim_cases = [row for row in rows if row.get("unsupported_numbers")]
+    claim_total = sum(len(row.get("unsupported_numbers") or []) for row in rows)
 
     return {
         "cases": len(rows),
@@ -209,6 +223,11 @@ def summarize(rows: list) -> dict:
         # 这是"复杂参数"的真指标：schema 合法 ≠ 五个参数都落在正确位置
         "args_semantic_rate": round(semantic_ok / len(with_semantic), 4) if with_semantic else 1.0,
         "spurious_calls": sum(1 for row in abstain if row["picked"]),
+        # 无据数字（W3）：选对工具之后，说的话有没有依据
+        "cases_with_unsupported_claims": len(claim_cases),
+        "unsupported_numbers_total": claim_total,
+        "unsupported_examples": sorted({number for row in claim_cases
+                                        for number in (row.get("unsupported_numbers") or [])})[:10],
     }
 
 
@@ -222,6 +241,10 @@ def check_gates(metrics: dict) -> list:
         failures.append(f"复杂参数语义正确率 {metrics['args_semantic_rate']} < {SEMANTIC_GATE}")
     if metrics["spurious_calls"] > SPURIOUS_GATE:
         failures.append(f"寒暄时乱调工具 {metrics['spurious_calls']} 次")
+    if metrics.get("cases_with_unsupported_claims", 0) > UNSUPPORTED_CLAIM_GATE:
+        examples = "、".join(metrics.get("unsupported_examples") or [])
+        failures.append(f"{metrics['cases_with_unsupported_claims']} 个用例的回答里有"
+                        f"无据数字（例：{examples or '—'}）")
     return failures
 
 
@@ -235,9 +258,12 @@ def _print_arm(title: str, rows: list, metrics: dict, failures: list) -> None:
             detail += f"  参数：{'；'.join(row['args_problems'])}"
         if row["semantic_problems"]:
             detail += f"  语义：{'；'.join(row['semantic_problems'])}"
+        if row.get("unsupported_numbers"):
+            detail += f"  无据数字：{'、'.join(row['unsupported_numbers'])}"
         print(f"  {mark} {row['id']:<32} 选了 {picked:<24} 期望 {','.join(row['expected']) or '不调'}{detail}")
     print(f"  → 选择正确率 {metrics['selection_accuracy']} | 参数一次通过率 {metrics['args_valid_rate']}"
-          f" | 复杂参数语义正确率 {metrics['args_semantic_rate']} | 乱调 {metrics['spurious_calls']} 次")
+          f" | 复杂参数语义正确率 {metrics['args_semantic_rate']} | 乱调 {metrics['spurious_calls']} 次"
+          f" | 无据数字 {metrics.get('unsupported_numbers_total', 0)} 处")
     if failures:
         for failure in failures:
             print(f"  [x] {failure}")

@@ -160,6 +160,20 @@ def test_health_reports_the_objective_fact_channel():
     assert described["predicates"] == list(objective.PREDICATES)
 
 
+def test_health_reports_the_turn_audit():
+    """一轮体检（W3）必须能从 /health 看到：查什么、以及**它不阻断主流程**。"""
+    from agent import tool_audit
+
+    c = TestClient(main.app)
+    r = c.get("/health")
+
+    assert r.status_code == 200
+    described = r.json()["audit"]
+    assert described["blocking"] is False
+    assert described["checks"] == tool_audit.describe()["checks"]
+    assert "unsupported_claim" in described["checks"]
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

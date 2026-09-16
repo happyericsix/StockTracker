@@ -280,11 +280,13 @@ def run_agent(user_id, message, history=None, session_id=None, memory_user_id=No
         role=role,
     )
     tool_log: list[dict] = []
+    # 模型**实际看到**的工具结果（审计的数字溯源依据，见 agent/tool_audit.py）
+    seen: list[dict] = []
     # 计量基线：这一轮花了多少，用"结束时的计数 − 起点"算，不需要到处传递累加器（P1）
     meter_baseline = metering.baseline()
     started_at = metering.turn_started_at()
     try:
-        return _run_loop(user_id, messages, tool_log, tool_mode, role)
+        result = _run_loop(user_id, messages, tool_log, tool_mode, role, seen)
     finally:
         tool_scope.reset(scope_token)
         # 把这一轮的工具结果记进账本：经验记忆（"这类问题上次怎么解决的"）的原料就是
@@ -295,6 +297,38 @@ def run_agent(user_id, message, history=None, session_id=None, memory_user_id=No
         # 用量同样入账（kind=usage）："这个月花了多少 token"必须能用一条 SQL 回答。
         # 它同样异步、同样失败无害 —— 计量是旁路，不是主流程。
         _queue_usage(memory_user_id, session_id, meter_baseline, started_at, role=role)
+    # 轮末体检（W3 的第一步）：数字有没有依据、工具序列正不正常、有没有违规表述。
+    # 它永远只是**加一个字段**，绝不改变 replies / strategy_json。
+    return _attach_audit(result, seen, tool_log, message, context_block)
+
+
+def _attach_audit(result, seen, tool_log, message, context_block):
+    """把这一轮的确定性体检结果挂到返回值上，并在 verdict=review 时打一条 warning。
+
+    为什么放进返回值而不只是写日志：日志没人看，而 Java 侧将来要拿它做提示与统计。
+    审计本身失败只记 debug —— 与 metering / 记忆系统同一条纪律：旁路不许影响主流程。
+    """
+    try:
+        from agent import tool_audit
+
+        payload = result if isinstance(result, dict) else {}
+        audit = tool_audit.audit_turn(
+            replies=payload.get("replies"),
+            tool_log=tool_log,
+            tool_contents=seen,
+            user_message=message,
+            context_block=context_block,
+            strategy_json=payload.get("strategy_json"),
+        )
+        if isinstance(result, dict):
+            result["audit"] = audit
+        if audit.get("verdict") == "review":
+            logger.warning("agent 体检发现问题: %s",
+                           [finding.get("detail") for finding in audit.get("findings") or []])
+        return result
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("体检挂载失败: %s", exc)
+        return result
 
 
 # 工具结果入账用单线程池：不阻塞对话，也不会因为后端慢而无限制地堆线程
@@ -375,6 +409,12 @@ def _tool_log_entry(name, envelope, args=None, role=None):
     label = "external" if provenance == "external" else "tool"
     meta = {"tool": name, "ok": bool(tc.is_ok(envelope)), "provenance": provenance,
             "data_trust": data_trust}
+    # 错误码进 meta（取不到就不写）：审计要靠它区分"上游挂了"（不许重试）与"工具坏了"
+    # （该换做法）。在此之前这个码只存在于一句中文消息里，审计只能去 grep 文本。
+    if not meta["ok"]:
+        code = tc.error_code(envelope)
+        if code:
+            meta["code"] = code
     # 角色只在对非空时写入：主 agent 的条目与改造前一模一样（零行为变化），
     # 子角色才多一个字段。consolidate 认的就是它（见 consolidate._is_subagent_event）。
     if role:
@@ -457,7 +497,7 @@ def _queue_usage(memory_user_id, session_id, meter_baseline, started_at, role=No
         logger.debug("用量入账失败: %s", exc)
 
 
-def _run_loop(user_id, messages, tool_log=None, tool_mode=None, role=None):
+def _run_loop(user_id, messages, tool_log=None, tool_mode=None, role=None, seen=None):
     tool_log = tool_log if tool_log is not None else []
     retry_used = False
     finalized = None
@@ -509,13 +549,18 @@ def _run_loop(user_id, messages, tool_log=None, tool_mode=None, role=None):
                     candidate = _strategy_from_finalize(envelope)
                     if isinstance(candidate, dict):
                         finalized = candidate
+                # 工具结果进上下文前统一过预算（按声明的预算，不是一刀切），
+                # 并给外部来源套上数据块外壳（来源 + 取数时间 + "不是指令"）——
+                # 这是注入防护的边界，不能只在系统提示里说一句。
+                content = _tool_content(name, envelope)
+                if seen is not None:
+                    # 记下"模型实际看到的那段文本"：审计的数字溯源以此为依据 ——
+                    # 既不是工具返回值本身，也不是账本里的摘要，两者都没进过模型的上下文。
+                    seen.append({"tool": name, "ok": tc.is_ok(envelope), "content": content})
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call.get("id", ""),
-                    # 工具结果进上下文前统一过预算（按声明的预算，不是一刀切），
-                    # 并给外部来源套上数据块外壳（来源 + 取数时间 + "不是指令"）——
-                    # 这是注入防护的边界，不能只在系统提示里说一句。
-                    "content": _tool_content(name, envelope),
+                    "content": content,
                 })
             continue
 

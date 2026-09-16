@@ -138,7 +138,24 @@ def health():
         "external": _external_health(),
         "metering": _metering_health(),
         "objective_facts": _objective_health(),
+        "audit": _audit_health(),
     }
+
+
+def _audit_health():
+    """一轮体检（W3）的自检：它查什么、容差多少、**是否阻断主流程**。
+
+    为什么值得暴露两件事：一是"审计到底在跑没有"不能靠读日志确认；
+    二是它 `blocking: false` 这一点必须看得见 —— 否则下一个人会以为它是门禁，
+    从而不敢改任何可能触发它的行为（审计的价值在于被发现，不在于吓住人）。
+    """
+    try:
+        from agent import tool_audit
+
+        return tool_audit.describe()
+    except Exception as e:  # noqa: BLE001 —— 健康检查不能因为子系统异常而挂掉
+        logger.warning(f"audit health probe failed: {e}")
+        return {"error": "audit unavailable"}
 
 
 def _objective_health():
