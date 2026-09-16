@@ -1,0 +1,66 @@
+# 裁决者（critic）的 golden set —— 全部来自真实跑批，不是构造出来的
+#
+# 为什么只有四个用例：这批样本是 2026-09-17 真跑 `tests.tool_eval.runner --arm with`
+# 与随后的对账探针抓到的**全部**候选数字。样本少但每一个都真实发生过，
+# 而且正好覆盖了三种边界：符号由文字承担、单位换算、以及超出任何推导的记错。
+# 与其编二十条"像真的一样"的用例，不如把真实出现的这几条钉住。
+#
+# 每条必须写清 source：
+#   real        —— 真实跑批里出现的数字与原样证据
+#   real_partial—— 数字真实（评测报告里报了），但当时审计还没记录上下文片段，
+#                  context 是按同一字段的真实值补写的
+#   synthetic   —— 人工构造的对照（用于确认它不会把真正的编造判成合法）
+#
+# 跑法：
+#   REVIEW_EVAL_LIVE=1 pytest tests/test_review_eval.py -q    # 真调 LLM（4 次调用）
+#   不带环境变量时，只跑"用例本身是否诚实"的离线断言（零成本）
+
+cases:
+
+  - id: sign_by_word
+    source: real
+    why: 工具的涨跌额是 -10.88，模型写「跌 10.88 元」——符号由「跌」这个字承担
+    user_request: "宁德时代今天为什么跌？"
+    candidates:
+      - number: "10.88"
+        context: "最新价 305.48 元，跌 10.88 元，跌幅 -3.44%。"
+    evidence:
+      - tool: get_quote
+        content: '{"ok": true, "data": {"quote": {"代码": "300750", "名称": "宁德时代", "最新价": "305.48", "昨收": "316.36", "今开": "313.01", "最高": "315.00", "最低": "299.00", "成交量": "787163", "成交额": "2398035", "涨跌幅": "-3.44", "涨跌额": "-10.88", "总市值": "14135.28", "流通市值": "13015.29", "市盈率-动态": "16.63"}}, "error": null, "meta": {"envelope_version": "1.0"}}'
+    expect_label: legitimate_derivation
+
+  - id: unit_conversion
+    source: real
+    why: 工具的成交额是 2398035（万元），模型写「成交额约 239.8 亿元」——万元换亿元
+    user_request: "宁德时代今天为什么跌？"
+    candidates:
+      - number: "239.8"
+        context: "成交额约 239.8 亿元，动态市盈率 16.63"
+    evidence:
+      - tool: get_quote
+        content: '{"ok": true, "data": {"quote": {"代码": "300750", "名称": "宁德时代", "最新价": "305.48", "昨收": "316.36", "今开": "313.01", "最高": "315.00", "最低": "299.00", "成交量": "787163", "成交额": "2398035", "涨跌幅": "-3.44", "涨跌额": "-10.88", "总市值": "14135.28", "流通市值": "13015.29", "市盈率-动态": "16.63"}}, "error": null, "meta": {"envelope_version": "1.0"}}'
+    expect_label: legitimate_derivation
+
+  - id: pe_restatement
+    source: real_partial
+    why: 工具的动态市盈率是 16.63，模型写「约 16.2 倍」——超出四舍五入与 1% 容差，任何推导都到不了 16.2
+    user_request: "宁德时代今天为什么跌？"
+    candidates:
+      - number: "16.2"
+        context: "成交额约 239.8 亿元，动态市盈率约 16.2 倍"
+    evidence:
+      - tool: get_quote
+        content: '{"ok": true, "data": {"quote": {"代码": "300750", "名称": "宁德时代", "最新价": "305.48", "昨收": "316.36", "今开": "313.01", "最高": "315.00", "最低": "299.00", "成交量": "787163", "成交额": "2398035", "涨跌幅": "-3.44", "涨跌额": "-10.88", "总市值": "14135.28", "流通市值": "13015.29", "市盈率-动态": "16.63"}}, "error": null, "meta": {"envelope_version": "1.0"}}'
+    expect_label: unsupported
+
+  - id: fabricated_drawdown
+    source: synthetic
+    why: 对照用例——行情工具不可能给出回撤/胜率，证据里也确实没有回测结果
+    user_request: "宁德时代今天为什么跌？"
+    candidates:
+      - number: "18.3"
+        context: "该策略最大回撤 18.3%，胜率 42%。"
+    evidence:
+      - tool: get_quote
+        content: '{"ok": true, "data": {"quote": {"代码": "300750", "名称": "宁德时代", "最新价": "305.48", "涨跌幅": "-3.44", "涨跌额": "-10.88"}}, "error": null, "meta": {"envelope_version": "1.0"}}'
+    expect_label: unsupported

@@ -467,6 +467,8 @@ def audit_turn(replies=None, tool_log=None, tool_contents=None, *,
             "refused": sum(1 for call in calls if call["code"] in
                            (tc.POLICY_DENIED, tc.BUDGET_EXCEEDED, tc.NEEDS_APPROVAL)),
             "unsupported_numbers": [item["number"] for item in unsupported],
+            # 结构化候选：critic（agent/review.py）直接消费它，不必去解析 detail 文本
+            "unsupported_claims": unsupported,
             "findings": findings,
             "checked": ["numbers", "compliance", "sequence", "refusals", "budget"],
         }

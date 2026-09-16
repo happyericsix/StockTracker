@@ -174,6 +174,20 @@ def test_health_reports_the_turn_audit():
     assert "unsupported_claim" in described["checks"]
 
 
+def test_health_reports_the_reviewer():
+    """裁决者必须能从 /health 看到"它没有工具、不阻断、判合法必须引证据"。"""
+    from agent import review
+
+    c = TestClient(main.app)
+    r = c.get("/health")
+
+    assert r.status_code == 200
+    described = r.json()["review"]
+    assert described["tools"] == []
+    assert described["blocking"] is False
+    assert described == review.describe()
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

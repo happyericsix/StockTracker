@@ -325,10 +325,52 @@ def _attach_audit(result, seen, tool_log, message, context_block):
         if audit.get("verdict") == "review":
             logger.warning("agent 体检发现问题: %s",
                            [finding.get("detail") for finding in audit.get("findings") or []])
+        # 有候选数字才交给裁决者（critic）：没有候选时这一步零成本
+        _queue_review(audit, seen, message)
         return result
     except Exception as exc:  # noqa: BLE001
         logger.debug("体检挂载失败: %s", exc)
         return result
+
+
+# 裁决（critic）用单独的**单线程池**：它是"偶尔才发生"的旁路。
+# 为什么异步：裁决要花一次 LLM 往返（约两秒），而这时候用户的回复已经算好了 ——
+# 让它挡住回复，就是把一条旁路变成了一次延迟。判完只记日志。
+_REVIEW_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent-review")
+
+
+def _queue_review(audit, seen, message):
+    """审计报出候选数字时，异步交给裁决者判断"是推导还是编造"。
+
+    刻意**不写账本**：裁决结果眼下只用于可观测与 triage。等到教练角色需要
+    "这条建议当初被判过什么"时再谈落库 —— 先落库再想用途，只会多一张没人查的表。
+    """
+    candidates = (audit or {}).get("unsupported_claims") or []
+    if not candidates:
+        return
+    try:
+        _REVIEW_EXECUTOR.submit(_run_review, candidates, seen, message)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("裁决入队失败: %s", exc)
+
+
+def _run_review(candidates, seen, message):
+    """跑一次裁决并记日志。**永不抛异常**（在线程池里抛出去只会变成一条无人看的堆栈）。"""
+    try:
+        from agent import review
+
+        verdict = review.review_turn({"unsupported_claims": candidates}, seen,
+                                    user_message=message)
+        if verdict.get("unsupported"):
+            # 确认的编造：这是运维该看见的一条
+            logger.warning("裁决确认无据数字：%s（%s）",
+                           verdict["unsupported"], verdict.get("summary") or "")
+        else:
+            logger.info("裁决结果 status=%s legitimate=%s unclear=%s dropped=%d",
+                        verdict.get("status"), verdict.get("legitimate"),
+                        verdict.get("unclear"), len(verdict.get("dropped") or []))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("裁决失败: %s", exc)
 
 
 # 工具结果入账用单线程池：不阻塞对话，也不会因为后端慢而无限制地堆线程

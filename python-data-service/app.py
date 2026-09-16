@@ -139,7 +139,23 @@ def health():
         "metering": _metering_health(),
         "objective_facts": _objective_health(),
         "audit": _audit_health(),
+        "review": _review_health(),
     }
+
+
+def _review_health():
+    """裁决者（critic）的自检：它**没有工具、不阻断、判"合法"必须引证据**。
+
+    这三条必须能被看见：一个"审查者"如果自己能被说服，它比没有更糟
+    （它会给出一个看起来很权威的肯定）。
+    """
+    try:
+        from agent import review
+
+        return review.describe()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"review health probe failed: {e}")
+        return {"error": "review unavailable"}
 
 
 def _audit_health():
