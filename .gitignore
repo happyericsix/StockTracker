@@ -41,6 +41,13 @@ build/
 application-local.properties
 application-local.yml
 
+### RSA signing keys (JWT) — never commit real keys ###
+src/main/resources/app.key
+src/main/resources/app.pub
+secrets/
+*.key
+*.pub
+
 ### Python ###
 __pycache__
 *.py[cod]

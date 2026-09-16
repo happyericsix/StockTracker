@@ -1,0 +1,23 @@
+# 构建上下文排除：密钥、虚拟环境、模型与运行产物
+# （本目录作为 compose 的 build context，根目录 .dockerignore 不适用，必须单独配置）
+.env
+.env.*
+.venv/
+venv/
+__pycache__/
+*.pyc
+mlflow.db
+mlruns/
+models/
+*.pkl
+*.log
+chroma_data/
+chroma_test/
+chroma_test_zh/
+gocq/
+lagrange/
+napcat/
+.idea/
+.pytest_cache/
+tests/
+test_*.py

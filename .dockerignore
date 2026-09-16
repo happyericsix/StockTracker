@@ -10,3 +10,9 @@ chroma_data/
 napcat/
 _backup_before_llm_*/
 node_modules/
+
+# Never bake signing keys / secrets into images
+src/main/resources/app.key
+src/main/resources/app.pub
+secrets/
+python-data-service/.env
