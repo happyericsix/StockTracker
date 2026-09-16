@@ -1,0 +1,113 @@
+# 工具选择与参数质量 golden set（T1）
+#
+# 跑法：
+#   python -m tests.tool_eval.runner                 # 真调 LLM（约 7~14 次调用），带 A/B
+#   python -m tests.tool_eval.runner --arm with      # 只跑"带示例"这一臂
+#   TOOL_EVAL_LIVE=1 pytest tests/test_tool_selection.py -q
+#
+# 这份用例不检查"回答好不好"，只检查两件事：
+#   1. **工具选对了吗**（选错工具比答错更贵：模型会拿着错数据自信地推理）
+#   2. **第一次调用的参数合法吗**（T1 的验收标准之一就是它要变高）
+# 另外还测"该不调工具的时候别乱调" —— 过度调用同样是一种失败。
+
+cases:
+  - id: quote_lookup
+    message: "贵州茅台现在多少钱？"
+    expect_tools: [get_quote, search_stock]
+    why: 查价要么直接给代码，要么先解析中文名
+
+  - id: trend_lookup
+    message: "600519 最近走势怎么样？"
+    expect_tools: [get_history, get_indicators]
+    why: 走势需要历史或指标，不该去调策略工具
+
+  - id: strategy_request
+    message: "帮我做一个 20 日均线上穿 60 日买入的策略"
+    expect_tools: [validate_strategy, get_history, search_stock, get_indicators]
+    require_valid_args: true
+    why: 策略 JSON 是最复杂的参数（嵌套对象 + 字段配套），示例应该在这里体现价值
+
+  - id: memory_followup
+    message: "我上次说的止损是多少来着？"
+    expect_tools: [memory_search]
+    why: 指向过去说过的话 —— 这是 memory_search 存在的唯一理由
+
+  - id: risk_check
+    message: "帮我看看 600519 的风险大不大"
+    expect_tools: [get_risk_metrics, get_history, get_indicators]
+    why: 风险要波动率/回撤，不该凭印象说
+
+  - id: model_reference
+    message: "你们的模型预测现在能用吗？"
+    expect_tools: [get_model_status, get_model_consensus]
+    why: 问"模型能不能参考"就该去查诊断，而不是编一个说法
+
+  # ==================== 外部数据源（T2a） ====================
+  # 这几个用例的作用不只是"新工具能不能被选中"，更是**工具面变大之后旧工具还选不选得对**：
+  # 定义从 5358 字符涨到 7206 字符，选择的难度是上升的。上面的用例就是那条基线。
+
+  - id: news_market
+    message: "今天有什么消息？"
+    expect_tools: [get_news]
+    why: 问消息面就该查快讯，而不是凭训练数据编
+
+  - id: news_symbol
+    message: "贵州茅台最近有什么新闻吗？"
+    expect_tools: [get_news]
+    why: 个股新闻；它直接吃中文名，不必先 search_stock
+
+  - id: news_reason
+    # mode: loop —— "为什么跌"是典型的多步问题（可能先看行情再看消息），
+    # 只看第一次 LLM 调用会把正常流程误判成"没查新闻"
+    mode: loop
+    message: "宁德时代今天为什么跌？"
+    expect_tools: [get_news]
+    why: 解释涨跌必须有消息面证据，不能凭印象编原因
+
+  - id: financial_lookup
+    message: "茅台 2026 年中报的净利润是多少？"
+    expect_tools: [get_financial_abstract]
+    why: 财报问题要用财报工具，拿行情数字凑是错的
+
+  - id: quote_comparison
+    message: "对比一下贵州茅台和五粮液今天的表现"
+    expect_tools: [get_quotes, get_quote]
+    why: 对比场景该用一次请求的批量行情（这也是 get_quotes 存在的唯一理由）
+
+  - id: unknown_stock_should_be_resolved
+    message: "帮我查一下双汇发展现在多少钱"
+    expect_tools: [get_quote, search_stock]
+    why: 名称 → 代码的解析路径，别直接猜代码
+
+  - id: greeting_should_not_call_tools
+    message: "你好呀"
+    expect_no_tool: true
+    why: 打招呼不该触发任何工具调用（过度调用也是失败）
+
+  - id: chitchat_should_not_call_tools
+    message: "谢谢，你辛苦了"
+    expect_no_tool: true
+    why: 同上：工具调用是有成本的，别用在寒暄上
+
+  # ==================== 复杂参数：示例真正该起作用的地方 ====================
+  # 上面那些用例的参数只有一个 symbol，模型怎么写都对；
+  # 下面这两个才是"schema 只能表达结构、示例才能表达约定"的场景。
+
+  - id: history_with_explicit_days
+    message: "给我 600519 最近 30 天的日线"
+    expect_tools: [get_history]
+    expect_args_kv:
+      get_history: { days: 30 }
+    why: 要把"最近 30 天"映射到 days 参数（而不是误填到别处或漏掉）
+
+  - id: strategy_with_full_parameters
+    # mode: loop = 真跑一整轮 agent（含真实工具与网络），因为策略生成天然是多步的：
+    # 模型会先查行情/指标再给策略 JSON，只看第一次 LLM 调用会把正常流程误判成"没调策略工具"
+    mode: loop
+    message: "帮我做个策略：贵州茅台，20 日上穿 60 日买入，止损 8%，止盈 15%，跟踪止盈 10%，初始资金 20 万，半仓"
+    expect_tools: [validate_strategy, finalize_strategy]
+    expect_args_contains: [stop_loss_pct, take_profit_pct, trailing_stop_pct]
+    require_valid_args: true
+    why: >-
+      一句话里有五个参数要落到嵌套 JSON 的正确位置，而且止损是负数、仓位是 size_pct ——
+      schema 只保证"结构合法"，写错位置它照样合法。这是示例存在的理由。

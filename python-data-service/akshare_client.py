@@ -1,10 +1,11 @@
-﻿"""
+"""
 数据客户端
 - 实时行情/概况：腾讯单股 API（快速，带 15s TTL 缓存）
 - K线历史：腾讯 ifzq API
 - 批量/分析数据：akshare（后续 LLM 使用）
 """
 import logging
+import re
 import time
 from typing import Optional
 import requests
@@ -17,18 +18,37 @@ HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 
 def normalize_symbol(symbol: str) -> str:
-    """转为腾讯格式：sh600519 / sz000001"""
+    """转为腾讯格式：sh600519 / sz000001 / hk00700 / usAAPL
+
+    ⚠️ 美股代码必须**大写**（`usAAPL`）。小写 `usaapl` 腾讯会回 `v_pv_none_match`
+    （实测 2026-09-16），改造前这里是小写，于是 `get_quote("AAPL")` 一直返回 None ——
+    行情接口"看起来在工作、只是这只票没有数据"，这类静默失败最难发现。
+    """
     s = symbol.strip().upper()
-    s = s.removeprefix("SH").removeprefix("SZ").removeprefix("HK").removeprefix("US")
-    if s.startswith("6"):
-        return f"sh{s}"
-    elif s.startswith("0") or s.startswith("3") or s.startswith("2"):
-        return f"sz{s}"
-    elif s.startswith("8") or s.startswith("4") or s.startswith("92"):
-        return f"bj{s}"
-    elif s.isalpha() and s.isascii():
-        # 美股代码（纯字母，如 AAPL/TSLA）→ 腾讯 API 需要 us 前缀
-        return f"us{s.lower()}"
+    if s.startswith("HK"):
+        return f"hk{s[2:].zfill(5)}"
+    if s.startswith("SH"):
+        return f"sh{s[2:]}"
+    if s.startswith("SZ"):
+        return f"sz{s[2:]}"
+    if s.startswith("BJ"):
+        return f"bj{s[2:]}"
+    if s.startswith("US"):
+        return f"us{s[2:].upper()}"
+    if s.isdigit():
+        # 4/5 位纯数字：港股（如 00700/09618）；6 位：A 股
+        if len(s) == 4 or len(s) == 5:
+            return f"hk{s.zfill(5)}"
+        if len(s) == 6:
+            if s.startswith("6"):
+                return f"sh{s}"
+            if s[0] in "023":
+                return f"sz{s}"
+            return f"bj{s}"  # 4/8/92 开头 → 北交所
+        return s
+    if s.isalpha() and s.isascii():
+        # 美股代码（纯字母，如 AAPL/TSLA）→ 腾讯 API 需要 us 前缀 + 大写代码
+        return f"us{s.upper()}"
     return s
 
 
@@ -87,6 +107,9 @@ def resolve_symbol(symbol_or_keyword: str) -> Optional[str]:
         return upper
     if s.isdigit() and len(s) == 6:
         return s
+    if s.isdigit() and len(s) in (4, 5):
+        # 港股代码（如 0700 腾讯 → 00700），避免掉进 A 股搜索的"静默查不到"
+        return s.zfill(5)
     if upper.isalpha() and upper.isascii() and 1 <= len(upper) <= 5:
         return upper  # 美股代码如 AAPL TSLA
 
@@ -115,6 +138,38 @@ _history_cache_lock = threading.Lock()
 HISTORY_CACHE_TTL = 3600  # 日/周/月 K：1 小时
 MINUTE_CACHE_TTL = 30     # 分钟 K：30 秒
 
+# 一次批量行情最多取多少只（腾讯接口对 URL 长度敏感，50 只约 500 字符，很安全）
+QUOTE_BATCH_LIMIT = 50
+
+
+def _parse_quote_text(text: str) -> Optional[dict]:
+    """解析腾讯行情返回的一段 `v_xxx="a~b~c";`，异常形状返回 None。
+
+    抽出来是因为批量行情（`get_quotes`）用的是同一个响应格式：
+    两处各写一遍解析，就是两处各自会漂移的地方。
+    """
+    if not text or "=" not in text or '"' not in text:
+        return None
+    parts = text.split('"')[1].split("~")
+    if len(parts) < 40:
+        return None
+    return {
+        "代码": parts[2],
+        "名称": parts[1],
+        "最新价": parts[3],
+        "昨收": parts[4],
+        "今开": parts[5],
+        "最高": parts[33],
+        "最低": parts[34],
+        "成交量": parts[6],
+        "成交额": parts[37],
+        "涨跌幅": parts[32],
+        "涨跌额": parts[31],
+        "总市值": parts[45] if len(parts) > 45 else "0",
+        "流通市值": parts[44] if len(parts) > 44 else "0",
+        "市盈率-动态": parts[39] if len(parts) > 39 else "0",
+    }
+
 
 def get_quote(symbol: str) -> Optional[dict]:
     """获取实时行情（腾讯单股 API，毫秒级），带 15s 缓存。
@@ -140,32 +195,10 @@ def get_quote(symbol: str) -> Optional[dict]:
         code = normalize_symbol(resolved)
         r = requests.get(f"http://qt.gtimg.cn/q={code}", headers=HEADERS, timeout=10)
         r.encoding = "gbk"
-        text = r.text.strip()
-        if "=" not in text:
-            logger.warning("腾讯行情返回空: %s (resolved=%s)", symbol, code)
+        result = _parse_quote_text(r.text.strip())
+        if result is None:
+            logger.warning("腾讯行情返回空或格式异常: %s (resolved=%s)", symbol, code)
             return None
-
-        parts = text.split('"')[1].split("~")
-        if len(parts) < 40:
-            logger.warning("腾讯行情格式异常: %s (parts=%d)", symbol, len(parts))
-            return None
-
-        result = {
-            "代码": parts[2],
-            "名称": parts[1],
-            "最新价": parts[3],
-            "昨收": parts[4],
-            "今开": parts[5],
-            "最高": parts[33],
-            "最低": parts[34],
-            "成交量": parts[6],
-            "成交额": parts[37],
-            "涨跌幅": parts[32],
-            "涨跌额": parts[31],
-            "总市值": parts[45] if len(parts) > 45 else "0",
-            "流通市值": parts[44] if len(parts) > 44 else "0",
-            "市盈率-动态": parts[39] if len(parts) > 39 else "0",
-        }
 
         # 3. 写入缓存
         with _quote_cache_lock:
@@ -175,6 +208,77 @@ def get_quote(symbol: str) -> Optional[dict]:
     except Exception as e:
         logger.error("get_quote 异常: %s -> %s", symbol, e)
         return None
+
+
+def _code_key(value) -> str:
+    """把"各种写法的代码"归一成同一个查找键。
+
+    腾讯的批量响应回来的代码**不一定**是你请求的那一个：
+    美股会带上交易所后缀（实测请求 `usAAPL` 回来的是 `AAPL.OQ`）。
+    按原样比较就会静默少一只股票 —— 而"少了一只"在下游看起来像是"这只票没行情"。
+    """
+    text = str(value or "").strip().upper()
+    text = re.sub(r"^(SH|SZ|BJ|HK|US)", "", text)
+    return text.split(".")[0]
+
+
+def get_quotes(symbols) -> dict:
+    """批量行情：**一次** HTTP 请求取多只标的（腾讯行情支持逗号分隔）。
+
+    实测（2026-09-16，本机）：5 只标的 0.05s，一次往返；逐个调用则是 5 次往返。
+    全部走"先查 15s 缓存、只把缺失的合并成一次请求"，所以与 `get_quote` 共享同一份缓存语义。
+
+    为什么不用"整市场快照"（`akshare.stock_zh_a_spot_em`）：实测它按 59 页翻页抓取，
+    本机直接 `ConnectionError`（7.9s 后断开）—— 用一个会失败的 59 次请求去省 N 次请求，
+    是拿稳定性换一个并不存在的性能问题。
+
+    返回 {调用方给的符号: 行情 or None}；解析不出代码的符号直接给 None，不抛异常。
+    """
+    wanted = [str(s).strip() for s in (symbols or []) if str(s).strip()]
+    # 去重但保持顺序：模型可能把同一只股票写两遍
+    unique = list(dict.fromkeys(wanted))[:QUOTE_BATCH_LIMIT]
+    result: dict = {symbol: None for symbol in unique}
+    if not unique:
+        return result
+
+    now = time.time()
+    missing: list[tuple[str, str]] = []
+    with _quote_cache_lock:
+        for symbol in unique:
+            entry = _quote_cache.get(symbol)
+            if entry and now - entry[0] < QUOTE_CACHE_TTL:
+                result[symbol] = entry[1]
+            else:
+                resolved = resolve_symbol(symbol)
+                if not resolved:
+                    logger.warning("无法识别股票代码/名称: %s", symbol)
+                    continue
+                missing.append((symbol, normalize_symbol(resolved)))
+
+    if not missing:
+        return result
+
+    try:
+        codes = ",".join(code for _, code in missing)
+        r = requests.get(f"http://qt.gtimg.cn/q={codes}", headers=HEADERS, timeout=15)
+        r.encoding = "gbk"
+        # 响应的顺序**不保证**与请求一致，所以按代码回填，而不是按位置；
+        # 代码还要归一化（美股会带 .OQ/.N 之类的后缀）
+        by_code: dict = {}
+        for chunk in r.text.split(";"):
+            quote = _parse_quote_text(chunk.strip())
+            if quote:
+                by_code[_code_key(quote.get("代码"))] = quote
+
+        with _quote_cache_lock:
+            for symbol, code in missing:
+                quote = by_code.get(_code_key(code))
+                if quote:
+                    result[symbol] = quote
+                    _quote_cache[symbol] = (now, quote)
+    except Exception as e:
+        logger.error("get_quotes 异常: %s -> %s", unique, e)
+    return result
 
 
 def get_history(symbol: str, start_date: str = "", end_date: str = "", period: str = "day") -> Optional[list[dict]]:
@@ -212,9 +316,14 @@ def get_history(symbol: str, start_date: str = "", end_date: str = "", period: s
 
         code_key = code.lower()
         klines = None
-        if code_key in data.get("data", {}):
-            day_data = data["data"][code_key]
-            klines = day_data.get(f"qfq{period}") or day_data.get(period)
+        # 响应的 data 键会**原样回显**请求里的大小写（实测：请求 usAAPL 得到键 usAAPL，
+        # 请求 usaapl 得到 usaapl），所以按大小写不敏感匹配，别再假设它是小写。
+        data = data.get("data", {}) if isinstance(data, dict) else {}
+        for key, payload in (data or {}).items():
+            if str(key).lower() != code_key or not isinstance(payload, dict):
+                continue
+            klines = payload.get(f"qfq{period}") or payload.get(period)
+            break
 
         if not klines:
             logger.warning("历史数据为空: %s (period=%s, code=%s)", symbol, period, code)
@@ -304,22 +413,57 @@ def get_overview(symbol: str) -> Optional[dict]:
 _stock_list_cache: list[dict] = []
 _stock_list_lock = threading.Lock()
 _stock_list_loaded = False
+_stock_list_failed_at = 0.0
+# 名单加载失败后的冷却：失败一次要 6 秒（实测 5564 条 / 18 页），
+# 不设冷却的话，上游一挂，**每一次** search_stock 都要白等 6 秒才报错。
+STOCK_LIST_RETRY_COOLDOWN = 60
 
 
 def _load_stock_list() -> list[dict]:
-    """一次性加载全 A 股名单并缓存（~5000 条）。"""
-    global _stock_list_cache, _stock_list_loaded
+    """一次性加载全 A 股名单并缓存（~5000 条，实测 5564 条 / 6.2s / 18 页）。"""
+    global _stock_list_cache, _stock_list_loaded, _stock_list_failed_at
     if _stock_list_loaded:
         return _stock_list_cache
     with _stock_list_lock:
         if _stock_list_loaded:
             return _stock_list_cache
+        if _stock_list_failed_at and time.time() - _stock_list_failed_at < STOCK_LIST_RETRY_COOLDOWN:
+            raise RuntimeError(
+                "全 A 股名单加载失败，正在冷却（约 60 秒后自动重试）；"
+                "请稍后再试，或直接使用 6 位股票代码（如 600519）")
         logger.info("正在加载全 A 股名单...")
-        df = akshare.stock_info_a_code_name()
+        try:
+            df = akshare.stock_info_a_code_name()
+        except Exception:
+            _stock_list_failed_at = time.time()
+            raise
         _stock_list_cache = [{"code": str(r["code"]), "name": str(r["name"])} for _, r in df.iterrows()]
         _stock_list_loaded = True
+        _stock_list_failed_at = 0.0
         logger.info("全 A 股名单加载完成，共 %d 条", len(_stock_list_cache))
     return _stock_list_cache
+
+
+def warm_stock_list(background: bool = True) -> None:
+    """提前把全 A 股名单加载进内存。
+
+    为什么值得：首个 `search_stock` 要等 6 秒（上游按 18 页翻），而它的工具超时是 20 秒 ——
+    冷启动时用户会真的等这么久。启动时预热把它挪到没人等的时段；
+    后台线程失败也不影响任何事，`search_stocks` 仍然会自己按冷却重试。
+    """
+    if _stock_list_loaded:
+        return
+
+    def _warm():
+        try:
+            _load_stock_list()
+        except Exception as e:  # noqa: BLE001 —— 预热失败不是错误，只是没省下这 6 秒
+            logger.warning("全 A 股名单预热失败（首次搜索时会重试）：%s", e)
+
+    if not background:
+        _warm()
+        return
+    threading.Thread(target=_warm, name="warm-stock-list", daemon=True).start()
 
 
 def search_stocks(keyword: str) -> list[dict]:
@@ -332,3 +476,227 @@ def search_stocks(keyword: str) -> list[dict]:
         if s["code"].startswith(keyword_upper) or keyword_upper in s["name"].upper()
     ]
     return results[:20]
+
+
+# ==================== 外部数据集（T2a）：新闻 / 财报 ====================
+#
+# 这里**刻意不做缓存**：TTL 与健康状态统一归 `agent/external_source.py`（按数据集分级）。
+# 一个函数里既取数又管缓存又管降级，最后一定会有人加错地方（本项目的历史上，
+# 15s/1h/30s 三档 TTL 就散在三处）。这里只负责"把上游的表格变成结构化数据"。
+
+# 单条正文上限：实测 `stock_news_em` 的正文均值只有 119 字，
+# 超过这个长度的基本都是通稿/研报摘要，留标题和开头就够判断"这条讲什么"。
+NEWS_ITEM_CHARS = 300
+NEWS_MAX_ITEMS = 30
+FINANCIAL_MAX_PERIODS = 8
+
+# 财务摘要里值得给模型的指标（原来一张表 80 行 × 100+ 列，直接塞进上下文是灾难）
+FINANCIAL_METRICS = (
+    "归母净利润", "营业总收入", "净利润", "扣非净利润", "股东权益合计(净资产)",
+    "经营现金流量净额", "基本每股收益", "每股净资产", "净资产收益率(ROE)",
+    "毛利率", "销售净利率", "资产负债率",
+)
+# 金额类指标统一换算成"亿元"：原值是元，44516880421.86 这种数字模型没法一眼比较
+FINANCIAL_YI_METRICS = frozenset({
+    "归母净利润", "营业总收入", "净利润", "扣非净利润", "股东权益合计(净资产)", "经营现金流量净额",
+})
+FINANCIAL_UNITS = {
+    **{name: "亿元" for name in FINANCIAL_YI_METRICS},
+    "基本每股收益": "元", "每股净资产": "元",
+    "净资产收益率(ROE)": "%", "毛利率": "%", "销售净利率": "%", "资产负债率": "%",
+}
+
+
+def _clip_text(value, limit=NEWS_ITEM_CHARS) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _news_rows(df, source_kind: str) -> list[dict]:
+    """把东财新闻/快讯的 DataFrame 归一成同一种结构，并**按时间升序**排列。
+
+    <h3>为什么必须显式排序（这是实测踩到的坑）</h3>
+    `akshare.stock_news_em` 返回的顺序**不是时间序**（实测 600519：第一条 2026-08-15、
+    第二条 2026-09-14、第三条 2026-09-08……）。而下游的字符裁剪是"保留尾部"
+    （因为行情类数据尾部最新）。两者一撞，"裁剪后剩下的"就是一批**随机**的新闻 ——
+    看起来正常、实际全是过期消息，是最难发现的那类错误。
+
+    所以：归一化阶段统一排成升序（旧 → 新），让"留尾部"重新等于"留最新"。
+    `stock_info_global_em` 本身是降序（最新在前），也一并反过来。
+    """
+    items = []
+    if df is None or getattr(df, "empty", True):
+        return items
+    for _, row in df.iterrows():
+        if source_kind == "symbol":
+            title = row.get("新闻标题")
+            summary = _clip_text(row.get("新闻内容"))
+            published = row.get("发布时间")
+            origin = row.get("文章来源")
+            url = row.get("新闻链接")
+        else:
+            title = row.get("标题")
+            summary = _clip_text(row.get("摘要"))
+            published = row.get("发布时间")
+            origin = "东方财富·全球快讯"
+            url = row.get("链接")
+        items.append({
+            "title": _clip_text(title, 120),
+            "summary": summary,
+            "published_at": str(published or "").strip(),
+            "source": _clip_text(origin, 40),
+            "url": str(url or "").strip(),
+        })
+    # 时间缺失的排最前（它们最可能是脏数据，正好在"留尾部"时优先被丢掉）
+    items.sort(key=lambda item: item["published_at"])
+    return items
+
+
+def is_a_share(symbol: str) -> bool:
+    """是不是 6 位纯数字 A 股代码（东财的个股接口只认这个）。"""
+    text = str(symbol or "").strip()
+    return len(text) == 6 and text.isdigit()
+
+
+def get_symbol_news(symbol: str, limit: int = 10) -> dict:
+    """个股新闻（东方财富）。`symbol` 必须是 6 位 A 股代码（调用方先解析）。"""
+    size = _clamp_int(limit, 10, NEWS_MAX_ITEMS)
+    df = akshare.stock_news_em(symbol=str(symbol))
+    items = _news_rows(df, "symbol")
+    return {"scope": "symbol", "symbol": str(symbol), "items": items[-size:],
+            "note": "个股新闻（东方财富），已按发布时间升序，最后一条最新。"}
+
+
+def get_market_news(limit: int = 10) -> dict:
+    """全市场财经快讯（东方财富），按发布时间升序。"""
+    size = _clamp_int(limit, 10, NEWS_MAX_ITEMS)
+    df = akshare.stock_info_global_em()
+    items = _news_rows(df, "market")
+    return {"scope": "market", "symbol": None, "items": items[-size:],
+            "note": "全市场财经快讯（东方财富），已按发布时间升序，最后一条最新。"}
+
+
+def get_news(symbol: str = "", limit: int = 10) -> dict:
+    """取新闻：给了 A 股代码就取个股新闻，否则取全市场快讯。
+
+    Returns:
+        {"scope": "symbol"/"market", "symbol": 代码 or None, "items": [...]}
+        —— 空结果返回 `{"items": []}`，由上层决定怎么说（"今天没消息"是合法答案）
+    """
+    if symbol and str(symbol).strip():
+        resolved = str(resolve_symbol(str(symbol).strip()) or "").strip()
+        if is_a_share(resolved):
+            return get_symbol_news(resolved, limit)
+        # 东财个股新闻只认 6 位 A 股代码；港股/美股/北交所走市场快讯，别假装查到了
+        logger.info("get_news 不支持该标的的个股新闻，回退市场快讯: %s", symbol)
+    return get_market_news(limit)
+
+
+def _clamp_int(value, default: int, maximum: int) -> int:
+    try:
+        return max(1, min(int(value), maximum))
+    except (TypeError, ValueError):
+        return default
+
+
+def _period_label(period: str) -> str:
+    """20260630 → 2026年中报（让人一眼看懂，不必自己数月份）。"""
+    period = str(period or "")
+    if len(period) != 8 or not period.isdigit():
+        return period
+    year, month = period[:4], period[4:6]
+    return {"03": f"{year}一季报", "06": f"{year}中报",
+            "09": f"{year}三季报", "12": f"{year}年报"}.get(month, f"{year}-{month}")
+
+
+def _to_yi(value):
+    try:
+        return round(float(value) / 1e8, 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def get_financial_abstract(symbol: str, periods: int = 4) -> Optional[dict]:
+    """取财务摘要（东方财富），只保留少数关键指标与最近若干报告期。
+
+    上游是 80 行 × 100+ 列的宽表（每个报告期一列，最早到 1998 年）——
+    原样进上下文既烧钱又没用。这里做两件事：挑关键指标、只取最近几个报告期，
+    并顺手算两个同比（归母净利润、营业总收入），因为"同比"才是看财报的第一个问题。
+    """
+    if not symbol or not str(symbol).strip():
+        return None
+    resolved = str(resolve_symbol(str(symbol).strip()) or "").strip()
+    if not is_a_share(resolved):
+        logger.info("财务摘要仅支持 A 股 6 位代码: %s", symbol)
+        return None
+
+    size = _clamp_int(periods, 4, FINANCIAL_MAX_PERIODS)
+    code = resolved
+
+    df = akshare.stock_financial_abstract(symbol=code)
+    if df is None or getattr(df, "empty", True):
+        return None
+
+    columns = [str(c) for c in df.columns if str(c).isdigit() and len(str(c)) == 8]
+    latest = sorted(columns, reverse=True)[:size]
+    if not latest:
+        return None
+
+    by_indicator: dict = {}
+    for _, row in df.iterrows():
+        indicator = str(row.get("指标") or "").strip()
+        if indicator in FINANCIAL_METRICS and indicator not in by_indicator:
+            by_indicator[indicator] = row
+
+    result_periods = []
+    for period in latest:
+        metrics: dict = {}
+        for indicator, row in by_indicator.items():
+            raw = row.get(period)
+            if raw is None or (isinstance(raw, float) and raw != raw):  # NaN
+                continue
+            metrics[indicator] = _to_yi(raw) if indicator in FINANCIAL_YI_METRICS else _clean_number(raw)
+        yoy: dict = {}
+        for indicator in ("归母净利润", "营业总收入"):
+            if indicator not in by_indicator or len(period) != 8:
+                continue
+            previous = f"{int(period[:4]) - 1}{period[4:]}"
+            current_value = _to_yi(by_indicator[indicator].get(period))
+            previous_value = _to_yi(by_indicator[indicator].get(previous))
+            if current_value is None or not previous_value:
+                continue
+            yoy[indicator] = round((current_value / previous_value - 1) * 100, 2)
+        result_periods.append({
+            "period": period, "period_label": _period_label(period),
+            "metrics": metrics, "yoy_pct": yoy,
+        })
+
+    return {
+        "symbol": code,
+        "name": _stock_name(code),
+        "periods": result_periods,
+        "units": {name: FINANCIAL_UNITS.get(name, "") for name in by_indicator},
+        "note": ("按报告期披露的财务摘要（东方财富）；yoy_pct 是与去年同期的同比增速。"
+                 "财报是已发生的事实，不能用来预测股价。"),
+    }
+
+
+def _clean_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return value
+    if number != number:  # NaN
+        return None
+    # 比率类可能是小数（0.1234）也可能是百分数，保持原值，只做精度收敛
+    return round(number, 4) if abs(number) < 1000 else round(number, 2)
+
+
+def _stock_name(code: str) -> str:
+    """从名字缓存里取股票名；取不到就返回空串（不为了一个装饰字段去拉网络）。"""
+    if not _stock_list_loaded:
+        return ""
+    for item in _stock_list_cache:
+        if item.get("code") == code:
+            return str(item.get("name") or "")
+    return ""

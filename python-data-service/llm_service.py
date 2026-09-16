@@ -15,6 +15,7 @@ llm_service.py —— LLM 客户端（DeepSeek）
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -268,8 +269,6 @@ def _build_user_prompt(user_message: str, context: dict) -> str:
             parts.append(f"- 实时行情: {context['quote']}")
         if "indicators" in context:
             parts.append(f"- 技术指标: {context['indicators']}")
-        if "prediction" in context:
-            parts.append(f"- 模型预测: {context['prediction']}")
         if "history_summary" in context:
             parts.append(f"- 历史摘要: {context['history_summary']}")
         if "watchlist" in context and context["watchlist"]:
@@ -302,11 +301,6 @@ def _fallback_reply(user_message: str, context: dict, reason: str) -> str:
                 lines.append(f"📡 信号: {indi['signal']}")
             if "rsi" in indi:
                 lines.append(f"📈 RSI: {indi['rsi']}")
-    if "prediction" in context and context["prediction"]:
-        pred = context["prediction"]
-        if isinstance(pred, dict) and "predicted_change_pct" in pred:
-            lines.append(f"🔮 模型预测明日: {pred['predicted_change_pct']:+.2f}%")
-
     if not lines:
         return f"（{reason}）\n" + _simple_greet(user_message)
 
@@ -356,6 +350,12 @@ def split_replies(text: str, max_len: int = 1600) -> list[str]:
 
 
 def chat_completion(messages, tools=None, temperature=0.2, max_tokens=1200):
+    """agent 循环用的底层调用：返回 choices[0]，**同时把用量记进计量（P1）**。
+
+    为什么要在这里记而不是在调用方：这是所有 LLM 调用的必经之路（agent 循环、摘要巩固、
+    评测都走它）。记在调用方就意味着"以后新增的调用点忘了记"—— 而成本数字一旦漏记，
+    比没有数字更糟（会让人以为很便宜）。
+    """
     if not _is_available():
         return {"message": {"role": "assistant", "content": "AI 服务暂不可用"}}
     payload = {"model": MODEL, "messages": messages,
@@ -364,6 +364,24 @@ def chat_completion(messages, tools=None, temperature=0.2, max_tokens=1200):
         payload["tools"] = tools
     url = f"{BASE_URL}/v1/chat/completions"
     headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
-    resp = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
-    resp.raise_for_status()
-    return resp.json()["choices"][0]
+    started = time.time()
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
+        resp.raise_for_status()
+        body = resp.json()
+    except Exception:
+        _record_llm_usage(ok=False, latency_ms=int((time.time() - started) * 1000))
+        raise
+    _record_llm_usage(ok=True, latency_ms=int((time.time() - started) * 1000), body=body)
+    return body["choices"][0]
+
+
+def _record_llm_usage(*, ok, latency_ms, body=None):
+    """记一次 LLM 调用的用量。计量失败**绝不影响** LLM 调用本身。"""
+    try:
+        from agent import metering
+
+        metering.record_llm(model=MODEL, latency_ms=latency_ms, ok=ok,
+                            **metering.parse_usage(body))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("LLM 用量记录失败: %s", exc)
