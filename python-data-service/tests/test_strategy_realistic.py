@@ -105,3 +105,69 @@ def test_compare_executions_returns_both_models():
     for name in ("ideal", "realistic"):
         for key in ("total_return_pct", "max_drawdown_pct", "trade_count"):
             assert key in cmp[name], (name, key)
+
+
+# ==================== 买不起一手：必须说明原因，不能只是"0 笔交易" ====================
+# 真实场景：agent 给茅台（约 1455 元/股）生成了 initial_capital=100000 的策略，
+# 而一手 100 股 ≈ 14.5 万 > 10 万 —— 回测里信号触发了 22 次、一笔都没成交，
+# 而回复只写"交易笔数：0"。用户根本不知道是没钱还是没信号。
+
+def test_insufficient_capital_for_one_lot_is_explained():
+    cfg = dict(CONFIG)
+    cfg["initial_capital"] = 1000.0     # 一手（100 股 × 约 113 元）都买不起
+    result = run_backtest_realistic(cfg, make_bars())
+
+    assert result["trade_count"] == 0
+    note = result.get("funding_note")
+    assert note, "买不起一手时必须给出说明，而不是静默 0 笔"
+    assert "一手" in note and "1000" in note
+
+
+def test_no_funding_note_when_capital_is_enough():
+    result = run_backtest_realistic(CONFIG, make_bars())
+    assert result["trade_count"] > 0
+    assert result.get("funding_note") is None
+
+
+def test_no_funding_note_when_no_signal_fired_at_all():
+    """一次信号都没触发时不该误报"买不起" —— 那两件事必须分得清。"""
+    cfg = dict(CONFIG)
+    cfg["entry"] = {"logic": "all", "conditions": [{"type": "price_above", "value": 99999.0}]}
+    result = run_backtest_realistic(cfg, make_bars())
+
+    assert result["trade_count"] == 0
+    assert result.get("funding_note") is None
+
+
+def test_reply_explains_zero_trades():
+    """回复里必须带上原因：用户看到的是文案，不是 trade_count。"""
+    from agent.react_agent import _build_strategy_reply
+    from agent.strategy_schema import validate_strategy_config
+
+    cfg = dict(CONFIG)
+    cfg["name"] = "pb"
+    cfg["initial_capital"] = 1000.0
+    parsed, err = validate_strategy_config(cfg)
+    assert err is None, err
+
+    backtest = run_backtest_realistic(cfg, make_bars())
+    reply = _build_strategy_reply(parsed, backtest)
+
+    assert "买不起一手" in reply
+    assert "把初始资金调高" in reply
+
+
+def test_reply_explains_a_strategy_that_never_fired():
+    from agent.react_agent import _build_strategy_reply
+    from agent.strategy_schema import validate_strategy_config
+
+    cfg = dict(CONFIG)
+    cfg["name"] = "pb"
+    cfg["entry"] = {"logic": "all", "conditions": [{"type": "price_above", "value": 99999.0}]}
+    parsed, err = validate_strategy_config(cfg)
+    assert err is None, err
+
+    backtest = run_backtest_realistic(cfg, make_bars())
+    reply = _build_strategy_reply(parsed, backtest)
+
+    assert "一次都没触发" in reply

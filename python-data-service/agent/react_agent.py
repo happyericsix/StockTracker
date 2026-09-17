@@ -81,10 +81,17 @@ SYSTEM_PROMPT = """你是股票策略助手。用户可能让你生成交易策�
 }
 ```
 
-条件 type 只能是：ma_cross（需 fast/slow/direction）、rsi_above（需 value）、
-rsi_below（需 value）、macd_cross（需 direction）、price_above（需 value）、
-price_below（需 value）、stop_loss_pct（需 value）、take_profit_pct（需 value）、
-trailing_stop_pct（需 value）。direction 只能是 above 或 below。
+条件 type 只能是：
+- ma_cross（需 fast/slow/direction）：两条均线交叉；
+- price_cross_ma（需 window/direction）、price_above_ma（需 window）、price_below_ma（需 window）：
+  价格与某条均线的关系（上穿/下穿，或在均线之上/之下）；
+- rsi_above / rsi_below（需 value）、macd_cross（需 direction）；
+- price_above / price_below（需 value）：绝对价位；
+- stop_loss_pct / take_profit_pct / trailing_stop_pct（需 value；止损用负数、止盈用正数）。
+direction 只能是 above 或 below。
+用户说"上穿 N 日线买入""跌破 N 日线卖出"时，用 price_cross_ma（window=N）——
+**不要用 ma_cross 近似**：那要求的是两条均线的交叉，与"价格与均线"不是同一件事，
+用了就是答非所问。"价格在 N 日线之上/之下"是状态，用 price_above_ma / price_below_ma。
 entry.logic / exit.logic 只能是 all 或 any。position.type 只能是 full 或 percent。
 如果用户没有指定股票，请先调用 search_stock 解析，不要擅自假设股票代码。"""
 
@@ -98,6 +105,13 @@ def _describe_conditions(conditions):
         ctype = cond.get("type", "")
         if ctype == "ma_cross":
             labels.append(f"MA{cond.get('fast')}/{cond.get('slow')} {cond.get('direction')}")
+        elif ctype == "price_cross_ma":
+            # 这是"事件"，中文里说"上穿/下穿"；直接拼 direction 会得到"价格above MA60"
+            labels.append(f"价格{'上穿' if cond.get('direction') == 'above' else '下穿'} "
+                          f"MA{cond.get('window')}")
+        elif ctype in {"price_above_ma", "price_below_ma"}:
+            labels.append(f"价格{'高于' if ctype == 'price_above_ma' else '低于'} "
+                          f"MA{cond.get('window')}")
         elif ctype == "macd_cross":
             labels.append(f"MACD {cond.get('direction')}")
         elif ctype in {"rsi_above", "rsi_below", "price_above", "price_below",
@@ -132,6 +146,14 @@ def _build_strategy_reply(cfg, backtest):
             f"- 胜率：{backtest.get('win_rate')}%",
             f"- 交易笔数：{backtest.get('trade_count')}",
         ])
+        # "0 笔交易"必须解释原因：可能是买不起一手（整手规则），也可能是一次信号都没触发。
+        # 不解释的话，用户看到的就是"策略已保存 + 全是 0"，根本无从判断。
+        if backtest.get("funding_note"):
+            lines.append(f"- ⚠️ {backtest['funding_note']} —— 因此整个回测没有成交。"
+                         f"把初始资金调高，或换一个价格更低的标的。")
+        elif not backtest.get("trade_count"):
+            lines.append("- ⚠️ 回测期内入场条件一次都没触发（规则可能过严、或回看窗口太短）："
+                         "这不代表策略有效，只代表这段行情里它没出手。")
     else:
         lines.append("- 当前历史数据不足，回测暂未完成；策略已保存，可稍后在策略详情重试。")
 
@@ -656,7 +678,10 @@ def _run_loop(user_id, messages, tool_log=None, tool_mode=None, role=None, seen=
                     summary = _build_strategy_reply(cfg, backtest)
                     return {
                         "replies": llm_service.split_replies(summary),
-                        "strategy_json": cfg.model_dump(),
+                        # exclude_none：条件模型有 6 个字段，不过滤的话每条条件都会带
+                        # 一串 "fast": null —— 这份 JSON 会落库、也会给人看，噪音没有价值。
+                        # 校验/引擎侧一律有默认值，缺字段不影响。
+                        "strategy_json": cfg.model_dump(exclude_none=True),
                         "backtest": backtest,
                     }
                 if retry_used:

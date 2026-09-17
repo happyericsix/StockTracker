@@ -137,6 +137,11 @@ def required_bars(config: dict) -> int:
             slow = _num(condition.get("slow")) or 0
             # 交叉需要"上一根"与"这一根"，所以是 slow + 1
             needed = max(needed, int(slow) + 1)
+        elif ctype in ("price_cross_ma", "price_above_ma", "price_below_ma"):
+            # 价格与均线：+1 同样是给"交叉要看上一根"留的（纯状态其实 window 根就够，
+            # 统一按 +1 算，宁可保守）
+            window = _num(condition.get("window")) or 0
+            needed = max(needed, int(window) + 1)
         elif ctype == "macd_cross":
             needed = max(needed, MACD_BARS)
         elif ctype in ("rsi_above", "rsi_below"):

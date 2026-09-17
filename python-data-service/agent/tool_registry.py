@@ -595,6 +595,7 @@ _SPECS = (
         description=("Validate a complete strategy JSON object. Required: schema_version=1.0, name, "
                      "symbol, entry.logic, entry.conditions, exit.logic, exit.conditions. Conditions "
                      "use type ma_cross/rsi_above/rsi_below/macd_cross/price_above/price_below/"
+                     "price_cross_ma/price_above_ma/price_below_ma/"
                      "stop_loss_pct/take_profit_pct/trailing_stop_pct."),
         parameters=_obj({"strategy_json": {"type": "object"}}, ["strategy_json"]),
         handler=_tool_validate_strategy,
@@ -623,6 +624,21 @@ _SPECS = (
                     "position": {"type": "percent", "size_pct": 50},
                     "entry": {"logic": "all", "conditions": [{"type": "rsi_below", "value": 30}]},
                     "exit": {"logic": "any", "conditions": [{"type": "rsi_above", "value": 70}]},
+                }
+            },
+            # 价格与均线的关系：用户说"上穿 60 日线买入、跌破 60 日线卖出"就是这一种。
+            # 以前没有这个类型，模型只能用"两条均线交叉"近似 —— 那不是用户要的东西。
+            {
+                "strategy_json": {
+                    "schema_version": "1.0",
+                    "name": "60 日线上下穿",
+                    "symbol": "600519",
+                    "data": {"period": "day", "lookback_days": 250},
+                    "entry": {"logic": "all", "conditions": [
+                        {"type": "price_cross_ma", "window": 60, "direction": "above"}]},
+                    "exit": {"logic": "any", "conditions": [
+                        {"type": "price_cross_ma", "window": 60, "direction": "below"},
+                        {"type": "stop_loss_pct", "value": -8}]},
                 }
             },
         ),

@@ -103,6 +103,83 @@ def test_evaluate_bar_returns_signal():
     assert out["signal"] in {"buy", "sell", "hold"}
     assert "matched_conditions" in out
 
+
+# ==================== 价格与均线的关系（补 DSL 缺口） ====================
+
+def make_step_bars(flat=30, up=20, down=30, base=100.0, high=120.0, low=80.0):
+    """先横盘、再跳上一个台阶、最后跌下来 —— 于是"上穿/下穿均线"的时刻是可预知的。
+
+    为什么要专门造这样一段：用随机的斜线序列测"交叉"，测试就得靠"在某个区间里存在"
+    这种模糊断言；而这两条规则（上穿买入、跌破卖出）恰恰是**必须精确**的那种。
+    """
+    prices = [base] * flat + [high] * up + [low] * down
+    return [{"date": f"2026-02-{i + 1:02d}", "open": p, "high": p + 1, "low": p - 1,
+             "close": p, "volume": 1000} for i, p in enumerate(prices)]
+
+
+def test_price_cross_ma_above_fires_exactly_on_the_jump():
+    bars = make_step_bars()
+    ind = compute_indicators(bars)
+    rule = RuleGroup.model_validate({
+        "logic": "all",
+        "conditions": [{"type": "price_cross_ma", "window": 20, "direction": "above"}]})
+    fired = [i for i in range(len(bars)) if evaluate_rule(rule, ind, i, None)[0]]
+    assert fired == [30], fired   # 台阶那一根上穿，之后是"状态"而不是"事件"
+
+
+def test_price_cross_ma_below_fires_exactly_on_the_drop():
+    bars = make_step_bars()
+    ind = compute_indicators(bars)
+    rule = RuleGroup.model_validate({
+        "logic": "all",
+        "conditions": [{"type": "price_cross_ma", "window": 20, "direction": "below"}]})
+    fired = [i for i in range(len(bars)) if evaluate_rule(rule, ind, i, None)[0]]
+    assert fired == [50], fired
+
+
+def test_price_above_ma_is_a_state_not_an_event():
+    """状态在均线上方的**每一根**都成立 —— 这正是它与"上穿"的区别，也是它不能当入场条件的原因。"""
+    bars = make_step_bars()
+    ind = compute_indicators(bars)
+    rule = RuleGroup.model_validate({
+        "logic": "all", "conditions": [{"type": "price_above_ma", "window": 20}]})
+    fired = [i for i in range(len(bars)) if evaluate_rule(rule, ind, i, None)[0]]
+    assert len(fired) > 1
+    assert 30 in fired and 45 in fired
+
+
+def test_price_below_ma_state_on_the_way_down():
+    bars = make_step_bars()
+    ind = compute_indicators(bars)
+    rule = RuleGroup.model_validate({
+        "logic": "all", "conditions": [{"type": "price_below_ma", "window": 20}]})
+    assert evaluate_rule(rule, ind, 60, None)[0] is True
+
+
+def test_price_vs_ma_is_false_while_the_average_is_undefined():
+    """均线还没算出来时既不是"之上"也不是"之下" —— 否则会在数据开头误触发。"""
+    bars = make_step_bars()
+    ind = compute_indicators(bars)
+    for condition_type in ("price_above_ma", "price_below_ma"):
+        rule = RuleGroup.model_validate({
+            "logic": "all", "conditions": [{"type": condition_type, "window": 20}]})
+        assert evaluate_rule(rule, ind, 5, None)[0] is False, condition_type
+    cross = RuleGroup.model_validate({
+        "logic": "all",
+        "conditions": [{"type": "price_cross_ma", "window": 20, "direction": "above"}]})
+    assert evaluate_rule(cross, ind, 0, None)[0] is False
+
+
+def test_price_vs_ma_works_for_windows_the_engine_does_not_precompute():
+    """引擎只预算 5/10/20/60 日线；用户说"跌破 30 日线"时也要能算（按需计算）。"""
+    bars = make_step_bars()
+    ind = compute_indicators(bars)
+    rule = RuleGroup.model_validate({
+        "logic": "all",
+        "conditions": [{"type": "price_cross_ma", "window": 30, "direction": "above"}]})
+    assert any(evaluate_rule(rule, ind, i, None)[0] for i in range(len(bars)))
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

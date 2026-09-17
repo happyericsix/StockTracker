@@ -57,12 +57,52 @@ def _ma_for(ind, w):
         return _sma(ind["closes"], w)
     return arr
 
-def _crossed(a, b, i, direction):
+def _crossed(a, b, i, direction, *, eps=1e-9):
+    """第 i 根是否发生交叉。
+
+    <h3>为什么要容差（这是补 price_cross_ma 时测出来的）</h3>
+    均线是浮点累加/卷积算出来的：平盘 30 根 100 元，MA30 得到的是 **99.99999999999996**
+    而不是 100。于是"价格 100 从下方上穿 MA100"这种**恰好贴合**的情形，
+    会被 `a[i-1] <= b[i-1]` 判成"本来就在上方、没有上穿" —— 一次本该发生的信号被静默丢掉。
+    这就是典型的"看起来数学上没问题、跑起来偶尔少一笔"的 bug。
+
+    容差按两侧量级取相对值；"当前这一根"仍然要求严格越到另一侧（那是方向的定义）。
+    """
     if i == 0:
         return False
+    scale = max(abs(a[i-1]), abs(b[i-1])) * eps + eps
     if direction == "above":
-        return a[i-1] <= b[i-1] and a[i] > b[i]
-    return a[i-1] >= b[i-1] and a[i] < b[i]
+        return a[i-1] <= b[i-1] + scale and a[i] > b[i]
+    return a[i-1] >= b[i-1] - scale and a[i] < b[i]
+
+def _price_vs_ma(kind, ind, i, window, direction):
+    """价格与均线的关系：状态（在均线之上/之下）与事件（上穿/下穿）。
+
+    <h3>为什么必须把"状态"和"事件"分开</h3>
+    "上穿 60 日线买入"是**事件**：只在那根 K 线成立一次；
+    "价格在 60 日线之上"是**状态**：在均线上方的每一根都成立。
+    拿状态当入场条件会变成"只要在均线上方就一直买"（回测里表现为持仓期间不断触发，
+    实盘里就是反复下单）—— 所以两者都要有，而且要能一眼分清。
+    """
+    try:
+        window = int(window)
+    except (TypeError, ValueError):
+        return False
+    if window < 2 or i < 0 or i >= len(ind["closes"]):
+        return False
+    ma = _ma_for(ind, window)
+    closes = ind["closes"]
+    if np.isnan(closes[i]) or np.isnan(ma[i]):
+        # 均线还没算出来的那几根：既不是"之上"也不是"之下"，一律不成立
+        return False
+    if kind == "price_above_ma":
+        return bool(closes[i] > ma[i])
+    if kind == "price_below_ma":
+        return bool(closes[i] < ma[i])
+    if direction not in ("above", "below"):
+        return False
+    return _crossed(closes, ma, i, direction)
+
 
 def _cond_met(c, ind, i, position):
     t = c.type
@@ -84,6 +124,10 @@ def _cond_met(c, ind, i, position):
         return ind["closes"][i] >= c.value
     if t == "price_below":
         return ind["closes"][i] <= c.value
+    if t in ("price_cross_ma", "price_above_ma", "price_below_ma"):
+        # 不依赖持仓，所以在 position 检查之前返回
+        return _price_vs_ma(t, ind, i, getattr(c, "window", None),
+                            getattr(c, "direction", None))
     if position is None:
         return False
     entry = position.get("entry_price")
@@ -314,6 +358,10 @@ def run_backtest_realistic(
     benchmark_equity_curve = []
     round_trip_pnls = []
     holding_days = 0
+    # 信号触发了、但一手都买不起 —— 这是"策略已保存、回测 0 笔、用户不知道为什么"的
+    # 常见原因（茅台约 1455 元/股，一手 100 股 ≈ 14.5 万 > 10 万初始资金）。
+    # 生产行为（按整手买入）是对的，错的是**什么都不说**。
+    funding_note = None
 
     start_price = float(closes[20])
     benchmark_shares = float(cfg.initial_capital) / start_price
@@ -349,6 +397,11 @@ def run_backtest_realistic(
                         budget = cash if cfg.position.type == "full" else cash * (cfg.position.size_pct or 100) / 100.0
                         lots = int(budget / (o * (1.0 + comm) * lot)) if o > 0 else 0
                         sh = float(lots * lot)
+                        if lots == 0 and funding_note is None:
+                            one_lot_cost = lot * o + _comm_fee(lot * o, comm)
+                            funding_note = (
+                                f"初始资金 {cfg.initial_capital:.0f} 元买不起一手：{dates[f]} 的"
+                                f"{lot} 股约需 {one_lot_cost:.0f} 元")
                         while sh > 0:
                             fee = _comm_fee(sh * o, comm)
                             if sh * o + fee <= cash:
@@ -431,6 +484,8 @@ def run_backtest_realistic(
             "min_commission_yuan": 5.0, "fill": "next_open",
         },
         "data_points": len(records),
+        # 一手都买不起时说明原因（否则用户看到的只是"0 笔交易"，分不清是没钱还是没信号）
+        "funding_note": funding_note,
         "trade_log": trades, "equity_curve": equity_curve,
         "benchmark_equity_curve": benchmark_equity_curve,
         "start_date": ind["dates"][20], "end_date": ind["dates"][-1],

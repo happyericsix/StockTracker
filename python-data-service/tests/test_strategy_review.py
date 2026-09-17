@@ -114,6 +114,27 @@ def test_required_bars_follows_the_indicators_used():
         {"type": "rsi_below", "value": 30}]}, exit=plain_exit)) == 21
 
 
+def test_required_bars_counts_price_versus_ma_windows():
+    """价格与均线的条件同样吃窗口：回看不够照样"永不成交"。"""
+    entry = {"logic": "all",
+             "conditions": [{"type": "price_cross_ma", "window": 120, "direction": "above"}]}
+    plain_exit = {"logic": "any", "conditions": [{"type": "stop_loss_pct", "value": -8}]}
+
+    assert sr.required_bars(_base(entry=entry, exit=plain_exit)) == 121
+
+    tight = _base(entry=entry, exit=plain_exit, data={"period": "day", "lookback_days": 100})
+    finding = _one(sr.structural_findings(tight), "insufficient_lookback")[0]
+    assert finding["severity"] == sr.SEVERITY_HIGH
+
+
+def test_price_ma_state_conditions_are_recognised_by_the_structural_checks():
+    """结构检查不认识新类型就会把它当噪声漏过去 —— 这里确认它认得。"""
+    config = _base(entry={"logic": "all", "conditions": [
+        {"type": "price_above_ma", "window": 20}]},
+        exit={"logic": "any", "conditions": [{"type": "price_below_ma", "window": 20}]})
+    assert sr.structural_findings(config) == []
+
+
 # ==================== 4. 不可能成立的条件与组合 ====================
 
 

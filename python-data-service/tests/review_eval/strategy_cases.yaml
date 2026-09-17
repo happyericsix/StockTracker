@@ -36,17 +36,41 @@ cases:
           - {type: stop_loss_pct, value: -8}
       risk: {commission_pct: 0.1, slippage_pct: 0.1}
 
-  - id: vague_exit_has_no_exact_equivalent
-    # 这一条是**真跑抓出来的**：第一版把下面这句话当成"应该通过"，critic 判了 revise，
-    # 理由成立 —— "跌破 60 日"（价格跌破 60 日均线）与 JSON 里的
-    # "20 日均线下穿 60 日"（快慢线交叉）不是同一个条件。
-    # 更关键的是：**当前 DSL 里没有"价格与均线的关系"这种条件类型**，模型只能给近似解。
-    # 审查者的价值恰好在这里 —— 把"我只能给你近似写法"说出来，而不是当成已实现。
-    # 如果哪天 DSL 补了这类条件，honesty 检查会失败，提醒重新审视这条用例。
-    why: 用户的要求在当前 DSL 里没有等价的写法，模型只能给近似解 —— 必须判成"没完全实现"而不是通过
-    user_request: "帮我做个策略：20 日均线上穿 60 日买入，跌破 60 日卖出，止损 8%"
+  - id: price_cross_ma_matches_vague_wording
+    # **这条是补 DSL 缺口的验收**：同一句话（"跌破 60 日卖出"）在补上 price_cross_ma
+    # 之前无法精确表达，模型只能用"20 日均线下穿 60 日"近似；现在 JSON 用了正确的条件类型，
+    # 审查者应当判它通过。上一版这条用例期望 revise（当时确实是 DSL 缺口），
+    # 缺口补上后它变成了"该通过"的用例 —— 这正是当初把 honesty 检查写成
+    # "DSL 一旦有了等价条件就失败提醒"的用意。
+    why: 用户那句"跌破 60 日卖出"现在有等价写法了，JSON 用的就是它 —— 不许误报
+    user_request: "帮我做个策略：60 日线上穿买入，跌破 60 日线卖出，止损 8%"
+    expect_verdict: accept
+    strategy:
+      schema_version: "1.0"
+      name: "60 日线上下穿"
+      symbol: "600519"
+      initial_capital: 100000
+      data: {period: day, lookback_days: 250}
+      position: {type: percent, size_pct: 100}
+      entry:
+        logic: all
+        conditions:
+          - {type: price_cross_ma, window: 60, direction: above}
+      exit:
+        logic: any
+        conditions:
+          - {type: price_cross_ma, window: 60, direction: below}
+          - {type: stop_loss_pct, value: -8}
+      risk: {commission_pct: 0.1, slippage_pct: 0.1}
+
+  - id: approximation_instead_of_the_asked_rule
+    # 用户要的是"价格跌破 60 日线"，JSON 给的是"20 日均线下穿 60 日"（快慢线交叉）。
+    # 现在 DSL 里有正确写法了，所以这不再是"能力所限的近似"，而是**选错了条件类型** ——
+    # 审查者必须继续把它判成没实现（这条用例就是防止"补了类型但模型照旧用旧写法"）。
+    why: 用户要"价格跌破 60 日线"，JSON 用了均线交叉（approximation）—— DSL 有正确写法时这属于选错类型
+    user_request: "帮我做个策略：60 日线上穿买入，跌破 60 日线卖出，止损 8%"
     expect_verdict: revise
-    expect_dsl_gap: true
+    expect_absent_condition: price_cross_ma
     strategy:
       schema_version: "1.0"
       name: "20/60 均线交叉（近似）"

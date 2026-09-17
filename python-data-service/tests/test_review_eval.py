@@ -158,7 +158,10 @@ def test_strategy_cases_are_honest():
                 or case.get("expect_dsl_gap")), case["id"]
         if case.get("expect_dsl_gap"):
             # 声称"这句要求没有等价写法"：那就确认 DSL 里**确实**没有那类条件。
-            # 哪天有人补了（例如 price_below_ma），这里会失败，提醒重新审视这条用例。
+            # 目前没有任何用例这么标 —— 因为 price_cross_ma 已经把这个缺口补上了，
+            # 这条分支留着是给下一个"DSL 表达不了"的发现用的。
+            # 注意：一旦 price_*_ma 之外又出现新的等价条件，被标 dsl_gap 的用例会在这里失败，
+            # 提醒"缺口已经补上了，该改用例"。
             from agent.strategy_schema import CONDITION_TYPES
 
             assert not any(item.startswith("price") and "ma" in item
