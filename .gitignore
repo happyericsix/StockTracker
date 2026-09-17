@@ -102,3 +102,8 @@ napcat/
 ### Superpowers SDD scratch ###
 .superpowers/
 
+### Generated eval reports ###
+# 跑一次评测就重写一次，跟踪它等于每次跑批都产生一个 diff ——
+# 那种噪声会把真正的改动淹掉（`git rm --cached` 之后文件仍在本地，只是不再是提交候选）。
+python-data-service/tests/*/report.json
+
