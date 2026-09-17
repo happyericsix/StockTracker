@@ -140,7 +140,23 @@ def health():
         "objective_facts": _objective_health(),
         "audit": _audit_health(),
         "review": _review_health(),
+        "strategy_review": _strategy_review_health(),
     }
+
+
+def _strategy_review_health():
+    """策略审查的自检：**哪一半是算术、哪一半靠模型**，以及证据是什么形式。
+
+    把这条分界线摆出来，是因为两者的可信度完全不同：确定性检查"一条不漏"是硬要求，
+    语义检查则可能判错 —— 混在一起说，会让人以为整个审查都同样可靠。
+    """
+    try:
+        from agent import strategy_review
+
+        return strategy_review.describe()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"strategy review health probe failed: {e}")
+        return {"error": "strategy review unavailable"}
 
 
 def _review_health():

@@ -327,6 +327,9 @@ def _attach_audit(result, seen, tool_log, message, context_block):
                            [finding.get("detail") for finding in audit.get("findings") or []])
         # 有候选数字才交给裁决者（critic）：没有候选时这一步零成本
         _queue_review(audit, seen, message)
+        # 产出了策略才做策略审查：没有策略就没有"对不对得上用户要求"可言
+        if isinstance(payload.get("strategy_json"), dict):
+            _queue_strategy_review(payload["strategy_json"], message)
         return result
     except Exception as exc:  # noqa: BLE001
         logger.debug("体检挂载失败: %s", exc)
@@ -371,6 +374,39 @@ def _run_review(candidates, seen, message):
                         verdict.get("unclear"), len(verdict.get("dropped") or []))
     except Exception as exc:  # noqa: BLE001
         logger.debug("裁决失败: %s", exc)
+
+
+# 策略审查用另一个单线程池：它与"数字裁决"是两条独立的旁路，不必互相排队
+_STRATEGY_REVIEW_EXECUTOR = ThreadPoolExecutor(max_workers=1,
+                                               thread_name_prefix="agent-strategy-review")
+
+
+def _queue_strategy_review(strategy_json, message):
+    """产出策略后，异步审一次"有没有如实实现用户的要求"。
+
+    确定性那一半（止损符号、回看窗口、互斥条件）是毫秒级的，但语义那一半要一次
+    LLM 往返 —— 而这时用户的回复已经算好了，不该再让他等。
+    """
+    try:
+        _STRATEGY_REVIEW_EXECUTOR.submit(_run_strategy_review, strategy_json, message)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("策略审查入队失败: %s", exc)
+
+
+def _run_strategy_review(strategy_json, message):
+    """跑一次策略审查并记日志。永不抛异常。"""
+    try:
+        from agent import strategy_review
+
+        verdict = strategy_review.review_strategy(message, strategy_json)
+        if verdict.get("verdict") != strategy_review.VERDICT_ACCEPT:
+            logger.warning("策略审查 verdict=%s 问题=%s", verdict.get("verdict"),
+                           [finding.get("detail") for finding in verdict.get("findings") or []])
+        else:
+            logger.info("策略审查通过（LLM 调用 %s 次）",
+                        (verdict.get("cost") or {}).get("llm_calls"))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("策略审查失败: %s", exc)
 
 
 # 工具结果入账用单线程池：不阻塞对话，也不会因为后端慢而无限制地堆线程

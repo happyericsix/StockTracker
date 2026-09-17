@@ -1,0 +1,113 @@
+# 策略审查的 golden set：判"JSON 有没有如实实现用户的要求"
+#
+# 这里只放**需要模型**的用例（判断自然语言与 JSON 是否一致）。纯算术的那些
+# （止损符号写反、回看窗口不足、互斥条件……）在 tests/test_strategy_review.py 里，
+# 零成本、必须一条不漏，不该混进来花模型的钱。
+#
+# 跑法：
+#   REVIEW_EVAL_LIVE=1 pytest tests/test_review_eval.py -q
+#
+# 诚实性由离线断言保证（见 test_strategy_cases_are_honest）：
+#   - 期望 accept 的用例，结构检查必须为空（不能靠一条免费发现"意外成功"）；
+#   - 期望 revise 的用例必须声明它坏在哪，且那处坏必须可程序化验证
+#     （值确实对不上 / 那个条件确实不存在）。
+
+cases:
+
+  - id: matches_request
+    why: 三条要求都如实实现了，而且用的说法在 DSL 里有**完全等价**的写法 —— 不许误报
+    user_request: "帮我做个策略：20 日均线上穿 60 日均线时买入，20 日均线下穿 60 日均线时卖出，止损 8%"
+    expect_verdict: accept
+    strategy:
+      schema_version: "1.0"
+      name: "20/60 均线交叉"
+      symbol: "600519"
+      initial_capital: 100000
+      data: {period: day, lookback_days: 250}
+      position: {type: percent, size_pct: 100}
+      entry:
+        logic: all
+        conditions:
+          - {type: ma_cross, fast: 20, slow: 60, direction: above}
+      exit:
+        logic: any
+        conditions:
+          - {type: ma_cross, fast: 20, slow: 60, direction: below}
+          - {type: stop_loss_pct, value: -8}
+      risk: {commission_pct: 0.1, slippage_pct: 0.1}
+
+  - id: vague_exit_has_no_exact_equivalent
+    # 这一条是**真跑抓出来的**：第一版把下面这句话当成"应该通过"，critic 判了 revise，
+    # 理由成立 —— "跌破 60 日"（价格跌破 60 日均线）与 JSON 里的
+    # "20 日均线下穿 60 日"（快慢线交叉）不是同一个条件。
+    # 更关键的是：**当前 DSL 里没有"价格与均线的关系"这种条件类型**，模型只能给近似解。
+    # 审查者的价值恰好在这里 —— 把"我只能给你近似写法"说出来，而不是当成已实现。
+    # 如果哪天 DSL 补了这类条件，honesty 检查会失败，提醒重新审视这条用例。
+    why: 用户的要求在当前 DSL 里没有等价的写法，模型只能给近似解 —— 必须判成"没完全实现"而不是通过
+    user_request: "帮我做个策略：20 日均线上穿 60 日买入，跌破 60 日卖出，止损 8%"
+    expect_verdict: revise
+    expect_dsl_gap: true
+    strategy:
+      schema_version: "1.0"
+      name: "20/60 均线交叉（近似）"
+      symbol: "600519"
+      initial_capital: 100000
+      data: {period: day, lookback_days: 250}
+      position: {type: percent, size_pct: 100}
+      entry:
+        logic: all
+        conditions:
+          - {type: ma_cross, fast: 20, slow: 60, direction: above}
+      exit:
+        logic: any
+        conditions:
+          - {type: ma_cross, fast: 20, slow: 60, direction: below}
+          - {type: stop_loss_pct, value: -8}
+      risk: {commission_pct: 0.1, slippage_pct: 0.1}
+
+  - id: stop_loss_value_mismatch
+    why: 用户要 8%，JSON 里是 5% —— 数值对不上，必须报出来（其余要求都用等价说法，只留这一处缺陷）
+    user_request: "帮我做个策略：20 日均线上穿 60 日均线时买入，20 日均线下穿 60 日均线时卖出，止损 8%"
+    expect_verdict: revise
+    expect_number: 8
+    actual_value_path: "exit.conditions[1].value"
+    strategy:
+      schema_version: "1.0"
+      name: "20/60 均线交叉"
+      symbol: "600519"
+      initial_capital: 100000
+      data: {period: day, lookback_days: 250}
+      position: {type: percent, size_pct: 100}
+      entry:
+        logic: all
+        conditions:
+          - {type: ma_cross, fast: 20, slow: 60, direction: above}
+      exit:
+        logic: any
+        conditions:
+          - {type: ma_cross, fast: 20, slow: 60, direction: below}
+          - {type: stop_loss_pct, value: -5}
+      risk: {commission_pct: 0.1, slippage_pct: 0.1}
+
+  - id: missing_requested_exit
+    why: 用户明确要求"下穿 60 日均线卖出"，JSON 的出场条件里干脆没有这条 —— 漏实现
+    user_request: "帮我做个策略：20 日均线上穿 60 日均线时买入，20 日均线下穿 60 日均线时卖出，止损 8%"
+    expect_verdict: revise
+    expect_absent_condition: ma_cross
+    strategy:
+      schema_version: "1.0"
+      name: "只有止盈的版本"
+      symbol: "600519"
+      initial_capital: 100000
+      data: {period: day, lookback_days: 250}
+      position: {type: percent, size_pct: 100}
+      entry:
+        logic: all
+        conditions:
+          - {type: ma_cross, fast: 20, slow: 60, direction: above}
+      exit:
+        logic: any
+        conditions:
+          - {type: take_profit_pct, value: 15}
+          - {type: stop_loss_pct, value: -8}
+      risk: {commission_pct: 0.1, slippage_pct: 0.1}

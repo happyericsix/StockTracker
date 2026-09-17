@@ -188,6 +188,20 @@ def test_health_reports_the_reviewer():
     assert described == review.describe()
 
 
+def test_health_reports_strategy_review():
+    """策略审查必须能从 /health 看到"哪一半是算术、哪一半靠模型"。"""
+    from agent import strategy_review
+
+    c = TestClient(main.app)
+    r = c.get("/health")
+
+    assert r.status_code == 200
+    described = r.json()["strategy_review"]
+    assert "sign_flipped_condition" in described["deterministic_checks"]
+    assert described["evidence"] == "json_path"
+    assert described["blocking"] is False
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:
