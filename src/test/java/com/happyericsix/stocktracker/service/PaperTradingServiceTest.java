@@ -199,34 +199,123 @@ class PaperTradingServiceTest {
         assertMoney("9000", trade.getAmount());
     }
 
+    /**
+     * 今天已经成交过（盘中那条路成交的）时：**不许再下单，但这一节必须走完**。
+     *
+     * <h3>这条用例守的是什么</h3>
+     * 以前这里整段 return null。防重复下单是对的，但它把当天该做的四件事一起跳过了 ——
+     * 净值快照、客观事实、到期回填、当日报告。后果不是报错，而是**"今天有成交"这条策略
+     * 当天在净值曲线上就是一个缺口**，而那恰好是唯一值得看的一天；净值曲线又是判断
+     * 策略有没有变好的主依据。真库实测过一次：盘中 15:29 成交，15:30 的日线结算整段跳过。
+     *
+     * <p>所以这里钉住两头：**不产生第二笔成交**，以及**当天的证据一件都不少**。
+     */
     @Test
-    void sameDateIsIdempotent() {
-        String configJson = "{\"initial_capital\":100000.0}";
+    void anIntradayFillStillGetsTheDaysValuation() throws Exception {
+        String configJson = "{\"initial_capital\":100000.0,"
+                + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0}}";
         User user = User.builder()
-                .id(1L)
-                .username("alice")
-                .password("secret")
-                .email("alice@example.com")
-                .build();
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
         Strategy strategy = Strategy.builder()
-                .id(10L)
-                .name("MACD cross")
-                .symbol("AAPL")
-                .configJson(configJson)
-                .user(user)
-                .paperEnabled(true)
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true)
+                .build();
+        PaperAccount account = PaperAccount.builder()
+                .id(3L).strategy(strategy).user(user)
+                .cash(new java.math.BigDecimal("74036.45"))
+                .shares(new java.math.BigDecimal("100.0000"))
+                .avgCost(new java.math.BigDecimal("1258.3771"))
+                .highWatermark(new java.math.BigDecimal("1258.3771"))
+                // 盘中成交那一刻写下的信号：估值这一节不许把它改掉（见下面的断言）
+                .lastSignal("buy")
                 .build();
 
         when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
         when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
         when(paperTradeRepository.existsByStrategyIdAndTradeDate(eq(10L), any(LocalDate.class)))
                 .thenReturn(true);
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.of(account));
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(paperEquitySnapshotRepository.findByStrategyIdOrderByTradeDateAsc(10L)).thenReturn(List.of());
+        when(paperEquitySnapshotRepository.findByStrategyIdAndTradeDate(eq(10L), any(LocalDate.class)))
+                .thenReturn(Optional.empty());
+        when(memoryService.currentSessionKey(1L)).thenReturn("1:2026-09-18");
+
+        // 当日 bar 的收盘价 1261.07：收盘重估后净值 = 74036.45 + 100 × 1261.07 = 200143.45
+        JsonNode result = mapper.readTree(
+                "{\"signal\":\"buy\",\"price\":1261.07,\"matched_conditions\":[],"
+                        + "\"snapshot\":{\"schema_version\":1,\"bar\":{\"date\":\"2026-09-18\",\"close\":1261.07},"
+                        + "\"indicators\":{\"ma_20\":1250.0},\"extra\":{}}}");
+        when(strategyClient.evaluateBar(eq(configJson), eq("600519"), anyString(), any()))
+                .thenReturn(result);
 
         paperTradingService.evaluateDaily();
 
-        verifyNoInteractions(strategyClient);
-        verify(paperAccountRepository, never()).save(any(PaperAccount.class));
+        // ① 不再产生第二笔成交 —— 这是原来那条守卫存在的理由，必须原样保留
         verify(paperTradeRepository, never()).save(any(PaperTrade.class));
+
+        // ② 当天该有的证据一件都不少
+        ArgumentCaptor<PaperTradeTrace> traceCaptor = ArgumentCaptor.forClass(PaperTradeTrace.class);
+        verify(paperTraceService, times(1)).record(traceCaptor.capture());
+        PaperTradeTrace trace = traceCaptor.getValue();
+        assertEquals(ExecutionContract.DECISION_SKIP, trace.getDecision());
+        assertEquals(ExecutionContract.SKIP_ALREADY_TRADED_TODAY, trace.getSkipReason(),
+                "原因必须是'今天已经动过了'，不能写成 rule_not_met —— 那天恰恰是有成交的一天");
+        assertEquals(new java.math.BigDecimal("200143.45"), trace.getEquityAfter(),
+                "痕迹里的净值必须是按当日收盘重估后的值");
+        verify(paperEquitySnapshotRepository, times(1)).save(any(PaperEquitySnapshot.class));
+        verify(memoryFactService, times(1)).recordObjective(eq(1L), anyString(), anyList());
+        // ③ 账户按收盘重估并落库（不再是"一个字段都不动"）
+        ArgumentCaptor<PaperAccount> accountCaptor = ArgumentCaptor.forClass(PaperAccount.class);
+        verify(paperAccountRepository, times(1)).save(accountCaptor.capture());
+        assertEquals(new java.math.BigDecimal("1261.0700"), accountCaptor.getValue().getLastPrice());
+        assertEquals("buy", accountCaptor.getValue().getLastSignal(),
+                "lastSignal 不能被估值用的规则端点覆盖 —— 它应当还是当天真正做出的那个信号");
+    }
+
+    /**
+     * agent 模式下今天已成交时，**不许为了估值去开一次会**。
+     *
+     * <p>委员会一次约 2 万 token，而这一节的产出只是一次重估；它给出的信号也不允许执行。
+     * 这条用例把"省下这次调用"变成可执行的约束 —— 否则某次重构很容易把估值路径
+     * 又接回 agentDecide，账单上的表现是"什么都没变，就是贵了点"。
+     */
+    @Test
+    void agentModeNeverCallsTheCommitteeJustToValueTheDay() throws Exception {
+        String configJson = "{\"initial_capital\":100000.0}";
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true)
+                .decisionMode("agent").decisionModeSince(LocalDate.now())
+                .build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperTradeRepository.existsByStrategyIdAndTradeDate(eq(10L), any(LocalDate.class)))
+                .thenReturn(true);
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(paperEquitySnapshotRepository.findByStrategyIdOrderByTradeDateAsc(10L)).thenReturn(List.of());
+        when(paperEquitySnapshotRepository.findByStrategyIdAndTradeDate(eq(10L), any(LocalDate.class)))
+                .thenReturn(Optional.empty());
+
+        JsonNode result = mapper.readTree(
+                "{\"signal\":\"hold\",\"price\":1261.07,\"matched_conditions\":[]}");
+        when(strategyClient.evaluateBar(eq(configJson), eq("600519"), anyString(), any()))
+                .thenReturn(result);
+
+        paperTradingService.evaluateDaily();
+
+        verify(strategyClient, never()).agentDecide(anyString(), anyString(), anyString(), any(), any());
+        verify(strategyClient, times(1)).evaluateBar(eq(configJson), eq("600519"), anyString(), any());
+        // 估值行落库时按**策略声明的模式**标注（它不是一次决策，但必须落在同一段曲线上）
+        ArgumentCaptor<PaperTradeTrace> captor = ArgumentCaptor.forClass(PaperTradeTrace.class);
+        verify(paperTraceService, times(1)).record(captor.capture());
+        assertEquals(ExecutionContract.DECISION_MODE_AGENT, captor.getValue().getDecisionMode());
     }
 
     @Test
@@ -894,6 +983,57 @@ class PaperTradingServiceTest {
         paperTradingService.evaluateRealtime();
 
         verify(strategyClient, times(1)).evaluateBarRealtime(eq(configJson), eq("600519"), any());
+    }
+
+    /**
+     * agent 响应里**没有** size_fraction 时：不许炸，也不许改变仓位口径。
+     *
+     * <p>这条守的是一个刚踩到的坑：读缺省值走的那个三元表达式把 {@code Double} 拆箱，
+     * 于是"缺字段"这一天会抛 NPE，整笔结算失败（而且只在缺字段时才炸，平时完全看不出来）。
+     * 所以这里同时钉住两头：不抛异常，且仓位口径仍由配置决定（full → 全部现金）。
+     */
+    @Test
+    void anAgentResponseWithoutSizeFractionFallsBackToTheConfiguredPosition() throws Exception {
+        String configJson = "{\"initial_capital\":10000.0,"
+                + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0},"
+                + "\"position\":{\"type\":\"full\",\"size_pct\":100.0}}";
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true)
+                .decisionMode("agent").decisionModeSince(LocalDate.now())
+                .build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperTradeRepository.existsByStrategyIdAndTradeDate(eq(10L), any(LocalDate.class)))
+                .thenReturn(false);
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(paperTradeRepository.save(any(PaperTrade.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(memoryService.currentSessionKey(1L)).thenReturn("1:2026-09-18");
+        when(paperEquitySnapshotRepository.findByStrategyIdOrderByTradeDateAsc(10L)).thenReturn(List.of());
+        when(paperEquitySnapshotRepository.findByStrategyIdAndTradeDate(eq(10L), any(LocalDate.class)))
+                .thenReturn(Optional.empty());
+
+        // 整个 size_fraction 字段都不存在（旧版服务、被裁剪的响应）
+        JsonNode result = mapper.readTree(
+                "{\"valid\":true,\"decision\":\"buy\",\"signal\":\"buy\",\"price\":10.0,"
+                        + "\"matched_conditions\":[],"
+                        + "\"fingerprint\":{\"fill_basis\":\"close\",\"adjust_mode\":\"qfq\","
+                        + "\"money_policy_version\":1,\"engine_version\":\"abc123\",\"decision_mode\":\"agent\"}}");
+        when(strategyClient.agentDecide(eq(configJson), eq("600519"), anyString(), isNull(), any()))
+                .thenReturn(result);
+
+        paperTradingService.evaluateDaily();
+
+        ArgumentCaptor<PaperTrade> captor = ArgumentCaptor.forClass(PaperTrade.class);
+        verify(paperTradeRepository, times(1)).save(captor.capture());
+        assertEquals(1000, captor.getValue().getShares().intValue(),
+                "缺 size_fraction 时按配置口径（full → 全部现金 10000 ÷ 10 元 = 1000 股）");
     }
 
     @Test

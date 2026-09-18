@@ -79,7 +79,7 @@ public class PaperTradeTrace {
      * <p>做成独立列而不是只放在快照 JSON 里：报告与统计要能按它**分组查询**
      * （"agent 段和规则段各自表现如何"），而 JSON 里的字段查不动。
      */
-    @Column(name = "decision_mode", length = 16)
+    @Column(name = "decision_mode", length = 32)
     private String decisionMode;
 
     /** agent 这一轮的 LLM 调用次数与 token 总量（规则路径为空）。成本必须可查，不能只存在日志里。 */
@@ -129,7 +129,7 @@ public class PaperTradeTrace {
      * <p>列名**不叫 `signal`**：`SIGNAL` 是 MySQL 的保留字（存储程序用），
      * 拿它当列名建表会语法报错，而 H2 不报 —— 于是这个错在测试里完全看不见。
      */
-    @Column(name = "signal_value", length = 16)
+    @Column(name = "signal_value", length = 32)
     private String signal;
 
     @Column(name = "matched_conditions", length = 512)
@@ -174,7 +174,16 @@ public class PaperTradeTrace {
     @Column(name = "engine_version", length = 32)
     private String engineVersion;
 
-    @Column(name = "adjust_mode", length = 16)
+    /**
+     * 复权口径（none / qfq）。
+     *
+     * <p>宽度**必须够放契约产出的任何值**：认不出来时归一是 {@code unknown_unspecified}
+     * （19 字符），而契约声明的上限是 {@link ExecutionContract#MAX_ENUM_CHARS}（32）。
+     * 原来这里是 {@code varchar(16)}：一条没有指纹的响应（降级/错误载荷）会让这行
+     * 写不进去 → 约束冲突在 flush 时抛出 → **当天整笔结算回滚**（连净值点一起丢）。
+     * 实测踩过一次，见 AgentDecisionPersistenceTest 与 TraceColumnWidthTest。
+     */
+    @Column(name = "adjust_mode", length = 32)
     private String adjustMode;
 
     @Column(name = "money_policy_version")

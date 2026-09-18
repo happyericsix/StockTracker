@@ -90,6 +90,14 @@ public final class ExecutionContract {
      * 混在一起，"agent 到底多久没真正看过行情了"就永远查不出来。
      */
     public static final String SKIP_AGENT_NO_NEW_INFORMATION = "agent_no_new_information";
+    /**
+     * 今天已经成交过（盘中那条路成交的），本节只按收盘重估账户、**不再下单**。
+     *
+     * <p>与 {@link #SKIP_RULE_NOT_MET} 必须分开：两者结果都是"不动"，但一个是
+     * "今天已经动过了"，另一个是"今天看过、没动"。把前者写成后者就是假话 ——
+     * 而那天恰恰是唯一有成交的一天。
+     */
+    public static final String SKIP_ALREADY_TRADED_TODAY = "already_traded_today";
 
     // ---------- 归一与版本 ----------
     public static final String UNKNOWN_PREFIX = "unknown_";
@@ -137,7 +145,7 @@ public final class ExecutionContract {
             SKIP_INSUFFICIENT_CASH_FOR_ONE_LOT, SKIP_INSUFFICIENT_CASH,
             SKIP_INVALID_PRICE, SKIP_RULE_NOT_MET, SKIP_STATE_MISMATCH,
             SKIP_AGENT_UNPARSABLE, SKIP_AGENT_BUDGET_EXCEEDED, SKIP_AGENT_LLM_UNAVAILABLE,
-            SKIP_AGENT_NO_NEW_INFORMATION);
+            SKIP_AGENT_NO_NEW_INFORMATION, SKIP_ALREADY_TRADED_TODAY);
 
     /** 结算类型 → 成交价口径。**唯一的映射处**（Python 侧同名映射）。 */
     public static final Map<String, String> FILL_BASIS_BY_SETTLEMENT = Map.of(

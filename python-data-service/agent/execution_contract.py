@@ -105,6 +105,12 @@ SKIP_AGENT_LLM_UNAVAILABLE = "agent_llm_unavailable"
 # HOLD 是"委员们看过、决定不动"，这条是"今天没有任何值得开会的理由，所以没看"。
 # 混在一起，"agent 到底多久没真正看过行情了"就永远查不出来。
 SKIP_AGENT_NO_NEW_INFORMATION = "agent_no_new_information"
+# **今天已经成交过**（盘中那条路成交的），本节只按收盘重估、不再下单。
+#
+# 为什么要一个独立原因：它与"规则没成立"在结果上都是不动，但含义完全不同 ——
+# 前者是"今天已经动过了"，后者是"今天看过、没动"。写成 rule_not_met 就是假话：
+# 那天恰恰是**唯一有成交**的一天，把它说成"规则没成立"会让审计与统计同时失真。
+SKIP_ALREADY_TRADED_TODAY = "already_traded_today"
 
 SKIP_REASONS = (
     SKIP_MARKET_CLOSED,
@@ -124,6 +130,7 @@ SKIP_REASONS = (
     SKIP_AGENT_BUDGET_EXCEEDED,
     SKIP_AGENT_LLM_UNAVAILABLE,
     SKIP_AGENT_NO_NEW_INFORMATION,
+    SKIP_ALREADY_TRADED_TODAY,
 )
 
 UNKNOWN_PREFIX = "unknown_"

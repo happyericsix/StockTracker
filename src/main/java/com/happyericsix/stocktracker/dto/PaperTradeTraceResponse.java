@@ -138,6 +138,8 @@ public class PaperTradeTraceResponse {
         map.put(ExecutionContract.SKIP_AGENT_LLM_UNAVAILABLE, "agent 依赖的模型服务不可用，本轮没做出决策");
         map.put(ExecutionContract.SKIP_AGENT_NO_NEW_INFORMATION,
                 "没有值得开会的触发理由（事件驱动门控），本轮**没有召集委员会** —— 这不是模型决定不动");
+        map.put(ExecutionContract.SKIP_ALREADY_TRADED_TODAY,
+                "今天已经成交过（盘中那条路成交的），本次只按收盘重估账户，不再下单");
         return map;
     }
 

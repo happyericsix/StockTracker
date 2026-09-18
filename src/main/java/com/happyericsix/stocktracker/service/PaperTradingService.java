@@ -277,10 +277,14 @@ public class PaperTradingService {
         Strategy strategy = strategyRepository.findById(strategyId)
                 .orElseThrow(() -> new IllegalArgumentException("策略不存在"));
 
-        if (paperTradeRepository.existsByStrategyIdAndTradeDate(strategy.getId(), today)) {
-            log.debug("Paper settlement already ran for strategy id={} on {}", strategy.getId(), today);
-            return null;
-        }
+        // 今天是否已经有成交（盘中那条路成交过）。
+        //
+        // 它**只决定"这一节还能不能下单"**，不再决定"这一节做不做"：
+        // 以前这里直接 return null，防重复下单是对的，但连带把当天的净值快照、客观事实、
+        // 到期回填、当日报告一起跳过了 —— 于是"今天有成交"这条策略当天在净值曲线上
+        // 就是一个缺口，而那恰好是唯一值得看的一天（净值曲线是判断策略有没有变好的主依据）。
+        boolean alreadyTradedToday = paperTradeRepository
+                .existsByStrategyIdAndTradeDate(strategy.getId(), today);
 
         var existingAccount = paperAccountRepository.findByStrategyId(strategy.getId());
         PaperAccount account = existingAccount.orElseGet(PaperAccount::new);
@@ -297,11 +301,20 @@ public class PaperTradingService {
         // 两条路都落进同一套封闭枚举与同一个结算管线；区别写在 fingerprint.decision_mode 里，
         // 于是两段曲线永远不会被当成可比（见 ExecutionContract.compareBlockReason）。
         String decisionMode = ExecutionContract.normalizeDecisionMode(strategy.getDecisionMode());
-        JsonNode result = isAgentMode(strategy)
-                ? strategyClient.agentDecide(strategy.getConfigJson(), strategy.getSymbol(),
-                        today.toString(), position, lastBriefingDate(strategy.getId()))
-                : strategyClient.evaluateBar(strategy.getConfigJson(), strategy.getSymbol(),
-                        today.toString(), position);
+        JsonNode result;
+        if (alreadyTradedToday) {
+            // 今天已经成交过：这一节只需要**当日收盘价与证据**，不需要任何决策。
+            // 所以这里刻意走规则端点（确定性、零成本），而不是问委员会：
+            // 委员会一次约 2 万 token，而它的产出（一个信号）在这一节里本来就不允许执行。
+            result = strategyClient.evaluateBar(strategy.getConfigJson(), strategy.getSymbol(),
+                    today.toString(), position);
+        } else if (isAgentMode(strategy)) {
+            result = strategyClient.agentDecide(strategy.getConfigJson(), strategy.getSymbol(),
+                    today.toString(), position, lastBriefingDate(strategy.getId()));
+        } else {
+            result = strategyClient.evaluateBar(strategy.getConfigJson(), strategy.getSymbol(),
+                    today.toString(), position);
+        }
         if (result == null) {
             // 之前这里只打一行日志：那天为什么没结算，除了翻日志没有别的办法查。
             log.warn("{} decision returned null for strategy id={}", decisionMode, strategy.getId());
@@ -324,7 +337,8 @@ public class PaperTradingService {
         }
 
         PaperAccount settled = applyBarResult(strategy, account, result, today, null,
-                ExecutionContract.SETTLEMENT_DAILY, ExecutionContract.TRIGGER_CRON);
+                ExecutionContract.SETTLEMENT_DAILY, ExecutionContract.TRIGGER_CRON,
+                alreadyTradedToday);
         recordEquitySnapshot(strategy, settled, result, today);
         recordPaperFacts(strategy, settled, today);
         // 到期就回填预期（复用同一批净值快照，不额外查库）。
@@ -513,8 +527,10 @@ public class PaperTradingService {
         account.setLastBarTime(barTime);
         // 刻意**不**在这里写客观事实：本方法由每次价格刷新触发，
         // 在这里记会把取代链冲成一天上百个值（见 recordPaperFacts 的说明）。
+        // alreadyTradedToday=false：盘中这条**就是**下单的那条路，
+        // 它自己要跑的就是"能不能成交"的判断（重复成交由 dedupe 键与 T+1 守卫挡）。
         return applyBarResult(strategy, account, result, LocalDate.now(), barTime,
-                ExecutionContract.SETTLEMENT_REALTIME, trigger);
+                ExecutionContract.SETTLEMENT_REALTIME, trigger, false);
     }
 
     /**
@@ -558,9 +574,17 @@ public class PaperTradingService {
         return account;
     }
 
+    /**
+     * 按一根 bar 结算。
+     *
+     * @param alreadyTradedToday 今天已经成交过（盘中那条路成交的）→ **这一节不下单，只重估**。
+     *                           它把"同一天不能下两次单"这条保证从"整段跳过"收窄成"禁止下单"：
+     *                           账户、净值快照、客观事实、到期回填、当日报告统统照旧。
+     */
     private PaperAccount applyBarResult(Strategy strategy, PaperAccount account,
                                         JsonNode result, LocalDate tradeDate, String barTime,
-                                        String settlementKind, String trigger) {
+                                        String settlementKind, String trigger,
+                                        boolean alreadyTradedToday) {
         JsonNode config = parseConfig(strategy.getConfigJson());
         JsonNode risk = config.get("risk");
         // 费率一律走 BigDecimal：它们是"乘在钱上的数"，用 double 相乘会把二进制误差
@@ -623,6 +647,32 @@ public class PaperTradingService {
 
         String reason = joinMatchedConditions(result.get("matched_conditions"));
         BigDecimal cash = orZero(account.getCash());
+
+        // 今天已经成交过：**只重估，不下单**，并且这一节照旧走完全程
+        // （痕迹、账户、净值快照、客观事实、到期回填、当日报告都由调用方接着做完）。
+        //
+        // 为什么不能写成"规则没成立"：那天真正发生的事情是"已经动过了"。
+        // 一个只有成交那天才有的原因被写成常态原因，审计与统计会同时失真 ——
+        // 而这两个字段（decision / skip_reason）正是痕迹存在的理由。
+        if (alreadyTradedToday) {
+            trace.setDecision(ExecutionContract.DECISION_SKIP);
+            trace.setSkipReason(ExecutionContract.SKIP_ALREADY_TRADED_TODAY);
+            // 决策来源取**策略声明的模式**，而不是这份响应的指纹：这一节不是一次决策，
+            // 而这份响应只是为了拿当日 bar（上面刻意走的规则端点）。
+            // 按策略模式落库，才能让它和当天的其余记录落在同一段曲线上。
+            trace.setDecisionMode(ExecutionContract.normalizeDecisionMode(strategy.getDecisionMode()));
+            updateEquityAndHighWatermark(account, price);
+            account.setLastPrice(price);
+            // 刻意**不**覆盖 lastSignal：那应当是当天真正做出的那个信号（盘中成交时写的），
+            // 而不是这一节用来估值的规则端点返回值。
+            account.setLastEvalAt(LocalDateTime.now());
+            fillAccountAfter(trace, account);
+            paperTraceService.record(trace);
+            account = paperAccountRepository.save(account);
+            strategy.setLastPaperEvalAt(account.getLastEvalAt());
+            strategyRepository.save(strategy);
+            return account;
+        }
 
         PaperTrade trade = null;
         if ("buy".equals(signal) && !isHolding(account)) {
@@ -985,9 +1035,20 @@ public class PaperTradingService {
         return size != null && size.signum() > 0 && size.compareTo(BigDecimal.ONE) <= 0 ? size : null;
     }
 
-    /** 数字字段：不是数字就用缺省值（JSON 里可能是 null / "N/A" / 字符串）。 */
+    /**
+     * 数字字段：不是数字就用缺省值（JSON 里可能是 null / "N/A" / 字符串）。
+     *
+     * <p>三元表达式里的 {@code fallback} **必须显式装箱**（写成 {@code Double.valueOf(...)}）：
+     * 另一支是基本类型 {@code double}，二元数值提升会把 {@code Double} 拆箱，
+     * 于是"缺省值传 null"的调用在**取值命中缺省那一支**时抛 NPE
+     * （实测：agent 响应里没有 {@code size_fraction} 时结算整笔失败）。
+     * 这种坑只在"确实走了缺省分支"的那天才炸，平时看不出任何异常。
+     */
     private static Double numberOr(JsonNode node, Double fallback) {
-        return node == null || !node.isNumber() ? fallback : node.asDouble();
+        if (node == null || !node.isNumber()) {
+            return fallback;
+        }
+        return Double.valueOf(node.asDouble());
     }
 
     /** bar 时间形如 "yyyy-MM-dd HH:mm:ss"，按自然日前 10 位判断是否同一交易日 */

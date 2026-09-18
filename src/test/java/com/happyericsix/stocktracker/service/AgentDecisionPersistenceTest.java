@@ -90,6 +90,22 @@ class AgentDecisionPersistenceTest {
                 .build());
     }
 
+    /** 规则模式（存量策略的默认）：盘中那条路会真的成交，所以"已成交"这条分支由它来触发。 */
+    private Strategy ruleStrategy() {
+        User user = userRepository.findAll().stream().findFirst()
+                .orElseGet(() -> userRepository.save(User.builder()
+                        .username("agent-it-user").password("x").email("agent-it@example.com").build()));
+        return strategyRepository.save(Strategy.builder()
+                .user(user)
+                .name("盘中成交后的日线估值")
+                .symbol("600519")
+                .configJson("{\"initial_capital\":100000.0,"
+                        + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0},"
+                        + "\"position\":{\"type\":\"full\",\"size_pct\":100.0}}")
+                .paperEnabled(true)
+                .build());
+    }
+
     @Test
     void anAgentBuyLandsAsARealTradeTraceAndEquityPoint() throws Exception {
         Strategy strategy = agentStrategy();
@@ -151,6 +167,84 @@ class AgentDecisionPersistenceTest {
         PaperAccount account = paperAccountRepository.findByStrategyId(strategy.getId()).orElseThrow();
         assertTrue(account.getShares().compareTo(BigDecimal.ZERO) > 0);
         assertTrue(account.getCash().compareTo(account.getInitialCapital()) < 0);
+    }
+
+    /**
+     * 盘中已经成交过的当天，日线这一节**仍然要落到净值曲线上**（不许再变成一个缺口）。
+     *
+     * <h3>这条用例来自一次真库实测</h3>
+     * 原先 {@code evaluateStrategy} 开头有一条守卫：当天已有成交就整段 {@code return null}。
+     * 防重复下单是对的，但它把当天的净值快照、客观事实、到期回填、当日报告一起跳过了 ——
+     * 实测里那条策略当天盘中成交、15:30 的日线结算整段跳过，于是**唯一有成交的那天
+     * 在曲线上是空的**。这条用例把"只禁止下单、不禁止记录"钉在真实仓库层上。
+     */
+    @Test
+    void anIntradayFillStillLandsOnTheEquityCurve() throws Exception {
+        Strategy strategy = ruleStrategy();
+        String today = LocalDate.now().toString();
+
+        // 模拟盘中那条路的成交：账户已有 100 股，且今天已经有一笔成交记录
+        PaperAccount account = paperAccountRepository.save(PaperAccount.builder()
+                .user(strategy.getUser())
+                .strategy(strategy)
+                .initialCapital(new BigDecimal("100000.00"))
+                .cash(new BigDecimal("89900.00"))
+                .shares(new BigDecimal("100.0000"))
+                .avgCost(new BigDecimal("10.0000"))
+                .equity(new BigDecimal("90900.00"))
+                .highWatermark(new BigDecimal("10.0000"))
+                .lastSignal("buy")              // 盘中确实做过这个决定
+                .build());
+        paperTradeRepository.save(PaperTrade.builder()
+                .user(strategy.getUser())
+                .strategy(strategy)
+                .account(account)
+                .symbol("600519")
+                .side("BUY")
+                .price(new BigDecimal("10.0000"))
+                .shares(new BigDecimal("100.0000"))
+                .amount(new BigDecimal("1000.00"))
+                .tradeDate(LocalDate.now())
+                .reason("price_above")
+                .build());
+
+        // 当日收盘 11.00：重估后净值 = 89900 + 100 × 11 = 91000
+        when(strategyClient.evaluateBar(anyString(), eq("600519"), anyString(), any()))
+                .thenReturn(mapper.readTree(
+                        "{\"signal\":\"buy\",\"price\":11.0,\"matched_conditions\":[\"price_above\"],"
+                                + "\"snapshot\":{\"schema_version\":1,"
+                                + "\"bar\":{\"date\":\"" + today + "\",\"close\":11.0},"
+                                + "\"indicators\":{\"ma_20\":10.5},\"extra\":{}}}"));
+
+        paperTradingService.evaluateDaily();
+
+        // ① 没有第二笔成交（守卫原本的作用一点没丢）
+        assertEquals(1, paperTradeRepository
+                .findByStrategyIdOrderByTradeDateDescCreatedAtDesc(strategy.getId()).size());
+
+        // ② 当天有 daily 痕迹，且原因说的是真话
+        PaperTradeTrace daily = traceRepository
+                .findByStrategyIdAndTradeDateOrderByCreatedAtAsc(strategy.getId(), LocalDate.now())
+                .stream()
+                .filter(row -> ExecutionContract.SETTLEMENT_DAILY.equals(row.getSettlementKind()))
+                .findFirst().orElseThrow();
+        assertEquals(ExecutionContract.DECISION_SKIP, daily.getDecision());
+        assertEquals(ExecutionContract.SKIP_ALREADY_TRADED_TODAY, daily.getSkipReason());
+        assertEquals(ExecutionContract.TRIGGER_CRON, daily.getTrigger());
+
+        // ③ 当天的净值点真的写进去了，且恒等式零容差成立 —— 这正是原来丢掉的那一格
+        PaperEquitySnapshot snapshot = snapshotRepository
+                .findByStrategyIdAndTradeDate(strategy.getId(), LocalDate.now()).orElseThrow();
+        assertEquals(0, new BigDecimal("11.0000").compareTo(snapshot.getClosePrice()));
+        assertEquals(0, new BigDecimal("91000.00").compareTo(snapshot.getEquity()));
+        assertTrue(Money.equityIdentityHolds(snapshot.getCash(), snapshot.getShares(),
+                snapshot.getClosePrice(), snapshot.getEquity()), "净值恒等式仍要零容差成立");
+
+        // ④ 账户按收盘重估，但**当天真正做出的那个信号不许被估值用的响应覆盖**
+        PaperAccount after = paperAccountRepository.findByStrategyId(strategy.getId()).orElseThrow();
+        assertEquals(0, new BigDecimal("11.0000").compareTo(after.getLastPrice()));
+        assertEquals("buy", after.getLastSignal(),
+                "lastSignal 应当还是当天真正做出的那个（盘中成交时的 buy），而不是估值响应的值");
     }
 
     @Test
