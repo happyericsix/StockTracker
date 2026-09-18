@@ -2,17 +2,22 @@ package com.happyericsix.stocktracker.dto;
 
 import com.happyericsix.stocktracker.entity.PaperAccount;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
+/**
+ * 账户的读取视图。金额一律 {@link BigDecimal}：账里的精度不该在展示层被换成 double
+ * （JSON 里仍然是数字，前端与调用方感知不到差别）。
+ */
 public class PaperAccountResponse {
     private Long id;
-    private Double initialCapital;
-    private Double cash;
-    private Double shares;
-    private Double avgCost;
-    private Double equity;
-    private Double highWatermark;
-    private Double lastPrice;
+    private BigDecimal initialCapital;
+    private BigDecimal cash;
+    private BigDecimal shares;
+    private BigDecimal avgCost;
+    private BigDecimal equity;
+    private BigDecimal highWatermark;
+    private BigDecimal lastPrice;
     private String lastSignal;
     private LocalDateTime lastEvalAt;
     private LocalDateTime createdAt;
@@ -20,9 +25,9 @@ public class PaperAccountResponse {
 
     public PaperAccountResponse() {}
 
-    public PaperAccountResponse(Long id, Double initialCapital, Double cash, Double shares,
-                                Double avgCost, Double equity, Double highWatermark,
-                                Double lastPrice, String lastSignal, LocalDateTime lastEvalAt,
+    public PaperAccountResponse(Long id, BigDecimal initialCapital, BigDecimal cash, BigDecimal shares,
+                                BigDecimal avgCost, BigDecimal equity, BigDecimal highWatermark,
+                                BigDecimal lastPrice, String lastSignal, LocalDateTime lastEvalAt,
                                 LocalDateTime createdAt, LocalDateTime updatedAt) {
         this.id = id;
         this.initialCapital = initialCapital;
@@ -57,20 +62,20 @@ public class PaperAccountResponse {
 
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
-    public Double getInitialCapital() { return initialCapital; }
-    public void setInitialCapital(Double initialCapital) { this.initialCapital = initialCapital; }
-    public Double getCash() { return cash; }
-    public void setCash(Double cash) { this.cash = cash; }
-    public Double getShares() { return shares; }
-    public void setShares(Double shares) { this.shares = shares; }
-    public Double getAvgCost() { return avgCost; }
-    public void setAvgCost(Double avgCost) { this.avgCost = avgCost; }
-    public Double getEquity() { return equity; }
-    public void setEquity(Double equity) { this.equity = equity; }
-    public Double getHighWatermark() { return highWatermark; }
-    public void setHighWatermark(Double highWatermark) { this.highWatermark = highWatermark; }
-    public Double getLastPrice() { return lastPrice; }
-    public void setLastPrice(Double lastPrice) { this.lastPrice = lastPrice; }
+    public BigDecimal getInitialCapital() { return initialCapital; }
+    public void setInitialCapital(BigDecimal initialCapital) { this.initialCapital = initialCapital; }
+    public BigDecimal getCash() { return cash; }
+    public void setCash(BigDecimal cash) { this.cash = cash; }
+    public BigDecimal getShares() { return shares; }
+    public void setShares(BigDecimal shares) { this.shares = shares; }
+    public BigDecimal getAvgCost() { return avgCost; }
+    public void setAvgCost(BigDecimal avgCost) { this.avgCost = avgCost; }
+    public BigDecimal getEquity() { return equity; }
+    public void setEquity(BigDecimal equity) { this.equity = equity; }
+    public BigDecimal getHighWatermark() { return highWatermark; }
+    public void setHighWatermark(BigDecimal highWatermark) { this.highWatermark = highWatermark; }
+    public BigDecimal getLastPrice() { return lastPrice; }
+    public void setLastPrice(BigDecimal lastPrice) { this.lastPrice = lastPrice; }
     public String getLastSignal() { return lastSignal; }
     public void setLastSignal(String lastSignal) { this.lastSignal = lastSignal; }
     public LocalDateTime getLastEvalAt() { return lastEvalAt; }

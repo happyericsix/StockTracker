@@ -56,8 +56,10 @@ class PaperReviewReportServiceTest {
 
     private static PaperAccount account() {
         return PaperAccount.builder()
-                .id(5L).initialCapital(100000.0).cash(100.0).shares(900.0)
-                .avgCost(10.0).equity(100900.0).build();
+                .id(5L).initialCapital(new java.math.BigDecimal("100000.00"))
+                .cash(new java.math.BigDecimal("100.00")).shares(new java.math.BigDecimal("900.0000"))
+                .avgCost(new java.math.BigDecimal("10.0000"))
+                .equity(new java.math.BigDecimal("100900.00")).build();
     }
 
     private static PaperTradeTrace trace(String decision, String skipReason, String barTime) {

@@ -148,6 +148,12 @@ public final class ObjectiveFactKeys {
         if (value instanceof Boolean flag) {
             return flag ? "true" : "false";
         }
+        if (value instanceof java.math.BigDecimal decimal) {
+            // BigDecimal 走**同一套**规则（≤3 位小数、整数归一成整数）：
+            // 让金额以精确值进来、以统一格式出去。少了这一支，同一个量会写成
+            // "-25.0000" 与 "-25" 两种形式 —— 那正是"值没变、取代链却多一条"的来源。
+            return format(decimal.doubleValue());
+        }
         if (value instanceof Double || value instanceof Float) {
             double rounded = Math.round(((Number) value).doubleValue() * 1000.0) / 1000.0;
             if (rounded == Math.rint(rounded) && !Double.isInfinite(rounded)) {

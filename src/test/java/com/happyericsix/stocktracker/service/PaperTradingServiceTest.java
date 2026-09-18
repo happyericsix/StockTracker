@@ -121,16 +121,33 @@ class PaperTradingServiceTest {
         ArgumentCaptor<PaperAccount> accountCaptor = ArgumentCaptor.forClass(PaperAccount.class);
         verify(paperAccountRepository, times(2)).save(accountCaptor.capture());
         PaperAccount account = accountCaptor.getAllValues().get(1);
-        assertTrue(account.getShares() > 0);
-        assertTrue(account.getCash() < account.getInitialCapital());
+        assertTrue(account.getShares().signum() > 0);
+        assertTrue(account.getCash().compareTo(account.getInitialCapital()) < 0);
 
         ArgumentCaptor<PaperTrade> tradeCaptor = ArgumentCaptor.forClass(PaperTrade.class);
         verify(paperTradeRepository, times(1)).save(tradeCaptor.capture());
         PaperTrade trade = tradeCaptor.getValue();
         assertEquals("BUY", trade.getSide());
         assertEquals("ma_cross", trade.getReason());
-        assertEquals(10.0, trade.getPrice(), 0.0001);
-        assertEquals(1000.0, trade.getShares(), 0.0001);
+        assertMoney("10", trade.getPrice());
+        assertMoney("1000", trade.getShares());
+    }
+
+    /**
+     * 钱的断言统一走这里：{@code BigDecimal} 比的是**值**，不是标度。
+     *
+     * <p>{@code assertEquals(new BigDecimal("10"), new BigDecimal("10.0000"))} 会失败
+     * （equals 连标度一起比），而它们说的是同一个价格。用 {@code compareTo}
+     * 才不会把"格式不同"报成"金额不同"。
+     */
+    private static void assertMoney(String expected, java.math.BigDecimal actual) {
+        assertEquals(0, new java.math.BigDecimal(expected).compareTo(actual),
+                "期望 " + expected + "，实际 " + actual);
+    }
+
+    private static void assertMoney(String expected, java.math.BigDecimal actual, String message) {
+        assertEquals(0, new java.math.BigDecimal(expected).compareTo(actual),
+                message + "（期望 " + expected + "，实际 " + actual + "）");
     }
 
     @Test
@@ -171,14 +188,14 @@ class PaperTradingServiceTest {
         ArgumentCaptor<PaperAccount> accountCaptor = ArgumentCaptor.forClass(PaperAccount.class);
         verify(paperAccountRepository, times(2)).save(accountCaptor.capture());
         PaperAccount account = accountCaptor.getAllValues().get(1);
-        assertEquals(900.0, account.getShares(), 0.0001);
-        assertEquals(100.0, account.getCash(), 0.0001);
+        assertMoney("900", account.getShares());
+        assertMoney("100", account.getCash());
 
         ArgumentCaptor<PaperTrade> tradeCaptor = ArgumentCaptor.forClass(PaperTrade.class);
         verify(paperTradeRepository, times(1)).save(tradeCaptor.capture());
         PaperTrade trade = tradeCaptor.getValue();
-        assertEquals(900.0, trade.getShares(), 0.0001);
-        assertEquals(9000.0, trade.getAmount(), 0.0001);
+        assertMoney("900", trade.getShares());
+        assertMoney("9000", trade.getAmount());
     }
 
     @Test
@@ -249,8 +266,8 @@ class PaperTradingServiceTest {
 
         PaperAccountResponse response = paperTradingService.startPaper("alice", 10L);
 
-        assertEquals(1000.0, response.getShares(), 0.0001);
-        assertEquals(10.0, response.getLastPrice(), 0.0001);
+        assertMoney("1000", response.getShares());
+        assertMoney("10", response.getLastPrice());
         assertEquals("buy", response.getLastSignal());
         assertTrue(response.getLastEvalAt() != null);
         verify(strategyClient, times(1)).evaluateBarRealtime(eq(configJson), eq("AAPL"), isNull());
@@ -388,8 +405,9 @@ class PaperTradingServiceTest {
                 .configJson(configJson).user(user).paperEnabled(true).build();
         PaperAccount account = PaperAccount.builder()
                 .id(5L).user(user).strategy(strategy)
-                .initialCapital(10000.0).cash(0.0).shares(1000.0).avgCost(10.0)
-                .equity(12345.0).highWatermark(12.0).build();
+                .initialCapital(new java.math.BigDecimal("10000.00")).cash(new java.math.BigDecimal("0.00"))
+                .shares(new java.math.BigDecimal("1000.0000")).avgCost(new java.math.BigDecimal("10.0000"))
+                .equity(new java.math.BigDecimal("12345.00")).highWatermark(new java.math.BigDecimal("12.0000")).build();
 
         when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
         when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
@@ -406,9 +424,10 @@ class PaperTradingServiceTest {
 
         paperTradingService.evaluateDaily();
 
-        assertEquals(12345.0, account.getEquity(), 1e-9, "取数失败时净值不能被砸到 0");
-        assertEquals(1000.0, account.getShares(), 1e-9);
-        assertEquals(0.0, account.getCash(), 1e-9);
+        assertEquals(0, new java.math.BigDecimal("12345.00").compareTo(account.getEquity()),
+                "取数失败时净值不能被砸到 0");
+        assertMoney("1000", account.getShares());
+        assertMoney("0", account.getCash());
         assertNull(account.getLastEvalAt(), "跳过结算就不该写 lastEvalAt");
     }
 
@@ -432,8 +451,9 @@ class PaperTradingServiceTest {
                 .configJson(configJson).user(user).paperEnabled(true).build();
         PaperAccount account = PaperAccount.builder()
                 .id(5L).user(user).strategy(strategy)
-                .initialCapital(10000.0).cash(10000.0).shares(0.0).avgCost(0.0)
-                .equity(10000.0).highWatermark(0.0).build();
+                .initialCapital(new java.math.BigDecimal("10000.00")).cash(new java.math.BigDecimal("10000.00"))
+                .shares(java.math.BigDecimal.ZERO).avgCost(java.math.BigDecimal.ZERO)
+                .equity(new java.math.BigDecimal("10000.00")).highWatermark(java.math.BigDecimal.ZERO).build();
 
         when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
         when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
@@ -455,8 +475,8 @@ class PaperTradingServiceTest {
         assertEquals(ExecutionContract.DECISION_SKIP, trace.getDecision());
         assertEquals(ExecutionContract.SKIP_INSUFFICIENT_CASH_FOR_ONE_LOT, trace.getSkipReason());
         // 账户一个字段都不能动
-        assertEquals(10000.0, account.getCash(), 1e-9);
-        assertEquals(0.0, account.getShares(), 1e-9);
+        assertMoney("10000", account.getCash());
+        assertMoney("0", account.getShares());
         // 结算前后都记下来，痕迹才能回答"从什么状态到（没）什么状态"
         assertEquals(0, trace.getEquityBefore().compareTo(trace.getEquityAfter()));
         // 证据与口径一起留：事后要能看出"当时价格是 1500、按 close 成交"
@@ -649,8 +669,9 @@ class PaperTradingServiceTest {
                 .configJson(configJson).user(user).paperEnabled(true).build();
         PaperAccount account = PaperAccount.builder()
                 .id(5L).user(user).strategy(strategy)
-                .initialCapital(10000.0).cash(0.0).shares(100.0).avgCost(10.0)
-                .equity(1000.0).highWatermark(10.0)
+                .initialCapital(new java.math.BigDecimal("10000.00")).cash(new java.math.BigDecimal("0.00"))
+                .shares(new java.math.BigDecimal("100.0000")).avgCost(new java.math.BigDecimal("10.0000"))
+                .equity(new java.math.BigDecimal("1000.00")).highWatermark(new java.math.BigDecimal("10.0000"))
                 .lastBuyBar("2026-09-17 09:35:00")
                 .build();
 
@@ -677,8 +698,8 @@ class PaperTradingServiceTest {
         assertEquals(ExecutionContract.TRIGGER_MANUAL, trace.getTrigger(),
                 "手动启动触发的首次评估要能被区分出来");
         // 没卖出去：持仓与现金都不许变
-        assertEquals(100.0, account.getShares(), 1e-9);
-        assertEquals(0.0, account.getCash(), 1e-9);
+        assertMoney("100", account.getShares());
+        assertMoney("0", account.getCash());
         verify(paperTradeRepository, never()).save(any(PaperTrade.class));
     }
 
@@ -751,8 +772,9 @@ class PaperTradingServiceTest {
                 .configJson(configJson).user(user).paperEnabled(true).build();
         PaperAccount account = PaperAccount.builder()
                 .id(5L).user(user).strategy(strategy)
-                .initialCapital(10000.0).cash(0.0).shares(100.0).avgCost(10.0)
-                .equity(1000.0).highWatermark(10.0)
+                .initialCapital(new java.math.BigDecimal("10000.00")).cash(new java.math.BigDecimal("0.00"))
+                .shares(new java.math.BigDecimal("100.0000")).avgCost(new java.math.BigDecimal("10.0000"))
+                .equity(new java.math.BigDecimal("1000.00")).highWatermark(new java.math.BigDecimal("10.0000"))
                 .build();
 
         when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
@@ -770,6 +792,6 @@ class PaperTradingServiceTest {
         ArgumentCaptor<PaperTradeTrace> captor = ArgumentCaptor.forClass(PaperTradeTrace.class);
         verify(paperTraceService, times(1)).record(captor.capture());
         assertEquals(ExecutionContract.SKIP_STATE_MISMATCH, captor.getValue().getSkipReason());
-        assertEquals(100.0, account.getShares(), 1e-9, "不该加仓");
+        assertMoney("100", account.getShares(), "不该加仓");
     }
 }

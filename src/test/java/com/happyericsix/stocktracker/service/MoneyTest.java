@@ -75,4 +75,26 @@ class MoneyTest {
         assertEquals(900, Money.shares(900.0));
         assertEquals(900, Money.shares(new BigDecimal("900.9999")));
     }
+
+    /**
+     * 迁移到 DECIMAL 的**理由**，用一组真实会对不上的数写出来。
+     *
+     * <p>100 股 × 10.1234 元 = 1012.34 元，加上现金 8999.87 应当等于 10012.21。
+     * 用 double 算，这个和是 10012.210000000001 —— 零容差的恒等式当场不成立。
+     * 一次买入就差 1e-12，几百笔之后"净值怎么少了几分钱"就再也说不清了。
+     */
+    @Test
+    void theReasonForMigratingToDecimalInOneAssertion() {
+        BigDecimal cash = new BigDecimal("8999.87");
+        BigDecimal shares = new BigDecimal("100");
+        BigDecimal price = new BigDecimal("10.1234");
+        BigDecimal equity = new BigDecimal("10012.21");
+
+        assertTrue(Money.equityIdentityHolds(cash, shares, price, equity));
+
+        // 同样的账用 double 走一遍：和里多出了浮点尾数
+        double doubleSum = cash.doubleValue() + shares.doubleValue() * price.doubleValue();
+        assertFalse(doubleSum == equity.doubleValue(),
+                "如果这里相等了，说明选的数字没有暴露浮点问题 —— 换一组更有代表性的");
+    }
 }

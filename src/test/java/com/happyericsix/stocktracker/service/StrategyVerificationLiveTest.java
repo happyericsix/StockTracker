@@ -147,8 +147,11 @@ class StrategyVerificationLiveTest {
                 mock(com.happyericsix.stocktracker.repository.PaperEquitySnapshotRepository.class),
                 reading, messageService);
 
-        PaperAccount account = PaperAccount.builder().id(1L).initialCapital(100000.0)
-                .cash(100000.0).shares(0.0).equity(100000.0).build();
+        PaperAccount account = PaperAccount.builder().id(1L)
+                .initialCapital(new java.math.BigDecimal("100000.00"))
+                .cash(new java.math.BigDecimal("100000.00"))
+                .shares(java.math.BigDecimal.ZERO)
+                .equity(new java.math.BigDecimal("100000.00")).build();
         report.composeDailyReport(strategy, account, LocalDate.now());
 
         ArgumentCaptor<String> content = ArgumentCaptor.forClass(String.class);

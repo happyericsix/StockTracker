@@ -6,6 +6,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 
@@ -42,14 +43,16 @@ public class PaperTrade {
     @Column(nullable = false)
     private String side;
 
-    @Column(nullable = false)
-    private Double price;
+    /** 成交价（价格口径 4 位小数）。 */
+    @Column(nullable = false, precision = 18, scale = 4)
+    private BigDecimal price;
 
-    @Column(nullable = false)
-    private Double shares;
+    @Column(nullable = false, precision = 18, scale = 4)
+    private BigDecimal shares;
 
-    @Column(nullable = false)
-    private Double amount;
+    /** 成交额 = 价格 × 股数（金额口径 2 位小数）。 */
+    @Column(nullable = false, precision = 18, scale = 2)
+    private BigDecimal amount;
 
     @Column
     private String reason;

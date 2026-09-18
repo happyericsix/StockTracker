@@ -29,6 +29,8 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -389,12 +391,16 @@ public class PaperTradingService {
             addFact(facts, subject, ObjectiveFactKeys.PAPER_EQUITY, account.getEquity(), at);
             addFact(facts, subject, ObjectiveFactKeys.PAPER_CASH, account.getCash(), at);
             addFact(facts, subject, ObjectiveFactKeys.PAPER_SHARES, account.getShares(), at);
-            // 收益率的口径只该有一处：初始本金是账户自己的字段，不让调用方各算一遍
-            Double initial = account.getInitialCapital();
-            Double equity = account.getEquity();
-            if (initial != null && initial != 0.0 && equity != null) {
-                addFact(facts, subject, ObjectiveFactKeys.PAPER_RETURN_PCT,
-                        (equity - initial) / initial * 100.0, at);
+            // 收益率的口径只该有一处：初始本金是账户自己的字段，不让调用方各算一遍。
+            // 用 BigDecimal 除再量化（收益率 4 位）—— 换成 double 除会让"净值没变"的日子
+            // 因为浮点误差写出一个非 0 的收益率，取代链上就多出一条假变更。
+            BigDecimal initial = account.getInitialCapital();
+            BigDecimal equityNow = account.getEquity();
+            if (initial != null && initial.signum() != 0 && equityNow != null) {
+                BigDecimal returnPct = equityNow.subtract(initial)
+                        .multiply(BigDecimal.valueOf(100))
+                        .divide(initial, Money.RETURN_SCALE, RoundingMode.HALF_UP);
+                addFact(facts, subject, ObjectiveFactKeys.PAPER_RETURN_PCT, returnPct, at);
             }
             addFact(facts, subject, ObjectiveFactKeys.PAPER_LAST_EVAL_AT,
                     at.withNano(0).toString(), at);
@@ -404,12 +410,11 @@ public class PaperTradingService {
             PaperEquitySeries.Summary series = PaperEquitySeries.summarize(
                     paperEquitySnapshotRepository.findByStrategyIdOrderByTradeDateAsc(strategy.getId()));
             if (series.maxDrawdownPct() != null) {
-                // 走 doubleValue()：事实通道的值格式有统一口径（≤3 位小数、整数归一成整数），
-                // 由 ObjectiveFactKeys.format 一处决定，Python 侧同规则。
-                // 直接塞 BigDecimal 会绕过它，于是同一个量在两边写成 "-25.0000" 与 "-25" ——
-                // 那正是"值没变、取代链却多一条"的来源。
+                // 直接送 BigDecimal：值格式由 ObjectiveFactKeys.format **一处**决定
+                //（≤3 位小数、整数归一成整数；Python 侧同规则）。
+                // 在这里先 doubleValue() 会是"两处各决定一次格式"的第一步。
                 addFact(facts, subject, ObjectiveFactKeys.PAPER_MAX_DRAWDOWN_PCT,
-                        series.maxDrawdownPct().doubleValue(), at);
+                        series.maxDrawdownPct(), at);
             }
             if (series.hasData()) {
                 addFact(facts, subject, ObjectiveFactKeys.PAPER_FLAT_DAYS, series.flatDays(), at);
@@ -497,18 +502,21 @@ public class PaperTradingService {
                                         String settlementKind, String trigger) {
         JsonNode config = parseConfig(strategy.getConfigJson());
         JsonNode risk = config.get("risk");
-        double commission = doubleOr(field(risk, "commission_pct"), DEFAULT_COMMISSION_PCT) / 100.0;
-        double slippage = doubleOr(field(risk, "slippage_pct"), DEFAULT_SLIPPAGE_PCT) / 100.0;
+        // 费率一律走 BigDecimal：它们是"乘在钱上的数"，用 double 相乘会把二进制误差
+        // 带进成交额，而净值恒等式要逐笔对上账（见 Money）。
+        BigDecimal commission = rate(field(risk, "commission_pct"), DEFAULT_COMMISSION_PCT);
+        BigDecimal slippage = rate(field(risk, "slippage_pct"), DEFAULT_SLIPPAGE_PCT);
         // A 股卖出印花税（0.05%）与整手规则：科创板 688/689 起购 200 股，其余默认 100 股/手
-        double stampTax = doubleOr(field(risk, "stamp_tax_pct"), DEFAULT_STAMP_TAX_PCT) / 100.0;
-        double lot = doubleOr(field(risk, "lot_size"), defaultLotFor(strategy.getSymbol()));
+        BigDecimal stampTax = rate(field(risk, "stamp_tax_pct"), DEFAULT_STAMP_TAX_PCT);
+        BigDecimal lot = Money.price(numberOr(field(risk, "lot_size"),
+                defaultLotFor(strategy.getSymbol())));
 
         JsonNode positionConfig = config.get("position");
         String positionType = textOr(field(positionConfig, "type"), DEFAULT_POSITION_TYPE);
-        double sizePct = doubleOr(field(positionConfig, "size_pct"), DEFAULT_SIZE_PCT) / 100.0;
+        BigDecimal sizePct = rate(field(positionConfig, "size_pct"), DEFAULT_SIZE_PCT);
 
         String signal = textOr(result.get("signal"), "").toLowerCase(Locale.ROOT);
-        double price = doubleOr(result.get("price"), 0.0);
+        BigDecimal price = Money.price(priceOf(result));
 
         // 痕迹在**结算开始前**就建好（含账户的"结算前"状态与这根 bar 的证据）：
         // 这样每一条提前返回的分支都只是补上"结论 + 原因"，不会有哪条路悄悄漏掉痕迹。
@@ -523,7 +531,7 @@ public class PaperTradingService {
         // 于是"净值 = 现金 + 股数 × 0" = 现金 —— 一次瞬时取数失败就把持仓市值抹掉，
         // 而净值现在还会写进客观事实通道被长期记住。跳过才是正确行为：
         // 宁可不结算（并留下 skip 原因），也不要写一个错的净值。
-        if (price <= 0.0) {
+        if (price == null || price.signum() <= 0) {
             String reason = ExecutionContract.normalizeSkipReason(
                     result.has("error") ? ExecutionContract.SKIP_DATA_UNAVAILABLE
                             : ExecutionContract.SKIP_INVALID_PRICE);
@@ -533,44 +541,50 @@ public class PaperTradingService {
         }
 
         String reason = joinMatchedConditions(result.get("matched_conditions"));
-        double cash = account.getCash() == null ? 0.0 : account.getCash();
+        BigDecimal cash = orZero(account.getCash());
 
         PaperTrade trade = null;
         if ("buy".equals(signal) && !isHolding(account)) {
-            double fill = price * (1.0 + slippage);
-            if (fill <= 0.0) {
+            BigDecimal fill = Money.price(price.multiply(BigDecimal.ONE.add(slippage)));
+            if (fill.signum() <= 0) {
                 log.warn("Invalid fill price for buy on strategy id={}", strategy.getId());
                 return skip(account, trace, ExecutionContract.SKIP_INVALID_PRICE);
             }
 
-            double budget = "percent".equals(positionType) ? cash * sizePct : cash;
-            if (budget <= 0.0) {
+            BigDecimal budget = "percent".equals(positionType)
+                    ? Money.amount(cash.multiply(sizePct)) : cash;
+            if (budget.signum() <= 0) {
                 log.warn("No cash available for buy on strategy id={}", strategy.getId());
                 return skip(account, trace, ExecutionContract.SKIP_INSUFFICIENT_CASH);
             }
 
-            // 整手取整：按 (预算 / (成交价*(1+佣金)*手数)) 向下取整手
-            double shares = Math.floor(budget / (fill * (1.0 + commission) * lot)) * lot;
-            while (shares > 0) {
-                double fee = commissionFee(shares * fill, commission);
-                if (shares * fill + fee <= cash) {
+            // 整手取整：按 (预算 / (成交价*(1+佣金)*手数)) **向下**取整手。
+            // 用 divide(...,0,DOWN) 而不是 floor(double)：整手这件事的判定不能靠浮点。
+            BigDecimal perLot = fill.multiply(BigDecimal.ONE.add(commission)).multiply(lot);
+            BigDecimal shares = perLot.signum() <= 0 ? BigDecimal.ZERO
+                    : budget.divide(perLot, 0, RoundingMode.DOWN).multiply(lot);
+            while (shares.signum() > 0) {
+                BigDecimal turnover = shares.multiply(fill);
+                if (turnover.add(commissionFee(turnover, commission)).compareTo(cash) <= 0) {
                     break;
                 }
-                shares -= lot;
+                shares = shares.subtract(lot);
             }
-            if (shares <= 0.0) {
+            if (shares.signum() <= 0) {
                 // 这一条最容易"什么都没发生却没人知道"：涨得越高的票越容易撞上
                 //（茅台一手 ~14 万 > 10 万本金），而且账户数字一动不动。
-                log.warn("Not enough cash for even one lot on strategy id={} (fill={})", strategy.getId(), fill);
+                log.warn("Not enough cash for even one lot on strategy id={} (fill={})",
+                        strategy.getId(), fill);
                 return skip(account, trace, ExecutionContract.SKIP_INSUFFICIENT_CASH_FOR_ONE_LOT);
             }
-            double fee = commissionFee(shares * fill, commission);
-            double cashAfter = cash - shares * fill - fee;
-            if (cashAfter < 0.0) {
+            BigDecimal turnover = shares.multiply(fill);
+            BigDecimal fee = commissionFee(turnover, commission);
+            BigDecimal cashAfter = Money.amount(cash.subtract(turnover).subtract(fee));
+            if (cashAfter.signum() < 0) {
                 log.warn("Buy would exceed cash on strategy id={}", strategy.getId());
                 return skip(account, trace, ExecutionContract.SKIP_INSUFFICIENT_CASH);
             }
-            account.setShares(shares);
+            account.setShares(Money.price(shares));
             account.setAvgCost(fill);
             account.setCash(cashAfter);
             account.setHighWatermark(fill);
@@ -580,23 +594,24 @@ public class PaperTradingService {
             // T+1：A 股当日买入当日不可卖（barTime 带日期时按自然日判断）
             boolean t1Blocked = barTime != null && account.getLastBuyBar() != null
                     && sameTradingDay(barTime, account.getLastBuyBar());
-            double fill = price * (1.0 - slippage);
+            BigDecimal fill = Money.price(price.multiply(BigDecimal.ONE.subtract(slippage)));
             if (t1Blocked) {
                 log.debug("Paper: T+1 blocks sell on same trading day (bar {}) for strategy id={}",
                         barTime, strategy.getId());
                 return skip(account, trace, ExecutionContract.SKIP_T1_BLOCKED);
-            } else if (fill <= 0.0) {
+            } else if (fill.signum() <= 0) {
                 log.warn("Invalid fill price for sell on strategy id={}", strategy.getId());
                 return skip(account, trace, ExecutionContract.SKIP_INVALID_PRICE);
             } else {
-                double shares = account.getShares();
-                double fee = commissionFee(shares * fill, commission);
-                double stampAmount = shares * fill * stampTax;
-                double cashAfter = cash + shares * fill - fee - stampAmount;
+                BigDecimal shares = Money.price(account.getShares());
+                BigDecimal turnover = shares.multiply(fill);
+                BigDecimal fee = commissionFee(turnover, commission);
+                BigDecimal stampAmount = Money.amount(turnover.multiply(stampTax));
+                BigDecimal cashAfter = Money.amount(cash.add(turnover).subtract(fee).subtract(stampAmount));
                 account.setCash(cashAfter);
-                account.setShares(0.0);
-                account.setAvgCost(0.0);
-                account.setHighWatermark(0.0);
+                account.setShares(BigDecimal.ZERO.setScale(Money.PRICE_SCALE));
+                account.setAvgCost(BigDecimal.ZERO.setScale(Money.PRICE_SCALE));
+                account.setHighWatermark(BigDecimal.ZERO.setScale(Money.PRICE_SCALE));
                 account.setLastBuyBar(null);
                 trade = buildTrade(strategy, account, tradeDate, "SELL", fill, shares, reason);
             }
@@ -743,7 +758,8 @@ public class PaperTradingService {
 
     private void initializeAccount(PaperAccount account, Strategy strategy) {
         JsonNode config = parseConfig(strategy.getConfigJson());
-        double initialCapital = doubleOr(config.get("initial_capital"), DEFAULT_INITIAL_CAPITAL);
+        BigDecimal initialCapital = Money.amount(numberOr(config.get("initial_capital"),
+                DEFAULT_INITIAL_CAPITAL));
 
         if (account.getUser() == null) {
             account.setUser(strategy.getUser());
@@ -761,13 +777,13 @@ public class PaperTradingService {
             account.setEquity(account.getCash());
         }
         if (account.getShares() == null) {
-            account.setShares(0.0);
+            account.setShares(zeroPrice());
         }
         if (account.getAvgCost() == null) {
-            account.setAvgCost(0.0);
+            account.setAvgCost(zeroPrice());
         }
         if (account.getHighWatermark() == null) {
-            account.setHighWatermark(0.0);
+            account.setHighWatermark(zeroPrice());
         }
     }
 
@@ -776,29 +792,35 @@ public class PaperTradingService {
             return null;
         }
         ObjectNode position = mapper.createObjectNode();
-        position.put("entry_price", account.getAvgCost() == null ? 0.0 : account.getAvgCost());
-        position.put("shares", account.getShares() == null ? 0.0 : account.getShares());
-        position.put("high_watermark", account.getHighWatermark() == null ? 0.0 : account.getHighWatermark());
+        position.put("entry_price", orZero(account.getAvgCost()));
+        position.put("shares", orZero(account.getShares()));
+        position.put("high_watermark", orZero(account.getHighWatermark()));
         return position;
     }
 
-    private void updateEquityAndHighWatermark(PaperAccount account, double price) {
-        double shares = account.getShares() == null ? 0.0 : account.getShares();
-        double cash = account.getCash() == null ? 0.0 : account.getCash();
-        account.setEquity(cash + shares * price);
+    /**
+     * 净值与最高水位：**唯一**写这两个字段的地方。
+     *
+     * <p>恒等式 {@code equity = cash + shares × price} 在这里按 {@code Money} 的口径量化（2 位）——
+     * 这是"逐笔对上账"的落点：不是"看起来差不多"，而是相等。
+     */
+    private void updateEquityAndHighWatermark(PaperAccount account, BigDecimal price) {
+        BigDecimal shares = orZero(account.getShares());
+        BigDecimal cash = orZero(account.getCash());
+        account.setEquity(Money.equity(cash.add(shares.multiply(price))));
 
-        if (shares > 0.0) {
-            double currentWatermark = account.getHighWatermark() == null
+        if (shares.signum() > 0) {
+            BigDecimal currentWatermark = account.getHighWatermark() == null
                     ? (account.getAvgCost() == null ? price : account.getAvgCost())
                     : account.getHighWatermark();
-            if (price > currentWatermark) {
+            if (price.compareTo(currentWatermark) > 0) {
                 account.setHighWatermark(price);
             }
         }
     }
 
     private PaperTrade buildTrade(Strategy strategy, PaperAccount account, LocalDate tradeDate,
-                                  String side, double fill, double shares, String reason) {
+                                  String side, BigDecimal fill, BigDecimal shares, String reason) {
         return PaperTrade.builder()
                 .user(strategy.getUser())
                 .strategy(strategy)
@@ -807,28 +829,53 @@ public class PaperTradingService {
                 .symbol(strategy.getSymbol())
                 .side(side)
                 .price(fill)
-                .shares(shares)
-                .amount(shares * fill)
+                .shares(Money.price(shares))
+                .amount(Money.amount(shares.multiply(fill)))
                 .reason(reason)
                 .build();
     }
 
     private boolean isHolding(PaperAccount account) {
-        return account.getShares() != null && account.getShares() > 0.0;
+        return account.getShares() != null && account.getShares().signum() > 0;
     }
 
-    /** A 股佣金：费率>0 时按 max(成交额*费率, 5元) 收取；费率=0（测试配置）不收 */
-    private double commissionFee(double turnover, double commission) {
-        if (commission <= 0.0 || turnover <= 0.0) {
-            return 0.0;
+    /**
+     * A 股佣金：费率>0 时按 {@code max(成交额 × 费率, 5 元)} 收取；费率=0（测试配置）不收。
+     *
+     * <p>5 元下限对**小额**成交是隐形门槛：一次只买 500 元时按 0.1% 本该收 0.5 元、实际收 5 元，
+     * 单边成本就是 1%。这是真实券商的规则，所以照做（不"优化"掉），
+     * 但它意味着小账户的每一笔都更贵 —— 这一点在报告与回测里都应当看得见。
+     */
+    private BigDecimal commissionFee(BigDecimal turnover, BigDecimal commission) {
+        if (commission.signum() <= 0 || turnover.signum() <= 0) {
+            return BigDecimal.ZERO.setScale(Money.AMOUNT_SCALE);
         }
-        return Math.max(turnover * commission, DEFAULT_MIN_COMMISSION_YUAN);
+        return Money.amount(turnover.multiply(commission)
+                .max(BigDecimal.valueOf(DEFAULT_MIN_COMMISSION_YUAN)));
     }
 
     /** A 股整手：科创板 688/689 起购 200 股/手，其余 100 股/手（可用 risk.lot_size 覆盖） */
     private double defaultLotFor(String symbol) {
         String s = symbol == null ? "" : symbol.toUpperCase(Locale.ROOT);
         return (s.startsWith("688") || s.startsWith("689")) ? 200.0 : 100.0;
+    }
+
+    private static BigDecimal zeroPrice() {
+        return BigDecimal.ZERO.setScale(Money.PRICE_SCALE);
+    }
+
+    private static BigDecimal orZero(BigDecimal value) {
+        return value == null ? BigDecimal.ZERO : value;
+    }
+
+    /** 配置里的费率/比例：百分数 → 小数（0.1 → 0.001）。缺省值走同一个入口，不两处各写一遍。 */
+    private static BigDecimal rate(JsonNode node, double defaultPct) {
+        return Money.ratePct(numberOr(node, defaultPct)).movePointLeft(2);
+    }
+
+    /** 数字字段：不是数字就用缺省值（JSON 里可能是 null / "N/A" / 字符串）。 */
+    private static Double numberOr(JsonNode node, Double fallback) {
+        return node == null || !node.isNumber() ? fallback : node.asDouble();
     }
 
     /** bar 时间形如 "yyyy-MM-dd HH:mm:ss"，按自然日前 10 位判断是否同一交易日 */

@@ -354,9 +354,16 @@ R11 | 成本累积 | 见 §7.2 成本上限（v2 新增） |
 4. **钱的精度先落到 Java**：`service/Money.java` 是 Python `MoneyPolicy` 的镜像
    （price 4 / amount 2 / equity 2 / return 4，HALF_UP，且**先转字符串**再 `BigDecimal`）。
    痕迹的金额列一律 `DECIMAL`：证据本身带二进制误差时，"对账"这件事就无从谈起。
-   ⚠️ **尚未迁移**：`paper_accounts` / `paper_trades` 的列仍是 `DOUBLE`。
-   `ddl-auto=update` 不会改已有列的类型，所以迁移需要显式的 DDL（见下），
-   在那之前痕迹记的是"当时账户里的值"（无损转换，但源头的精度仍是 double）。
+   ✅ **账户与成交也已迁到 DECIMAL（2026-09-18）**：`paper_accounts` / `paper_trades`
+   的字段全部改成 `BigDecimal`，结算路径（整手取整、佣金下限、印花税、净值与最高水位）
+   重写为定点运算，`PaperAccountResponse` / `PaperTradeResponse` 同步。
+   理由用一条断言写死：100 股 × 10.1234 元 + 现金 8999.87 应当**恰好**等于 10012.21，
+   而 double 算出来是 10012.210000000001（见 `MoneyTest`）。
+   ⚠️ **已有库仍需跑一次 DDL**：`ddl-auto=update` 只加列、**不改列类型**，
+   所以老库里的列还是 `DOUBLE`。脚本在
+   `docs/superpowers/specs/2026-09-18-paper-money-decimal.sql`；
+   启动时 `MoneySchemaCheck` 会用 JDBC 元数据查一遍，不一致就 WARN 并把 ALTER 打出来
+   （只告警不中断 —— 但绝不静默："以为迁了、其实没迁"的钱包比没迁更危险）。
 
 ```sql
 -- 账户与成交的钱迁到 DECIMAL（与 Money.java / MoneyPolicy 同一口径）。
