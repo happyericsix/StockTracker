@@ -71,6 +71,12 @@ python-data-service/chroma_data/
 python-data-service/chroma_test/
 python-data-service/chroma_test_zh/
 
+### 运行时产物：服务一跑就生成，属于本机状态 ###
+# 与 chroma_data/ 同一类：记忆索引与外部数据暂存都是"跑起来就有"的东西，
+# 跟踪它们会让每次启动都产生一个 diff。
+python-data-service/.memory_index/
+python-data-service/.external_offload/
+
 ### Frontend (Vue / Vite) ###
 frontend/node_modules/
 frontend/dist/

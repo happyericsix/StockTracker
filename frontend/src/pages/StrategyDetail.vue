@@ -128,6 +128,22 @@ const sideLabel = (side) => {
   return side || 'N/A'
 }
 
+/**
+ * 持仓市值 = 股数 × **最新价**。
+ *
+ * <p>以前这里写的是 `shares * avgCost`，也就是**成本**，却挂着"持仓市值"的标签：
+ * 一个浮盈的账户会显示成几乎不赚钱，而这一页正是用来看"到底赚没赚"的。
+ * 最新价拿不到时返回 null（显示 N/A），而不是拿成本冒充市值。
+ */
+const positionValue = computed(() => {
+  const a = account.value
+  if (!a || a.lastPrice === null || a.lastPrice === undefined) return null
+  const shares = Number(a.shares)
+  const price = Number(a.lastPrice)
+  if (Number.isNaN(shares) || Number.isNaN(price)) return null
+  return shares * price
+})
+
 const prettyConfig = computed(() => {
   const cfg = strategy.value?.configJson
   if (!cfg) return '{}'
@@ -755,7 +771,7 @@ onUnmounted(() => {
           <div v-if="account" class="account-grid num">
             <div><span>总权益</span><strong>{{ formatMoney(account.equity) }}</strong></div>
             <div><span>现金</span><strong>{{ formatMoney(account.cash) }}</strong></div>
-            <div><span>持仓市值</span><strong>{{ formatMoney(account.shares * account.avgCost) }}</strong></div>
+            <div><span>持仓市值</span><strong>{{ formatMoney(positionValue) }}</strong></div>
             <div><span>初始资金</span><strong>{{ formatMoney(account.initialCapital) }}</strong></div>
             <div><span>持仓数量</span><strong>{{ account.shares }}</strong></div>
             <div><span>平均成本</span><strong>{{ formatMoney(account.avgCost) }}</strong></div>
