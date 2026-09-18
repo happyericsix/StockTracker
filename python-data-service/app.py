@@ -725,6 +725,58 @@ async def backtest_strategy_endpoint(req: Request):
         return {"valid": False, "error": "策略回测失败，请稍后重试"}
 
 
+# 一次矩阵回测最多取多少只标的：这是**样本外验证**，不是全市场扫描。
+# 上限定得小是刻意的：既是取数成本，也是"别用参数搜索替代思考"的纪律。
+MAX_MATRIX_SYMBOLS = 12
+
+
+@app.post("/api/v1/strategies/backtest-matrix")
+async def backtest_matrix_endpoint(req: Request):
+    """多标的 × 多时段的样本外验证 + 成本归因（**确定性，不调模型**）。
+
+    为什么需要它：单个标的、单段历史的那个回测数字，既可能是运气，也可能是换手磨出来的。
+    这张表回答的是"这条规则换一只票、换一段行情，还成不成立"，以及
+    "亏损里有多少是摩擦吃掉的"。请求体：
+
+        {"strategy_json": {...}, "symbols": ["600519", "000001"], "segments": 3,
+         "start_date": "2025-01-01", "end_date": "2025-12-31", "period": "day"}
+    """
+    from agent.strategy_engine import evaluate_strategy_matrix
+    from agent.strategy_schema import validate_strategy_config
+    from akshare_client import ADJUST_MODE, get_history
+    try:
+        data = await req.json()
+        cfg, err = validate_strategy_config(data.get("strategy_json", {}))
+        if err:
+            return {"valid": False, "error": err}
+        symbols = [str(item).strip() for item in (data.get("symbols") or []) if str(item).strip()]
+        if not symbols and cfg.symbol:
+            symbols = [cfg.symbol]
+        if not symbols:
+            return {"valid": False, "error": "symbols 不能为空"}
+        segments = max(1, min(int(data.get("segments") or 3), 12))
+        start_date = str(data.get("start_date") or "").strip()
+        end_date = str(data.get("end_date") or "").strip()
+        period = str(data.get("period") or "day")
+
+        def collect():
+            return {symbol: get_history(symbol, start_date, end_date, period)
+                    for symbol in symbols[:MAX_MATRIX_SYMBOLS]}
+
+        records_by_symbol = await asyncio.to_thread(collect)
+        result = await asyncio.to_thread(
+            evaluate_strategy_matrix, cfg.model_dump(), records_by_symbol,
+            segments=segments, start_date=start_date, end_date=end_date,
+            adjust_mode=ADJUST_MODE)
+        result["valid"] = True
+        result["strategy_name"] = cfg.name
+        result["requested_symbols"] = symbols
+        return result
+    except Exception as e:
+        logger.error(f"strategy backtest-matrix error: {e}", exc_info=True)
+        return {"valid": False, "error": "矩阵回测失败，请稍后重试"}
+
+
 @app.post("/api/v1/strategies/evaluate-bar")
 async def evaluate_bar_endpoint(req: Request):
     """评估某一天的信号。响应里带**执行口径**（fill_basis / fingerprint）与证据快照。

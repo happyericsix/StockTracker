@@ -263,6 +263,161 @@ def test_evaluate_bar_endpoint_without_data_still_reports_the_basis(monkeypatch)
     assert body["fingerprint"]["fill_basis"] == ec.FILL_CLOSE
 
 
+# ==================== backtest-matrix：样本外验证的入口 ====================
+
+def _matrix_payload(**overrides):
+    payload = {"strategy_json": VALID_STRATEGY, "symbols": ["600519", "000001"], "segments": 3}
+    payload.update(overrides)
+    return payload
+
+
+def test_backtest_matrix_returns_a_table_with_the_basis(monkeypatch):
+    """端到端：这张表必须自带**口径**（复权方式、请求段数、请求标的）。
+
+    一张不写口径的"多标的回测表"是不可解释的：换一次复权方式、换一次分段，
+    同一份策略会给出不同的数字，而看表的人无从知道手里这张是哪一种。
+    """
+    monkeypatch.setattr(akshare_client, "get_history",
+                        lambda symbol, *a, **k: make_bars(n=400, step=0.5))
+
+    c = TestClient(main.app)
+    r = c.post("/api/v1/strategies/backtest-matrix", headers=HEADERS, json=_matrix_payload())
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["valid"] is True
+    assert body["symbols"] == ["600519", "000001"]
+    assert body["adjust_mode"] == akshare_client.ADJUST_MODE
+    assert body["segments_requested"] == 3
+    assert body["per_symbol"][0]["segments_used"] == 3
+    assert body["per_symbol"][0]["warmup_bars"] == 60
+    assert len(body["per_symbol"]) == 2
+    assert body["cells_valid"] > 0
+    for cell in body["per_symbol"][0]["rows"]:
+        assert "attribution" in cell, "每一格都要能回答'亏在方向还是亏在摩擦'"
+
+
+def test_backtest_matrix_shrinks_the_segmentation_instead_of_faking_evidence(monkeypatch):
+    """历史太短时**减少段数并说明**，而不是切出几段全在预热期里的"样本"。
+
+    MA60 的策略要 60 根预热，150 根只够切 1 段（60 预热 + 30 可交易 的下限）。
+    硬切 3 段的话每段 50 根 —— 一格都出不了信号，却在表上写着 0.00%，
+    看起来像"验证过、这规则很稳"。
+    """
+    monkeypatch.setattr(akshare_client, "get_history",
+                        lambda symbol, *a, **k: make_bars(n=150, step=0.5))
+
+    c = TestClient(main.app)
+    r = c.post("/api/v1/strategies/backtest-matrix", headers=HEADERS, json=_matrix_payload())
+    body = r.json()
+
+    first = body["per_symbol"][0]
+    assert body["segments_requested"] == 3
+    assert first["segments_used"] == 1
+    assert "只能切 1 段" in first["note"]
+    assert first["min_bars_per_segment"] == 90
+
+
+def test_backtest_matrix_reports_a_symbol_without_data_instead_of_dropping_it(monkeypatch):
+    """取不到数据的标的**留在表里**并写明原因 —— 静默丢行会让人以为覆盖了全部标的。"""
+    monkeypatch.setattr(akshare_client, "get_history",
+                        lambda symbol, *a, **k: None if symbol == "000001" else make_bars(n=400, step=0.5))
+
+    c = TestClient(main.app)
+    r = c.post("/api/v1/strategies/backtest-matrix", headers=HEADERS, json=_matrix_payload())
+
+    body = r.json()
+    assert body["valid"] is True
+    assert body["symbols"] == ["600519", "000001"]
+    blank = [item for item in body["per_symbol"] if item["symbol"] == "000001"][0]
+    assert blank["note"] == "取不到行情数据"
+    assert blank["rows"] == []
+
+
+def test_backtest_matrix_caps_the_symbol_count(monkeypatch):
+    """上限是可验证的纪律：多给的标的会被截断，而**请求列表照实回报**。"""
+    seen = []
+
+    def recording(symbol, *a, **k):
+        seen.append(symbol)
+        return make_bars(n=400, step=0.5)
+
+    monkeypatch.setattr(akshare_client, "get_history", recording)
+
+    symbols = [f"{600000 + i}" for i in range(main.MAX_MATRIX_SYMBOLS + 3)]
+    c = TestClient(main.app)
+    r = c.post("/api/v1/strategies/backtest-matrix", headers=HEADERS,
+               json=_matrix_payload(symbols=symbols))
+
+    body = r.json()
+    assert len(seen) == main.MAX_MATRIX_SYMBOLS
+    assert body["requested_symbols"] == symbols
+    assert body["symbols"] == symbols[:main.MAX_MATRIX_SYMBOLS]
+
+
+def test_backtest_matrix_falls_back_to_the_strategy_symbol(monkeypatch):
+    monkeypatch.setattr(akshare_client, "get_history",
+                        lambda symbol, *a, **k: make_bars(n=400, step=0.5))
+
+    c = TestClient(main.app)
+    r = c.post("/api/v1/strategies/backtest-matrix", headers=HEADERS,
+               json=_matrix_payload(symbols=[]))
+
+    assert r.json()["symbols"] == [VALID_STRATEGY["symbol"]]
+
+
+def test_backtest_matrix_rejects_a_bad_strategy(monkeypatch):
+    monkeypatch.setattr(akshare_client, "get_history",
+                        lambda symbol, *a, **k: make_bars(n=400, step=0.5))
+
+    c = TestClient(main.app)
+    r = c.post("/api/v1/strategies/backtest-matrix", headers=HEADERS,
+               json=_matrix_payload(strategy_json={"entry": {}}))
+
+    assert r.json()["valid"] is False
+
+
+def test_backtest_matrix_clamps_segments(monkeypatch):
+    """段数是取数成本与样本量的折中：给个荒唐的段数不该把服务打爆。"""
+    monkeypatch.setattr(akshare_client, "get_history",
+                        lambda symbol, *a, **k: make_bars(n=400, step=0.5))
+
+    c = TestClient(main.app)
+    r = c.post("/api/v1/strategies/backtest-matrix", headers=HEADERS,
+               json=_matrix_payload(segments=999))
+
+    body = r.json()
+    assert body["valid"] is True
+    assert body["segments_requested"] <= 12
+
+
+def test_backtest_matrix_passes_the_date_range_to_the_source(monkeypatch):
+    """区间必须**原样传给取数**：这正是"换一段行情还成不成立"的前提。
+
+    这条用例是有来历的：区间曾经被接口的 `limit` 静默砍成"最近 500 根"，
+    请求 2023 年起、实际只跑到 2024-08，而表上没有任何地方能看出来。
+    """
+    calls = []
+
+    def recording(symbol, start_date="", end_date="", *a, **k):
+        calls.append((symbol, start_date, end_date))
+        return make_bars(n=400, step=0.5)
+
+    monkeypatch.setattr(akshare_client, "get_history", recording)
+
+    c = TestClient(main.app)
+    r = c.post("/api/v1/strategies/backtest-matrix", headers=HEADERS,
+               json=_matrix_payload(start_date="2023-01-01", end_date="2026-09-17"))
+
+    body = r.json()
+    assert calls and all(call[1] == "2023-01-01" and call[2] == "2026-09-17" for call in calls)
+    assert body["start_date"] == "2023-01-01"
+    assert body["end_date"] == "2026-09-17"
+    # 表上要能看出**实际**覆盖到哪一天，而不是只写请求的区间
+    assert body["per_symbol"][0]["first_date"] == make_bars(n=400, step=0.5)[0]["date"]
+    assert body["per_symbol"][0]["last_date"] == make_bars(n=400, step=0.5)[-1]["date"]
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

@@ -39,6 +39,30 @@ public class StrategyClient {
         return post("/api/v1/strategies/backtest", java.util.Map.of("strategy_json", raw(configJson)));
     }
 
+    /**
+     * 多标的 × 多时段的样本外验证 + 成本归因（确定性，不调模型）。
+     *
+     * <p>为什么 Java 也要有这条路：单个标的的单段回测只能说明"这段行情里数字是这样"，
+     * 而"这条规则到底行不行"必须换票换段才答得出来。盘后复盘报告要用同一份结果，
+     * 所以口径（复权、分段、区间）全部由端点回传，Java 不自己组装。
+     *
+     * @param configJson 策略 JSON
+     * @param symbols    要验证的标的（空则用策略自带的 symbol）
+     * @param segments   切成几段（端点会按预热根数自动减少段数并说明）
+     * @param startDate  起点 YYYY-MM-DD，可空
+     * @param endDate    终点 YYYY-MM-DD，可空
+     */
+    public JsonNode backtestMatrix(String configJson, java.util.List<String> symbols, int segments,
+                                   String startDate, String endDate) {
+        var body = new HashMap<String, Object>();
+        body.put("strategy_json", raw(configJson));
+        if (symbols != null && !symbols.isEmpty()) body.put("symbols", symbols);
+        body.put("segments", segments);
+        if (startDate != null && !startDate.isBlank()) body.put("start_date", startDate);
+        if (endDate != null && !endDate.isBlank()) body.put("end_date", endDate);
+        return post("/api/v1/strategies/backtest-matrix", body);
+    }
+
     public JsonNode getModelDiagnostic(String symbol) {
         return get("/api/v1/agent/diagnostic/" + symbol);
     }

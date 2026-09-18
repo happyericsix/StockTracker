@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import logging as _logging
+import re
 
 import numpy as np
 
@@ -42,6 +43,7 @@ from agent.tool_spec import (
     ToolSpec,
 )
 from akshare_client import (
+    ADJUST_MODE,
     QUOTE_BATCH_LIMIT,
     get_financial_abstract,
     get_history,
@@ -53,7 +55,11 @@ from akshare_client import (
     resolve_symbol,
     search_stocks,
 )
-from agent.strategy_engine import compute_indicators, run_backtest_realistic
+from agent.strategy_engine import (
+    compute_indicators,
+    evaluate_strategy_matrix,
+    run_backtest_realistic,
+)
 from agent.strategy_schema import validate_strategy_config
 
 logger = _logging.getLogger(__name__)
@@ -70,6 +76,13 @@ SCOPE_FUNDAMENTAL_READ = "fundamental:read"
 
 HISTORY_DEFAULT_DAYS = 60
 HISTORY_MAX_DAYS = 120
+
+# 矩阵验证的规模上限（工具侧）。端点允许 12 个标的，工具只给 6 个：
+# 一次工具调用要落在一次 ReAct 步骤的预算里，6 标的 × 3 段已经足够回答
+# "这条规则换票换行情还成不成立"，再多就是拿上下文换噪声。
+MATRIX_TOOL_MAX_SYMBOLS = 6
+DEFAULT_MATRIX_SEGMENTS = 3
+MAX_MATRIX_SEGMENTS = 6
 
 NEWS_DEFAULT_ITEMS = 8
 NEWS_MAX_ITEMS = 30
@@ -343,6 +356,119 @@ def _tool_finalize_strategy(args):
     return tc.ok({"valid": True, "error": None, "strategy_json": cfg.model_dump()})
 
 
+def _tool_backtest_matrix(args):
+    """多标的 × 多时段 + 成本归因：回答"这条规则换一只票、换一段行情还成不成立"。
+
+    <h3>为什么单独给模型一个工具，而不是让它多调几次 backtest_strategy</h3>
+    ① **口径**：单次回测只能证明"这只票的这段行情里数字是这样"；
+       换票换段是判断"规则有没有效"的唯一手段。让模型自己循环调用，
+       它会（也很自然会）只挑几只顺手的票，然后下结论 —— 那正是过拟合的入口。
+    ② **上下文**：矩阵的完整明细会塞满上下文（8 标的 × 3 段 × 十几个字段）。
+       所以这里只回**能直接判断的那几个数**，明细留在端点里（人要查的时候再查）。
+    """
+    cfg_json = _require_strategy(args)
+    cfg, err = validate_strategy_config(cfg_json)
+    if err:
+        return tc.ok({"valid": False, "error": err})
+
+    symbols = _clean_symbols(args.get("symbols")) or ([cfg.symbol] if cfg.symbol else [])
+    if not symbols:
+        return tc.fail(tc.INVALID_ARGS, "symbols 不能为空（至少要有一个标的）", retryable=False)
+    symbols = symbols[:MATRIX_TOOL_MAX_SYMBOLS]
+
+    segments = max(1, min(int(args.get("segments") or DEFAULT_MATRIX_SEGMENTS),
+                          MAX_MATRIX_SEGMENTS))
+    start_date = str(args.get("start_date") or "").strip()
+    end_date = str(args.get("end_date") or "").strip()
+    period = str(args.get("period") or "day").lower()
+
+    records = {}
+    for symbol in symbols:
+        if not is_a_share(symbol):
+            records[symbol] = None
+            continue
+        records[symbol] = get_history(symbol, start_date, end_date, period)
+
+    if not any(records.values()):
+        return tc.fail(tc.INSUFFICIENT_DATA,
+                       f"这几个标的都没取到历史数据：{'、'.join(symbols)}", retryable=True)
+
+    matrix = evaluate_strategy_matrix(cfg.model_dump(), records, segments=segments,
+                                      start_date=start_date, end_date=end_date,
+                                      adjust_mode=ADJUST_MODE)
+    return tc.ok(_compact_matrix(matrix))
+
+
+def _clean_symbols(raw) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        raw = [item for item in re.split(r"[,，\s]+", raw) if item]
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
+def _compact_matrix(matrix: dict) -> dict:
+    """矩阵 → 模型能用来判断的那几个数。
+
+    留什么是有讲究的：`beat_buy_and_hold / cells_valid` 回答"有没有超额"，
+    `avg_cost_pct_of_capital` 与 `total_fees` 回答"摩擦吃了多少"，
+    `segments_unaffordable / warmup_only` 回答"这些格子里有几格其实没样本" ——
+    少了最后一组，模型会把"没验证"的格子当成"表现平平"来说。
+    """
+    summary = matrix.get("summary") or {}
+    per_symbol = []
+    for item in matrix.get("per_symbol") or []:
+        row = {"symbol": item["symbol"]}
+        if item.get("note"):
+            row["note"] = item["note"]
+            per_symbol.append(row)
+            continue
+        inner = item.get("summary") or {}
+        row.update({
+            "bars": item.get("bars"),
+            "first_date": item.get("first_date"),
+            "last_date": item.get("last_date"),
+            "segments_used": item.get("segments_used"),
+            "segments_valid": inner.get("segments_valid"),
+            "beat_buy_and_hold": inner.get("beat_buy_and_hold"),
+            "avg_excess_pct": inner.get("avg_excess_pct"),
+            "avg_total_return_pct": inner.get("avg_total_return_pct"),
+            "worst_return_pct": inner.get("worst_return_pct"),
+            "best_return_pct": inner.get("best_return_pct"),
+            "total_fees": inner.get("total_fees"),
+            "segments_unaffordable": inner.get("segments_unaffordable"),
+            "segments_warmup_only": inner.get("segments_warmup_only"),
+        })
+        per_symbol.append(row)
+
+    return {
+        "valid": True,
+        "symbols": matrix.get("symbols"),
+        "adjust_mode": matrix.get("adjust_mode"),
+        "start_date": matrix.get("start_date"),
+        "end_date": matrix.get("end_date"),
+        "segments_requested": matrix.get("segments_requested"),
+        "cells_total": matrix.get("cells_total"),
+        "cells_valid": matrix.get("cells_valid"),
+        "cells_unaffordable": matrix.get("cells_unaffordable"),
+        "cells_warmup_only": matrix.get("cells_warmup_only"),
+        "beat_buy_and_hold": summary.get("beat_buy_and_hold"),
+        "avg_excess_pct": summary.get("avg_excess_pct"),
+        "avg_total_return_pct": summary.get("avg_total_return_pct"),
+        "worst_return_pct": summary.get("worst_return_pct"),
+        "best_return_pct": summary.get("best_return_pct"),
+        "total_fees": summary.get("total_fees"),
+        "avg_cost_pct_of_capital": summary.get("avg_cost_pct_of_capital"),
+        "per_symbol": per_symbol,
+        "note": ("每格是“同一规则换一段行情独立回测”。格子数少于标的×段数时，"
+                 "差额落在 cells_unaffordable（本金买不起一手）与 cells_warmup_only"
+                 "（整段都在指标预热期）里 —— 那些格子**没有样本**，"
+                 "不要当作“表现平平”来解读。"),
+    }
+
+
 def _tool_get_model_status(args):
     return _model_diagnostic(_require_symbol(args), include_consensus=False)
 
@@ -370,6 +496,38 @@ def _strategy_cache_key(args):
             payload = cfg.model_dump()
     digest = hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    return digest[:16]
+
+
+def _matrix_cache_key(args):
+    """矩阵的键 = 策略（归一化）+ **这次真正会跑的标的与区间**。
+
+    少了任一项都会出同一个后果：换了标的却命中上一次的缓存，
+    拿 A 股的结果回答 B 股的问题。所以标的先排序去重、按工具实际会用的上限截断 ——
+    键描述的必须是"将要发生的那次调用"，而不是"模型写的参数"。
+    """
+    import hashlib
+    import json
+
+    strategy_json = args.get("strategy_json")
+    payload = strategy_json
+    if isinstance(strategy_json, dict):
+        cfg, err = validate_strategy_config(strategy_json)
+        if cfg is not None:
+            payload = cfg.model_dump()
+
+    symbols = sorted(set(_clean_symbols(args.get("symbols"))))
+    if not symbols and isinstance(payload, dict):
+        symbols = [payload.get("symbol")] if payload.get("symbol") else []
+    symbols = symbols[:MATRIX_TOOL_MAX_SYMBOLS]
+    segments = max(1, min(int(args.get("segments") or DEFAULT_MATRIX_SEGMENTS), MAX_MATRIX_SEGMENTS))
+
+    key = {"strategy": payload, "symbols": symbols, "segments": segments,
+           "start_date": str(args.get("start_date") or "").strip(),
+           "end_date": str(args.get("end_date") or "").strip(),
+           "period": str(args.get("period") or "day").lower()}
+    digest = hashlib.sha256(
+        json.dumps(key, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
     return digest[:16]
 
 
@@ -653,6 +811,49 @@ _SPECS = (
         timeout_s=30.0, tags=("strategy",),
         # 只有重操作做键归一化：validate/finalize 是毫秒级，没必要多一层
         cache_key=_strategy_cache_key,
+    ),
+    ToolSpec(
+        name="backtest_matrix", namespace="strategy",
+        description=(
+            "Verify a strategy across SEVERAL symbols and SEVERAL time segments at once, "
+            "with cost attribution. Use this (not backtest_strategy) whenever the question is "
+            "'does this rule hold up', 'is it robust', or 'is the loss from the rule or from "
+            "fees'. Returns how many segments beat buy-and-hold, the average excess return, "
+            "total fees and fee drag as a share of capital. Cells that had no tradeable sample "
+            "(capital too small for one lot, or the whole segment inside indicator warm-up) are "
+            "reported separately and must NOT be read as 'flat performance'."),
+        parameters=_obj({
+            "strategy_json": {"type": "object"},
+            "symbols": {
+                "type": "array", "items": {"type": "string"},
+                "description": ("2-6 stock codes to test the SAME rule on. Omit to use the "
+                                "strategy's own symbol. Do not cherry-pick only the symbols that "
+                                "look good — that is how a backtest turns into a story."),
+            },
+            "segments": {"type": "integer",
+                         "description": "How many consecutive time segments to split the history into (default 3, max 6)."},
+            "start_date": {"type": "string", "description": "YYYY-MM-DD, optional"},
+            "end_date": {"type": "string", "description": "YYYY-MM-DD, optional"},
+            "period": {"type": "string", "description": "day / week / month, default day"},
+        }, ["strategy_json"]),
+        handler=_tool_backtest_matrix,
+        layer=LAYER_INTEGRATION, scopes=(SCOPE_STRATEGY_COMPUTE,),
+        cost_class=COST_EXPENSIVE,
+        timeout_s=60.0, tags=("strategy", "verification"),
+        cache_key=_matrix_cache_key,
+        examples=(
+            {
+                "strategy_json": {
+                    "schema_version": "1.0", "name": "60 日线上下穿", "symbol": "600519",
+                    "entry": {"logic": "all", "conditions": [
+                        {"type": "price_cross_ma", "window": 60, "direction": "above"}]},
+                    "exit": {"logic": "any", "conditions": [
+                        {"type": "price_cross_ma", "window": 60, "direction": "below"}]},
+                },
+                "symbols": ["600519", "000001", "600036", "601318"],
+                "segments": 3,
+            },
+        ),
     ),
     ToolSpec(
         name="finalize_strategy", namespace="strategy",

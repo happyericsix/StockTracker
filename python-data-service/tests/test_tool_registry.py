@@ -163,6 +163,138 @@ def test_tool_exception_becomes_envelope():
     assert "network down" in out["error"]["message"]
 
 
+# ==================== backtest_matrix：给模型的样本外验证 ====================
+
+MATRIX_STRATEGY = {
+    "schema_version": "1.0", "name": "上穿60日线", "symbol": "600519",
+    "initial_capital": 100000,
+    "entry": {"logic": "all", "conditions": [
+        {"type": "price_cross_ma", "window": 60, "direction": "above"}]},
+    "exit": {"logic": "any", "conditions": [
+        {"type": "price_cross_ma", "window": 60, "direction": "below"}]},
+}
+
+
+def _matrix_bars(n=400, step=0.6):
+    bars = []
+    for i in range(n):
+        close = 100.0 + step * i
+        bars.append({"date": f"2026-{i // 28 + 1:02d}-{i % 28 + 1:02d}",
+                     "open": close, "high": close + 2, "low": close - 2,
+                     "close": close, "volume": 1000})
+    return bars
+
+
+def _with_history(fake):
+    """临时替换注册表里的取数函数（工具直接 import 了它，所以要补在模块上）。"""
+    class _Patch:
+        def __enter__(self):
+            self.original = registry.get_history
+            registry.get_history = fake
+            return self
+
+        def __exit__(self, *exc):
+            registry.get_history = self.original
+            return False
+
+    return _Patch()
+
+
+def test_backtest_matrix_tool_returns_the_judgeable_numbers():
+    """工具回的是"能直接判断的那几个数"，不是整张明细表。
+
+    明细（每格十几个字段）会吃掉上下文；而判断"这条规则行不行"只需要：
+    跑赢买入持有的格子数、平均超额、摩擦占本金的比、以及有几格其实没样本。
+    """
+    with _with_history(lambda symbol, *a, **k: _matrix_bars()):
+        out = execute_tool("backtest_matrix", {
+            "strategy_json": MATRIX_STRATEGY, "symbols": ["600519", "000001"], "segments": 3})
+
+    assert out["ok"] is True, out
+    data = out["data"]
+    assert data["symbols"] == ["600519", "000001"]
+    assert data["adjust_mode"] == registry.ADJUST_MODE
+    assert data["cells_total"] == 6
+    assert 0 <= data["beat_buy_and_hold"] <= data["cells_valid"]
+    assert data["avg_cost_pct_of_capital"] is not None
+    assert data["total_fees"] is not None
+    # 没样本的格子必须单独报，否则模型会把它们读成"表现平平"
+    assert "cells_unaffordable" in data and "cells_warmup_only" in data
+    assert "没有样本" in data["note"]
+    assert len(data["per_symbol"]) == 2
+    assert "rows" not in data, "明细不该进上下文"
+
+
+def test_backtest_matrix_tool_caps_the_symbols_it_will_actually_run():
+    """模型给多少标的都行，但真正跑的不会超过上限 —— 而且**它自己知道**跑了几只。"""
+    seen = []
+
+    def recording(symbol, *a, **k):
+        seen.append(symbol)
+        return _matrix_bars()
+
+    with _with_history(recording):
+        out = execute_tool("backtest_matrix", {
+            "strategy_json": MATRIX_STRATEGY,
+            "symbols": ["600519", "000001", "600036", "601318", "002594", "600030", "000651"],
+            "segments": 2})
+
+    assert len(seen) == registry.MATRIX_TOOL_MAX_SYMBOLS
+    assert out["data"]["symbols"] == ["600519", "000001", "600036", "601318", "002594", "600030"]
+    assert out["data"]["segments_requested"] == 2
+
+
+def test_backtest_matrix_tool_falls_back_to_the_strategy_symbol():
+    with _with_history(lambda symbol, *a, **k: _matrix_bars()):
+        out = execute_tool("backtest_matrix", {"strategy_json": MATRIX_STRATEGY})
+    assert out["data"]["symbols"] == ["600519"]
+
+
+def test_backtest_matrix_tool_reports_missing_data_as_a_structured_failure():
+    with _with_history(lambda symbol, *a, **k: None):
+        out = execute_tool("backtest_matrix", {
+            "strategy_json": MATRIX_STRATEGY, "symbols": ["600519", "000001"]})
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == tc.INSUFFICIENT_DATA
+
+
+def test_backtest_matrix_tool_keeps_a_symbol_without_data_in_the_table():
+    """一只票取不到数据，其余照跑 —— 静默少一行会让人以为覆盖了全部标的。"""
+    with _with_history(lambda symbol, *a, **k: None if symbol == "000001" else _matrix_bars()):
+        out = execute_tool("backtest_matrix", {
+            "strategy_json": MATRIX_STRATEGY, "symbols": ["600519", "000001"]})
+
+    blank = [row for row in out["data"]["per_symbol"] if row["symbol"] == "000001"][0]
+    assert blank["note"] == "取不到行情数据"
+
+
+def test_backtest_matrix_tool_rejects_a_bad_strategy():
+    with _with_history(lambda symbol, *a, **k: _matrix_bars()):
+        out = execute_tool("backtest_matrix", {"strategy_json": {"entry": {}}})
+    assert out["ok"] is True
+    assert out["data"]["valid"] is False
+
+
+def test_backtest_matrix_cache_key_covers_what_will_actually_run():
+    """缓存键少了标的或区间，就会出现"A 股的结果回答 B 股的问题"。
+
+    键描述的是"将要发生的那次调用"，所以标的顺序不该影响它，标的本身必须影响它。
+    """
+    base = {"strategy_json": MATRIX_STRATEGY, "symbols": ["000001", "600519"]}
+    flipped = {**base, "symbols": ["600519", "000001"]}
+    assert registry._matrix_cache_key(base) == registry._matrix_cache_key(flipped)
+
+    other_symbols = {**base, "symbols": ["600519"]}
+    assert registry._matrix_cache_key(base) != registry._matrix_cache_key(other_symbols)
+
+    other_segments = {**base, "segments": 2}
+    assert registry._matrix_cache_key(base) != registry._matrix_cache_key(other_segments)
+
+    other_range = {**base, "start_date": "2023-01-01"}
+    assert registry._matrix_cache_key(base) != registry._matrix_cache_key(other_range)
+
+
 # ==================== T0：声明式注册表的契约 ====================
 
 def test_registry_self_check_passes():

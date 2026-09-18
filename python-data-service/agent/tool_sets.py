@@ -30,7 +30,7 @@ TOOL_SETS = {
     "core": ("get_quote", "get_history", "memory_search", "get_news"),
     "market": ("search_stock", "get_quote", "get_quotes", "get_history",
                "get_indicators", "get_risk_metrics"),
-    "strategy": ("validate_strategy", "backtest_strategy", "finalize_strategy"),
+    "strategy": ("validate_strategy", "backtest_strategy", "backtest_matrix", "finalize_strategy"),
     "memory": ("memory_search",),
     "model": ("get_model_status", "get_model_consensus"),
     # 外部内容型数据源（T2a）：单独成集，因为它们是唯一"内容不可信"的一类
@@ -43,7 +43,9 @@ MODES = {
     # 闲聊/问答：底座（行情 + 记忆 + 快讯）。快讯进 core 是刻意的：
     # "今天有什么消息"是典型的闲聊式提问，藏掉它模型只会凭训练数据编。
     "chat": ("core",),
-    # 策略工作流：底座 + 行情 + 策略 + 模型诊断（回测后常要解释模型参考）+ 基本面
+    # 策略工作流：底座 + 行情 + 策略（含矩阵验证）+ 模型诊断（回测后常要解释模型参考）+ 基本面
+    # `backtest_matrix` 刻意留在 strategy 集里：样本外验证不是"高级功能"，
+    # 而是"这条规则到底行不行"的唯一答法。
     "strategy": ("core", "market", "strategy", "model", "fundamental"),
     # 行情/分析：底座 + 行情 + 基本面（不含策略工具）
     "market": ("core", "market", "fundamental"),

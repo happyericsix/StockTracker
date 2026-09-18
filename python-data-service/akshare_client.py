@@ -7,6 +7,7 @@
 import logging
 import re
 import time
+from datetime import datetime, timedelta
 from typing import Optional
 import requests
 import threading
@@ -286,21 +287,141 @@ def get_quotes(symbols) -> dict:
 # 而口径一旦改变（除权后前复权价会被重算），历史数据的解释依据就变了。
 ADJUST_MODE = "qfq"
 
+# 一次取多少根（默认最近 500 根 ≈ 两年日线）。
+DEFAULT_HISTORY_COUNT = 500
 
-def get_history(symbol: str, start_date: str = "", end_date: str = "", period: str = "day") -> Optional[list[dict]]:
+# <h3>源头一页最多 640 根 —— 这是探针实测出来的，不是猜的</h3>
+# 腾讯 `fqkline` 的 `limit` 有两个坑，两个都会**静默出错**：
+#   ① 它是"区间内**最近** N 根"。请求 2023-01-01 ~ 2026-09-17 配 limit=500，
+#      回来的是 2024-08-27 之后那 500 根 —— 起点被砍掉，于是
+#      "从 2023 年起做样本外验证"实际只跑了最后两年；
+#   ② `limit` 超过 640 时接口直接返回**空**（探针：limit=3000 → 0 根），
+#      于是"给我整段历史"会变成"这只票没有历史数据"。
+# 所以：根数不许超过这个上限，区间更长时**分页**取，而不是把 limit 开大。
+SOURCE_MAX_BARS = 640
+# 一页覆盖多少自然日（640 交易日 ≈ 2.6 年；留出安全余量，宁可多取一页再裁）
+CHUNK_CALENDAR_DAYS = 900
+# 分页上限（≈ 15 年日线）。再长就不是日线该干的事了 —— 有上限，成本才是可预期的。
+MAX_PAGES = 6
+# 请求起点与源头最早一根之间，多少天以内的差距算"起点那天没有交易"而不是"覆盖不足"。
+# 元旦连休可以到 9 天，所以给 10 天。
+COVERAGE_GRACE_DAYS = 10
+
+
+def _days_between(start: str, end: str) -> int:
+    try:
+        return abs((datetime.strptime(end, "%Y-%m-%d")
+                    - datetime.strptime(start, "%Y-%m-%d")).days)
+    except ValueError:
+        return 0
+
+
+def _limit_for_range(start_date: str, end_date: str, count: Optional[int]) -> int:
+    """每次请求要多少根：显式 `count` 优先，其余取满一页（区间由分页负责）。"""
+    if count:
+        return max(1, min(int(count), SOURCE_MAX_BARS))
+    if not start_date and not end_date:
+        return DEFAULT_HISTORY_COUNT
+    return SOURCE_MAX_BARS
+
+
+def _windows_for(start_date: str, end_date: str) -> list[tuple[str, str]]:
+    """把请求区间切成若干**连续**页，每页不超过一页能取到的根数。
+
+    没有区间时只有一页（`("", "")`，交给接口取最近 N 根）。
+    切不出来（区间格式不对 / 起止颠倒）时也退回单页，由调用方按默认根数取。
+    """
+    if not (start_date or end_date):
+        return [("", "")]
+    start, end = start_date, end_date
+    try:
+        if not start:
+            # 只给了终点：往前推一个可分页的量，具体多少根仍由接口决定
+            start = (datetime.strptime(end, "%Y-%m-%d")
+                     - timedelta(days=CHUNK_CALENDAR_DAYS * MAX_PAGES)).strftime("%Y-%m-%d")
+        start_dt = datetime.strptime(start, "%Y-%m-%d")
+        end_dt = datetime.strptime(end, "%Y-%m-%d") if end else datetime.now()
+    except ValueError:
+        logger.warning("区间格式无法解析（%s ~ %s），按单页取", start_date, end_date)
+        return [("", "")]
+    if end_dt <= start_dt:
+        return [("", "")]
+
+    windows = []
+    cursor = start_dt
+    while cursor < end_dt and len(windows) < MAX_PAGES:
+        page_end = min(cursor + timedelta(days=CHUNK_CALENDAR_DAYS - 1), end_dt)
+        windows.append((cursor.strftime("%Y-%m-%d"), page_end.strftime("%Y-%m-%d")))
+        cursor = page_end + timedelta(days=1)
+    if cursor <= end_dt:
+        # 页数用尽了还没到头：说清楚被丢掉的是**最早**那一段，而不是装作取全了
+        logger.warning("区间超过 %d 页上限，%s 之前的历史不再取（请求自 %s 起）",
+                       MAX_PAGES, windows[0][0], start_date)
+    return windows
+
+
+def _fetch_page(code: str, period: str, start_date: str, end_date: str,
+                limit: int) -> list[dict]:
+    """取一页 K 线（腾讯 ifzq）。接口给的原始行 → `{date, open, close, high, low, volume}`。"""
+    url = "http://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+    params = {"param": f"{code},{period},{start_date},{end_date},{limit},{ADJUST_MODE}"}
+    r = requests.get(url, params=params, headers=HEADERS, timeout=15)
+    payload = r.json()
+
+    code_key = code.lower()
+    klines = None
+    # 响应的 data 键会**原样回显**请求里的大小写（实测：请求 usAAPL 得到键 usAAPL，
+    # 请求 usaapl 得到 usaapl），所以按大小写不敏感匹配，别再假设它是小写。
+    data = payload.get("data", {}) if isinstance(payload, dict) else {}
+    for key, body in (data or {}).items():
+        if str(key).lower() != code_key or not isinstance(body, dict):
+            continue
+        klines = body.get(f"qfq{period}") or body.get(period)
+        break
+    if not klines:
+        return []
+
+    return [{"date": str(k[0]), "open": str(k[1]), "close": str(k[2]),
+             "high": str(k[3]), "low": str(k[4]), "volume": str(k[5])}
+            for k in klines]
+
+
+def get_history(symbol: str, start_date: str = "", end_date: str = "",
+                period: str = "day", count: Optional[int] = None) -> Optional[list[dict]]:
     """获取 K 线历史（腾讯 ifzq API），带 1 小时缓存。
+
+    <h3>`start_date` / `end_date` 现在**真的生效**了</h3>
+    在此之前这两个参数是废的：请求被写死成 `,,,500,qfq`（不传区间、恒取最近 500 根），
+    于是"这条规则在**别的时段**上还行不行"根本无法验证 —— 而样本外验证是判断
+    "策略到底有没有效"的唯一手段。缓存键也必须带上区间，
+    否则"最近 500 根"会把"某年某段"的结果顶掉（那是最难查的一类错：数据看着有，其实不对）。
+
+    现在有两层保证：
+    ① **分页**：区间需要的根数超过源头一页的上限（`SOURCE_MAX_BARS`）时，
+       按自然日切成连续几页分别取、再合并 —— 否则"从 2023 年起"会被悄悄砍成"最近 640 根"；
+    ② **本地裁到区间内**：接口给多了给少了，最终口径都由我们负责，
+       并在覆盖不到请求起点时留一条 warning（新股、或源头就没有更早的数据）。
+
+    复权口径 `ADJUST_MODE` 是前复权：分页各页都以**最新**价格为基准，
+    所以拼起来仍然是一致的一条序列（这也是分页在前复权下才成立的原因）。
 
     Args:
         symbol: 股票代码/名称
-        period: 周期，可选 day / week / month（默认 day）
+        start_date / end_date: `YYYY-MM-DD`，留空表示不限（由 `count` 决定取多少根）
+        period: day / week / month（默认 day）
+        count: 最多取多少根（上限 `SOURCE_MAX_BARS`，超过按上限截断）
     """
     period = (period or "day").lower()
     if period not in ("day", "week", "month"):
         logger.warning("不支持的 period: %s，回退为 day", period)
         period = "day"
 
-    # 1. 查缓存
-    cache_key = (symbol, period)
+    start_date = str(start_date or "").strip()
+    end_date = str(end_date or "").strip()
+    limit = _limit_for_range(start_date, end_date, count)
+
+    # 1. 查缓存（键必须含区间与数量：少了它们，不同请求会互相顶掉）
+    cache_key = (symbol, period, start_date, end_date, limit)
     now = time.time()
     with _history_cache_lock:
         if cache_key in _history_cache:
@@ -315,37 +436,43 @@ def get_history(symbol: str, start_date: str = "", end_date: str = "", period: s
             logger.warning("无法识别股票代码/名称: %s", symbol)
             return None
         code = normalize_symbol(resolved)
-        url = "http://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-        params = {"param": f"{code},{period},,,500,{ADJUST_MODE}"}
-        r = requests.get(url, params=params, headers=HEADERS, timeout=15)
-        data = r.json()
 
-        code_key = code.lower()
-        klines = None
-        # 响应的 data 键会**原样回显**请求里的大小写（实测：请求 usAAPL 得到键 usAAPL，
-        # 请求 usaapl 得到 usaapl），所以按大小写不敏感匹配，别再假设它是小写。
-        data = data.get("data", {}) if isinstance(data, dict) else {}
-        for key, payload in (data or {}).items():
-            if str(key).lower() != code_key or not isinstance(payload, dict):
-                continue
-            klines = payload.get(f"qfq{period}") or payload.get(period)
-            break
+        windows = _windows_for(start_date, end_date)
+        merged: dict[str, dict] = {}
+        for page_start, page_end in windows:
+            page_limit = limit if len(windows) == 1 else SOURCE_MAX_BARS
+            for record in _fetch_page(code, period, page_start, page_end, page_limit):
+                merged[record["date"]] = record      # 同一天重复出现时后一页为准（内容相同）
 
-        if not klines:
+        if not merged:
             logger.warning("历史数据为空: %s (period=%s, code=%s)", symbol, period, code)
             return None
 
-        records = []
-        for k in klines:
-            records.append({
-                "date": str(k[0]), "open": str(k[1]), "close": str(k[2]),
-                "high": str(k[3]), "low": str(k[4]), "volume": str(k[5]),
-            })
+        records = [merged[date] for date in sorted(merged)]
+
+        # 本地裁到请求区间（含端点）。日期是 ISO 字符串，字典序即时间序。
+        if start_date or end_date:
+            before = len(records)
+            if start_date:
+                records = [r for r in records if r["date"] >= start_date]
+            if end_date:
+                records = [r for r in records if r["date"] <= end_date]
+            if records and start_date and records[0]["date"] > start_date:
+                # 取到了区间，但源头没有更早的数据：新股、或源头就没有那么早的历史。
+                # 说清楚，别让"从某年起"的验证悄悄变成"从能取到的那天起"。
+                # 但**起点落在非交易日**（元旦/周末）是常态，那不是"覆盖不足" ——
+                # 天天报警的告警等于没有告警，所以只在小缺口时报 info。
+                gap_days = _days_between(start_date, records[0]["date"])
+                if gap_days > COVERAGE_GRACE_DAYS:
+                    logger.warning("历史数据覆盖不足: %s 请求自 %s 起，实际最早 %s（差 %d 天，%d→%d 根）",
+                                   symbol, start_date, records[0]["date"], gap_days, before, len(records))
+                else:
+                    logger.info("%s 区间起点 %s 无交易日，实际自 %s 起", symbol, start_date, records[0]["date"])
 
         # 2. 写缓存
         with _history_cache_lock:
             _history_cache[cache_key] = (now, records)
-        return records
+        return records or None
     except Exception as e:
         logger.error("get_history 异常: %s (period=%s) -> %s", symbol, period, e)
         return None

@@ -624,3 +624,284 @@ def compare_executions(config: dict, records: list[dict]) -> dict:
         realistic["max_drawdown_pct"] - ideal["max_drawdown_pct"], 2)
     return out
 
+
+# ==================== 样本外验证：多时段 + 成本归因 ====================
+# 为什么需要这一段：在此之前，"这条策略行不行"只能靠**一整段历史**的一个数字回答，
+# 而那个数字既可能是运气，也可能只是换手磨出来的。要回答"到底行不行"，最小形态是：
+#   ① 把可用历史切成若干**连续时段**，逐段独立回测（同一段数据里拟合出来的规则，
+#      在另一段上未必成立）；
+#   ② 把亏损**归因**到方向还是摩擦（同样的信号，成本占比不同，结论完全不同）；
+#   ③ 跨标的重复同一件事（单只票的一段历史是最容易骗人的样本）。
+# 这三件事全部是确定性的，不需要模型参与 —— 模型只在"解释这张表"时才上场。
+
+# 一段至少要有多少根才值得单独回测（引擎自身在 <= 21 根时判数据不足）
+MIN_BARS_PER_SEGMENT = 40
+
+# 除预热之外，一段里至少要有多少根**能出信号**的 bar。
+# <h3>为什么必须有这个数（这是实测出来的）</h3>
+# 拿真实的 8 只票 × 3 段跑一遍，茅台那三格的成交数全是 0、收益全是 0.00% ——
+# 表上看起来像"规则没触发"，实际原因是 MA60 要 60 根预热，
+# 而每段只有 166 根，**前 60 根压根不可能出信号**。更极端的情形是：
+# 段长 40（MIN_BARS_PER_SEGMENT）时，整段都在预热里，这一格等于什么都没验证，
+# 却会和"验证过、没信号"长得一模一样。所以段长下限必须**跟着策略的指标窗口走**，
+# 而不是一个与策略无关的常数。
+MIN_TRADABLE_BARS = 30
+
+# 各类条件的**预热根数**：指标没算出来之前，`evaluate_rule` 一律返回 False，
+# 这段时间在表上会伪装成"没有信号"。
+INDICATOR_WARMUP = {"macd_cross": 35, "rsi_above": 14, "rsi_below": 14}
+
+
+def required_warmup_bars(config: dict | None) -> int:
+    """这条策略需要多少根 K 线才能开始出信号（取所有条件里最大的那个）。
+
+    确定性、不调模型：窗口是策略 JSON 里的数据，不是代码里的分支。
+    """
+    cfg = config or {}
+    warmup = 0
+    for group in (cfg.get("entry"), cfg.get("exit")):
+        for cond in ((group or {}).get("conditions") or []):
+            kind = str((cond or {}).get("type") or "")
+            if kind in INDICATOR_WARMUP:
+                warmup = max(warmup, INDICATOR_WARMUP[kind])
+            elif kind == "ma_cross":
+                warmup = max(warmup, int((cond or {}).get("slow") or 0))
+            elif kind in ("price_cross_ma", "price_above_ma", "price_below_ma"):
+                warmup = max(warmup, int((cond or {}).get("window") or 0))
+    return warmup
+
+
+def slice_records(records: list[dict], start_date: str = "", end_date: str = "") -> list[dict]:
+    """按日期区间裁剪（**含端点**）。日期是 ISO 字符串，字典序即时间序。"""
+    out = list(records or [])
+    if start_date:
+        out = [r for r in out if str(r.get("date", "")) >= str(start_date)]
+    if end_date:
+        out = [r for r in out if str(r.get("date", "")) <= str(end_date)]
+    return out
+
+
+def split_segments(records: list[dict], segments: int = 3,
+                   min_bars_per_segment: int = MIN_BARS_PER_SEGMENT) -> dict:
+    """把可用数据切成 N 段**连续**窗口。
+
+    数据不够切那么多段时**减少段数并说明**（`note`），而不是硬切出几段残缺的样本 ——
+    一段只有 10 根 K 线的"样本外验证"比没有验证更糟：它给人已经验证过的错觉。
+    """
+    items = list(records or [])
+    total = len(items)
+    requested = max(1, int(segments or 1))
+    usable = min(requested, max(1, total // max(1, int(min_bars_per_segment))))
+
+    note = None
+    if usable < requested:
+        note = (f"可用 {total} 根，按每段至少 {min_bars_per_segment} 根只能切 {usable} 段"
+                f"（请求 {requested} 段）")
+
+    if usable <= 1:
+        window = {"label": "全部", "records": items,
+                  "start": items[0].get("date") if items else None,
+                  "end": items[-1].get("date") if items else None}
+        return {"segments_requested": requested, "segments_used": 1,
+                "note": note or "数据不足以分段，只能整段回测", "segments": [window]}
+
+    size = total // usable
+    chunks = []
+    for index in range(usable):
+        start = index * size
+        # 最后一段吃掉余数，保证**不丢任何一根**（否则"最后几天"会被静默忽略）
+        end = total if index == usable - 1 else start + size
+        chunk = items[start:end]
+        chunks.append({
+            "label": f"第 {index + 1}/{usable} 段",
+            "records": chunk,
+            "start": chunk[0].get("date") if chunk else None,
+            "end": chunk[-1].get("date") if chunk else None,
+        })
+    return {"segments_requested": requested, "segments_used": usable, "note": note,
+            "segments": chunks}
+
+
+def attribute_costs(result: dict, initial_capital: float | None = None) -> dict:
+    """成本归因：这笔钱是亏在**方向**，还是亏在**摩擦**。
+
+    这是"策略行不行"里最容易被忽略、却最可解的一环：同一个信号，22 个来回与 5 个来回
+    的差别往往比"看对方向"更大。`return_excluding_fees_pct` 回答"如果佣金为零会怎样"，
+    `cost_share_of_loss_pct` 回答"这段亏损里有多少是摩擦吃掉的"。
+    """
+    trades = result.get("trade_log") or []
+    fees = sum(float(t.get("fee") or 0.0) for t in trades)
+    capital = float(initial_capital or result.get("initial_capital") or 0.0)
+    total_return = float(result.get("total_return_pct") or 0.0)
+    cost_pct_of_capital = (fees / capital * 100.0) if capital else None
+
+    return {
+        "trade_count": len(trades),
+        "round_trips": int(result.get("closed_trades") or 0),
+        "fees_total": round(fees, 2),
+        "cost_pct_of_capital": round(cost_pct_of_capital, 3) if cost_pct_of_capital is not None else None,
+        # 费用是唯一"额外加上去"的成本（滑点已含在成交价里），所以把费用加回去
+        # 就近似得到"零佣金世界"的收益
+        "return_excluding_fees_pct": (round(total_return + cost_pct_of_capital, 2)
+                                      if cost_pct_of_capital is not None else None),
+        "cost_share_of_loss_pct": (round(cost_pct_of_capital / abs(total_return) * 100.0, 1)
+                                   if cost_pct_of_capital is not None and total_return < 0 else None),
+        "exposure_pct": result.get("exposure_pct"),
+        "excess_vs_buy_and_hold_pct": result.get("excess_return_pct"),
+    }
+
+
+def evaluate_strategy_segments(config: dict, records: list[dict], *, segments: int = 3,
+                               start_date: str = "", end_date: str = "",
+                               symbol: str | None = None) -> dict:
+    """逐段回测同一份策略，返回每段的表现与成本归因（**确定性，不调模型**）。"""
+    window = slice_records(records, start_date, end_date)
+    # 段长下限跟着**这条策略**的指标窗口走：否则 MA60 的策略被切成 40 根一段时，
+    # 每一格都在预热里，却长得像"验证过了、没信号"
+    warmup = required_warmup_bars(config)
+    min_bars = max(MIN_BARS_PER_SEGMENT, warmup + MIN_TRADABLE_BARS)
+    split = split_segments(window, segments, min_bars_per_segment=min_bars)
+    capital = float((config or {}).get("initial_capital") or 0.0)
+
+    rows = []
+    for segment in split["segments"]:
+        entry = {"label": segment["label"], "start": segment["start"], "end": segment["end"],
+                 "bars": len(segment["records"]),
+                 "tradable_bars": max(0, len(segment["records"]) - warmup)}
+        result = run_backtest_realistic(config, segment["records"])
+        if result.get("error"):
+            entry.update({"error": result["error"], "total_return_pct": None,
+                          "excess_return_pct": None, "trade_count": 0})
+        else:
+            entry.update({
+                "total_return_pct": result.get("total_return_pct"),
+                "buy_and_hold_return_pct": result.get("buy_and_hold_return_pct"),
+                "excess_return_pct": result.get("excess_return_pct"),
+                "max_drawdown_pct": result.get("max_drawdown_pct"),
+                "trade_count": result.get("trade_count"),
+                "funding_note": result.get("funding_note"),
+                "attribution": attribute_costs(result, capital or result.get("initial_capital")),
+            })
+            entry["note"] = _segment_note(entry, warmup)
+        rows.append(entry)
+
+    return {
+        "symbol": symbol or (config or {}).get("symbol"),
+        "adjust_mode": None,   # 由调用方填（取数处声明），契约口径不在这里猜
+        "bars": len(window),
+        "first_date": window[0].get("date") if window else None,
+        "last_date": window[-1].get("date") if window else None,
+        "warmup_bars": warmup,
+        "min_bars_per_segment": min_bars,
+        "segments_requested": split["segments_requested"],
+        "segments_used": split["segments_used"],
+        "note": split["note"],
+        "rows": rows,
+        "summary": summarize_segments(rows),
+    }
+
+
+def _segment_note(entry: dict, warmup: int) -> str | None:
+    """把"0 笔成交"拆成三种不同的意思 —— 它们在表上长得一模一样（都是 0.00%）。
+
+    实测逼出来的第三类：茅台上穿 60 日线在第三段触发了 6 次，成交却仍是 0 笔 ——
+    因为一手（100 股 × ~1400 元 ≈ 14 万）就超过了 10 万本金。表上写 0.00%，
+    读起来像"这段没机会"，实际是"这段有 6 次机会，只是这个本金做不了"。
+    引擎早就把原因放在 `funding_note` 里了，表格不能装作看不见。
+
+    顺序很重要：先看"有没有机会但做不了"（本金问题），再看"有没有机会"（预热问题），
+    最后才是"真没机会"。
+    """
+    if entry.get("trade_count"):
+        return None
+    if entry.get("funding_note"):
+        return "信号触发了，但一手就超过本金，没能建仓（见 funding_note）"
+    if entry.get("tradable_bars", 0) <= 0:
+        return f"整段都在指标预热期内（需 {warmup} 根），这一段等于没验证"
+    return "该段未触发任何信号"
+
+
+def summarize_segments(rows: list[dict]) -> dict:
+    """把逐段结果压成几个能直接判断的数：**跑赢买入持有的段数、平均超额、摩擦总额**。
+
+    <h3>整段在预热期里、或根本买不起一手的格子，不参与统计</h3>
+    这两种格子的收益都恒为 0.00%，让它们进平均会把结论往"没赚没亏"的方向拉 ——
+    那是**没有样本**（一个是指标还没算出来，一个是本金做不了这个标的），
+    不是"表现平平"。所以分别数出来（`segments_warmup_only` / `segments_unaffordable`），
+    而不是混在有效段里充数。
+    """
+    all_rows = [row for row in rows or []]
+    warmup_only = [row for row in all_rows
+                   if row.get("error") is None and row.get("tradable_bars") == 0]
+    unaffordable = [row for row in all_rows
+                    if row.get("error") is None and row.get("funding_note")
+                    and not row.get("trade_count")]
+    valid = [row for row in all_rows if row.get("error") is None
+             and row.get("total_return_pct") is not None
+             and (row.get("tradable_bars") is None or row.get("tradable_bars") > 0)
+             and not (row.get("funding_note") and not row.get("trade_count"))]
+    if not valid:
+        return {"segments_valid": 0, "segments_warmup_only": len(warmup_only),
+                "segments_unaffordable": len(unaffordable),
+                "beat_buy_and_hold": 0, "avg_excess_pct": None,
+                "avg_total_return_pct": None, "worst_return_pct": None,
+                "best_return_pct": None, "total_fees": 0.0, "avg_cost_pct_of_capital": None}
+
+    excess = [float(row.get("excess_return_pct") or 0.0) for row in valid]
+    returns = [float(row.get("total_return_pct") or 0.0) for row in valid]
+    costs = [float((row.get("attribution") or {}).get("cost_pct_of_capital") or 0.0)
+             for row in valid]
+    fees = sum(float((row.get("attribution") or {}).get("fees_total") or 0.0) for row in valid)
+
+    return {
+        "segments_valid": len(valid),
+        "segments_warmup_only": len(warmup_only),
+        "segments_unaffordable": len(unaffordable),
+        "beat_buy_and_hold": sum(1 for value in excess if value > 0),
+        "avg_excess_pct": round(sum(excess) / len(excess), 2),
+        "avg_total_return_pct": round(sum(returns) / len(returns), 2),
+        "worst_return_pct": round(min(returns), 2),
+        "best_return_pct": round(max(returns), 2),
+        "total_fees": round(fees, 2),
+        "avg_cost_pct_of_capital": round(sum(costs) / len(costs), 3),
+    }
+
+
+def evaluate_strategy_matrix(config: dict, records_by_symbol: dict, *, segments: int = 3,
+                             start_date: str = "", end_date: str = "",
+                             adjust_mode: str | None = None) -> dict:
+    """多标的 × 多时段：把"这条规则到底行不行"从观点变成一张表。
+
+    `records_by_symbol` 由调用方取好（引擎不碰网络，保持可测）。
+    """
+    per_symbol = []
+    for symbol, records in (records_by_symbol or {}).items():
+        if not records:
+            per_symbol.append({"symbol": symbol, "bars": 0, "rows": [],
+                               "summary": summarize_segments([]),
+                               "note": "取不到行情数据"})
+            continue
+        result = evaluate_strategy_segments(config, records, segments=segments,
+                                            start_date=start_date, end_date=end_date,
+                                            symbol=symbol)
+        result["adjust_mode"] = adjust_mode
+        per_symbol.append(result)
+
+    cells = [row for item in per_symbol for row in item.get("rows", [])]
+    summary = summarize_segments(cells)
+    return {
+        "symbols": list((records_by_symbol or {}).keys()),
+        "segments_requested": segments,
+        "start_date": start_date or None,
+        "end_date": end_date or None,
+        "adjust_mode": adjust_mode,
+        "per_symbol": per_symbol,
+        "cells_total": len(cells),
+        # 有效格子的定义只有一处（summarize_segments），这里直接引用 ——
+        # 两处各写一遍"什么叫有效"，迟早会不一致
+        "cells_valid": summary["segments_valid"],
+        "cells_warmup_only": summary["segments_warmup_only"],
+        "cells_unaffordable": summary["segments_unaffordable"],
+        "summary": summary,
+    }
+
