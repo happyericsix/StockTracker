@@ -53,6 +53,8 @@ public class PaperReviewReportService {
 
     /** 日报的去重键前缀；同一策略同一天只会有一条。 */
     static final String REPORT_KEY_DAILY = "paper_daily";
+    /** 每日简报的去重键前缀（安静的日子用它，与"有事才推"的日报互不覆盖）。 */
+    static final String REPORT_KEY_BRIEFING = "paper_brief";
     /** 空转期周报的去重键前缀。 */
     static final String REPORT_KEY_WEEKLY = "paper_weekly";
 
@@ -119,6 +121,63 @@ public class PaperReviewReportService {
                     strategy == null ? null : strategy.getId(), e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * 每日简报：**每个交易日一条**，安静的日子也发，内容就是"为什么没动"。
+     *
+     * <h3>它和日报的区别，以及为什么两个都要</h3>
+     * {@link #composeDailyReport} 是"有事才说"（成交 / 阻塞型跳过）——那条纪律解决的是噪声，
+     * 但它留下一个更贵的代价：**"没消息"与"服务没在跑"在用户那边长得一模一样**。
+     * 实测反馈正是这句话："我不问 AI 都不知道有模拟盘这个功能"。
+     * 所以这里补上另一半：每天一条确定性的简报，把"今天动没动、为什么、下次什么时候"讲清楚。
+     *
+     * <p>仍然**不调模型**（与所有报告同源：报告是判断依据，不能每次生成都不一样），
+     * 也**不假装**：这一天连痕迹都没有时什么都不发 —— 那是结算根本没走到留痕那一步，
+     * 此时说"今天很平静"是假话。
+     *
+     * @return 推送出去的消息；已推过（同一天）或没有痕迹则返回 null
+     */
+    public Message composeDailyBriefing(Strategy strategy, PaperAccount account, LocalDate tradeDate) {
+        try {
+            if (strategy == null || strategy.getId() == null || strategy.getUser() == null) {
+                return null;
+            }
+            List<PaperTradeTrace> traces = paperTraceService.listForDay(strategy.getId(), tradeDate);
+            if (traces.isEmpty()) {
+                log.debug("No traces for strategy id={} on {}, skipping daily briefing",
+                        strategy.getId(), tradeDate);
+                return null;
+            }
+            String content = briefingText(strategy, account, tradeDate, traces);
+            return messageService.saveReport(strategy.getUser(), TYPE_PAPER_REPORT,
+                    REPORT_KEY_BRIEFING + ":" + strategy.getId() + ":" + tradeDate,
+                    strategy.getSymbol(), content);
+        } catch (Exception e) {
+            log.warn("每日简报生成失败 strategyId={}: {}",
+                    strategy == null ? null : strategy.getId(), e.getMessage());
+            return null;
+        }
+    }
+
+    private String briefingText(Strategy strategy, PaperAccount account, LocalDate tradeDate,
+                                List<PaperTradeTrace> traces) {
+        // 优先用日线那一行：它才是"今天这条策略的结论"，盘中行只是过程中的一次检查
+        PaperTradeTrace primary = traces.stream()
+                .filter(trace -> ExecutionContract.SETTLEMENT_DAILY.equals(trace.getSettlementKind()))
+                .findFirst()
+                .orElse(traces.get(0));
+
+        StringBuilder text = new StringBuilder();
+        text.append("【模拟盘简报】").append(strategy.getName()).append(" · ")
+                .append(strategy.getSymbol()).append(" · ").append(tradeDate).append('\n');
+        text.append("· ").append(PaperTradeTraceResponse.from(primary).getSummary()).append('\n');
+        text.append('\n').append(accountLine(account)).append('\n');
+        text.append(decisionModeLine(strategy)).append('\n');
+        appendExpectationLine(text, strategy);
+        text.append('\n').append(PaperSchedule.describe(
+                PaperSchedule.next(strategy.getDecisionMode(), PaperSchedule.now())));
+        return text.toString().strip();
     }
 
     /**

@@ -5,6 +5,7 @@ import { getStock, getFavorites, addFavorite, deleteFavorite } from '../api/stoc
 import StockSearchInput from '../components/StockSearchInput.vue'
 import QrLogin from '../components/QrLogin.vue'
 import { getStatus, syncFavorites } from '../api/ths.js'
+import { getPaperOverview } from '../api/strategy.js'
 import { messageBus } from '../composables/messageBus.js'
 
 const router = useRouter()
@@ -218,8 +219,38 @@ const remove = async (sym) => {
 
 const goDetail = (sym) => router.push('/chart/' + sym)
 
+/**
+ * 模拟盘状态：首页必须能一眼看出"它在跑"。
+ *
+ * <p>以前的失败方式不是算错，而是**用户根本不知道有这个功能** ——
+ * 模拟盘藏在"策略库 → 某条策略 → 滚到底"，全站只有两行副标题提过它。
+ * 所以这里在首页就把"运行中几条、今天结算了没、下次什么时候"摆出来。
+ *
+ * <p>读失败**不打扰**首页：静默降级为不显示那张卡的副标题，而不是弹一个错误 ——
+ * 首页已经有很多别的信息，模拟盘状态只是"锦上添花"的那一块。
+ */
+const paperStatus = ref(null)
+
+const loadPaperStatus = async () => {
+  try {
+    const res = await getPaperOverview()
+    const list = Array.isArray(res.data) ? res.data : []
+    const running = list.filter((item) => item.paperEnabled)
+    const today = new Date().toLocaleDateString('sv-SE')
+    paperStatus.value = {
+      running: running.length,
+      total: list.length,
+      settledToday: running.filter((item) => item.lastSettlement?.tradeDate === today).length,
+      nextNote: running[0]?.nextEvaluationNote || ''
+    }
+  } catch (e) {
+    paperStatus.value = null
+  }
+}
+
 const goAssistant = () => router.push('/assistant')
 const goStrategies = () => router.push('/strategies')
+const goPaper = () => router.push('/paper')
 const goMemory = () => router.push('/memory')
 const goMessages = () => router.push('/messages')
 const goAlerts = () => router.push('/alerts')
@@ -229,6 +260,7 @@ const goProfile = () => router.push('/profile')
 onMounted(() => {
   loadFavorites()
   loadThsStatus()
+  loadPaperStatus()
   messageBus.connect()
   messageBus.refreshUnread()
   // 断线期间错过的消息不会补发，重连后同步一次未读数（角标才不会少）
@@ -258,6 +290,11 @@ onBeforeUnmount(() => {
             :aria-label="`${messageBus.unread} 条未读消息`"
           >{{ messageBus.unread > 99 ? '99+' : messageBus.unread }}</span>
         </button>
+        <button type="button" class="nav-btn" @click="goPaper">
+          模拟盘
+          <span v-if="paperStatus && paperStatus.running > 0" class="unread-badge num"
+            :aria-label="`${paperStatus.running} 条模拟盘在跑`">{{ paperStatus.running }}</span>
+        </button>
         <button type="button" class="nav-btn" @click="goAlerts">预警</button>
         <button type="button" class="nav-btn" @click="goProfile">我的</button>
       </div>
@@ -278,6 +315,24 @@ onBeforeUnmount(() => {
           <span class="feature-copy">
             <strong>策略库</strong>
             <span>统一管理策略、回测与模拟盘</span>
+          </span>
+          <span class="feature-arrow" aria-hidden="true">→</span>
+        </button>
+
+        <button type="button" class="feature-card paper-entry" @click="goPaper">
+          <span class="feature-icon" aria-hidden="true">📈</span>
+          <span class="feature-copy">
+            <strong>模拟盘</strong>
+            <!-- 有状态就报状态：一眼看出"它在跑、今天结算了没、下次什么时候" -->
+            <span v-if="paperStatus && paperStatus.running > 0">
+              运行中 {{ paperStatus.running }} 条 · 今日已结算 {{ paperStatus.settledToday }} 条<template
+                v-if="paperStatus.nextNote"
+              ><br />{{ paperStatus.nextNote }}</template>
+            </span>
+            <span v-else-if="paperStatus && paperStatus.total > 0">
+              还没有运行中的模拟盘 —— 打开看看哪条策略可以启动
+            </span>
+            <span v-else>用虚拟资金按真实规则跑策略：每天 15:30 结算一次</span>
           </span>
           <span class="feature-arrow" aria-hidden="true">→</span>
         </button>

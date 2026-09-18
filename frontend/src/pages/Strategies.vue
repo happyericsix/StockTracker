@@ -7,7 +7,8 @@ import {
   runBacktest,
   startPaper,
   stopPaper,
-  deleteStrategy
+  deleteStrategy,
+  getPaperOverview
 } from '../api/strategy.js'
 
 const router = useRouter()
@@ -18,6 +19,8 @@ const backtestStatus = ref('')
 const backtestOutput = ref('')
 const backtestLoadingId = ref(null)
 const paperLoadingId = ref(null)
+/** 模拟盘状态：strategyId → 总览条目（一次请求取回所有策略）。 */
+const paperInfo = ref({})
 const pendingDeleteId = ref(null) // 正在就地二次确认删除的策略 id
 const confirmButton = ref(null)
 
@@ -50,10 +53,68 @@ const loadStrategies = async () => {
   } finally {
     loading.value = false
   }
+  await loadPaperInfo()
+}
+
+/**
+ * 模拟盘状态（跨策略一次取回）：列表里直接显示**决策来源 / 净值与收益 / 今天动没动**。
+ *
+ * <p>不点进详情页就看不到"这条在跑什么、赚没赚"，正是"用户不知道有这个功能"的一半原因。
+ * 读失败**不挡住列表**：策略列表本身已经加载好了，模拟盘那几行字降级为不显示即可。
+ */
+const loadPaperInfo = async () => {
+  try {
+    const res = await getPaperOverview()
+    const list = Array.isArray(res.data) ? res.data : []
+    const map = {}
+    for (const item of list) {
+      map[item.strategyId] = item
+    }
+    paperInfo.value = map
+  } catch (e) {
+    paperInfo.value = {}
+  }
+}
+
+/** 列表里的一句话总览：还没评估过就直说，不摆 N/A。 */
+const paperSummary = (item) => {
+  const info = paperInfo.value[item.id]
+  if (!info) return ''
+  if (!info.paperEnabled) return ''
+  if (!info.evaluated) {
+    return info.decisionMode === 'agent'
+      ? '还没被评估过：委员会只在日线结算（交易日 15:30）决策'
+      : '还没被评估过：等下一次评估'
+  }
+  const parts = [`净值 ${formatMoney(info.equity)}`]
+  if (info.summary?.returnPct !== null && info.summary?.returnPct !== undefined) {
+    parts.push(`期间 ${formatPct(info.summary.returnPct)}`)
+  }
+  if (info.summary?.excessVsBuyAndHoldPct !== null && info.summary?.excessVsBuyAndHoldPct !== undefined) {
+    parts.push(`超额 ${formatPct(info.summary.excessVsBuyAndHoldPct)}`)
+  }
+  return parts.join(' · ')
+}
+
+const modeLabel = (mode) => (mode === 'agent' ? '多角色委员会' : '规则引擎')
+
+const formatMoney = (value) => {
+  if (value === null || value === undefined) return 'N/A'
+  const n = Number(value)
+  if (Number.isNaN(n)) return 'N/A'
+  return n.toLocaleString('zh-CN', { style: 'currency', currency: 'CNY' })
+}
+
+const formatPct = (value) => {
+  if (value === null || value === undefined) return 'N/A'
+  const n = Number(value)
+  if (Number.isNaN(n)) return 'N/A'
+  return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`
 }
 
 const goDetail = (id) => router.push(`/strategies/${id}`)
 const goDashboard = () => router.push('/dashboard')
+const goPaper = () => router.push('/paper')
 
 const handleBacktest = async (item) => {
   backtestStatus.value = ''
@@ -138,6 +199,7 @@ onMounted(loadStrategies)
     <header>
       <h1>策略库</h1>
       <div class="header-actions">
+        <button type="button" class="nav-btn" @click="goPaper">模拟盘总览</button>
         <button type="button" class="nav-btn" @click="goDashboard">← 返回</button>
       </div>
     </header>
@@ -163,10 +225,26 @@ onMounted(loadStrategies)
               <span class="paper-badge" :class="{ enabled: item.paperEnabled }">
                 {{ item.paperEnabled ? '模拟盘中' : '未启动' }}
               </span>
+              <!-- 决策来源：两条路的结论含义不同（规则条件成立 vs 委员会吵出来的），
+                   列表里就要能区分，不然得逐条点进去才知道 -->
+              <span
+                v-if="paperInfo[item.id]"
+                class="paper-badge mode"
+                :class="{ agent: paperInfo[item.id].decisionMode === 'agent' }"
+              >
+                {{ modeLabel(paperInfo[item.id].decisionMode) }}
+              </span>
             </span>
             <span class="strategy-meta num">
               <span>更新: {{ formatTime(item.updatedAt) }}</span>
               <span v-if="item.lastBacktestAt">最近回测: {{ formatTime(item.lastBacktestAt) }}</span>
+            </span>
+            <!-- 在跑什么、赚没赚：不点进详情也要看得见 -->
+            <span v-if="paperSummary(item)" class="strategy-paper num">{{ paperSummary(item) }}</span>
+            <span v-if="paperInfo[item.id]?.lastSettlement" class="strategy-paper num">
+              最近一次结算 {{ paperInfo[item.id].lastSettlement.tradeDate }}：{{
+                paperInfo[item.id].lastSettlement.sentence
+              }}
             </span>
           </button>
 
@@ -289,6 +367,21 @@ main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }
   color: var(--color-success);
   background: var(--color-success-soft);
   border-color: var(--color-success-mark);
+}
+/* 决策来源：不是"好/坏"，是"谁做的决定"，所以用主色而不是成功/危险色 */
+.paper-badge.mode.agent {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+/* 模拟盘那两行小字（净值/收益、最近一次结算）：整块都是 button，
+   所以样式作用在行内元素上，且必须允许换行（长句子不能被裁掉） */
+.strategy-paper {
+  display: block;
+  margin-top: 6px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: left;
 }
 .strategy-meta {
   display: flex;

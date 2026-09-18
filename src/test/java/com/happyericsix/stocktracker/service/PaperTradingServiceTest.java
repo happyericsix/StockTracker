@@ -33,6 +33,7 @@ import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -78,6 +79,12 @@ class PaperTradingServiceTest {
 
     @Mock
     private MemoryService memoryService;
+
+    @Mock
+    private ExpectationService expectationService;
+
+    @Mock
+    private PaperReviewReportService paperReviewReportService;
 
     @InjectMocks
     private PaperTradingService paperTradingService;
@@ -1034,6 +1041,224 @@ class PaperTradingServiceTest {
         verify(paperTradeRepository, times(1)).save(captor.capture());
         assertEquals(1000, captor.getValue().getShares().intValue(),
                 "缺 size_fraction 时按配置口径（full → 全部现金 10000 ÷ 10 元 = 1000 股）");
+    }
+
+    // ==================== 每个交易日一条简报（可发现性的那一半） ====================
+
+    /**
+     * "有事才推"的日报没发时，**必须补一条简报**。
+     *
+     * <p>这条守的是可发现性：安静的日子什么都不发，用户那边"没消息"与"服务没在跑"
+     * 就长得一模一样（实测反馈：不问 AI 都不知道有模拟盘这个功能）。
+     */
+    @Test
+    void aQuietSettlementStillPushesTheDailyBriefing() throws Exception {
+        Strategy strategy = ruleStrategyForDaily();
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperTradeRepository.existsByStrategyIdAndTradeDate(eq(10L), any(LocalDate.class)))
+                .thenReturn(false);
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(paperEquitySnapshotRepository.findByStrategyIdOrderByTradeDateAsc(10L)).thenReturn(List.of());
+        when(paperEquitySnapshotRepository.findByStrategyIdAndTradeDate(eq(10L), any(LocalDate.class)))
+                .thenReturn(Optional.empty());
+        when(strategyClient.evaluateBar(anyString(), eq("600519"), anyString(), any()))
+                .thenReturn(mapper.readTree(
+                        "{\"signal\":\"hold\",\"price\":10.0,\"matched_conditions\":[],"
+                                + "\"skip_reason\":\"rule_not_met\"}"));
+        // 有事才推的日报：这一天没什么事 → 返回 null（替身默认就是 null）
+        when(paperReviewReportService.composeDailyReport(any(), any(), any(LocalDate.class)))
+                .thenReturn(null);
+
+        paperTradingService.evaluateDaily();
+
+        verify(paperReviewReportService, times(1))
+                .composeDailyBriefing(any(), any(), any(LocalDate.class));
+    }
+
+    /** 日报已经推了的日子**不再叠一条简报**：一天一条，不能因为补漏变成两条。 */
+    @Test
+    void anEventfulDayDoesNotAlsoPushABriefing() throws Exception {
+        Strategy strategy = ruleStrategyForDaily();
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperTradeRepository.existsByStrategyIdAndTradeDate(eq(10L), any(LocalDate.class)))
+                .thenReturn(false);
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(paperTradeRepository.save(any(PaperTrade.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(paperEquitySnapshotRepository.findByStrategyIdOrderByTradeDateAsc(10L)).thenReturn(List.of());
+        when(paperEquitySnapshotRepository.findByStrategyIdAndTradeDate(eq(10L), any(LocalDate.class)))
+                .thenReturn(Optional.empty());
+        when(strategyClient.evaluateBar(anyString(), eq("600519"), anyString(), any()))
+                .thenReturn(mapper.readTree(
+                        "{\"signal\":\"buy\",\"price\":10.0,\"matched_conditions\":[\"price_above\"]}"));
+        when(paperReviewReportService.composeDailyReport(any(), any(), any(LocalDate.class)))
+                .thenReturn(com.happyericsix.stocktracker.entity.Message.builder().id(1L).build());
+
+        paperTradingService.evaluateDaily();
+
+        verify(paperReviewReportService, never())
+                .composeDailyBriefing(any(), any(), any(LocalDate.class));
+    }
+
+    private static Strategy ruleStrategyForDaily() {
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        return Strategy.builder()
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson("{\"initial_capital\":10000.0,"
+                        + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0},"
+                        + "\"position\":{\"type\":\"full\",\"size_pct\":100.0}}")
+                .user(user).paperEnabled(true)
+                .build();
+    }
+
+    // ==================== 模拟盘总览：一次请求回答四个问题 ====================
+
+    /**
+     * 总览必须一次说清：**在跑什么 / 赚没赚 / 今天动没动 / 下次什么时候**。
+     *
+     * <p>这条用例守的是这次改动的目的本身：模拟盘的失败方式不是算错，
+     * 而是用户根本不知道它在跑（实测反馈：不问 AI 都不知道有这个功能）。
+     */
+    @Test
+    void theOverviewAnswersWhatIsRunningHowItDidAndWhenItRunsNext() {
+        String configJson = "{\"initial_capital\":100000.0}";
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true)
+                .decisionMode(ExecutionContract.DECISION_MODE_AGENT)
+                .decisionModeSince(LocalDate.of(2026, 9, 1))
+                .build();
+        PaperAccount account = PaperAccount.builder()
+                .id(3L).strategy(strategy).user(user)
+                .initialCapital(new java.math.BigDecimal("100000.00"))
+                .cash(new java.math.BigDecimal("89900.00"))
+                .shares(new java.math.BigDecimal("100.0000"))
+                .avgCost(new java.math.BigDecimal("10.0000"))
+                .lastPrice(new java.math.BigDecimal("11.0000"))
+                .equity(new java.math.BigDecimal("91000.00"))
+                .lastSignal("buy")
+                .lastEvalAt(LocalDate.now().atTime(15, 30))
+                .build();
+
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(user));
+        when(strategyRepository.findByUserIdOrderByUpdatedAtDesc(1L)).thenReturn(List.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.of(account));
+        when(paperEquitySnapshotRepository.findByStrategyIdOrderByTradeDateAsc(10L)).thenReturn(List.of(
+                PaperEquitySnapshot.builder().strategy(strategy).user(user)
+                        .tradeDate(LocalDate.now().minusDays(1))
+                        .cash(new java.math.BigDecimal("100000.00"))
+                        .shares(new java.math.BigDecimal("0.0000"))
+                        .closePrice(new java.math.BigDecimal("10.0000"))
+                        .equity(new java.math.BigDecimal("100000.00")).build(),
+                PaperEquitySnapshot.builder().strategy(strategy).user(user)
+                        .tradeDate(LocalDate.now())
+                        .cash(new java.math.BigDecimal("89900.00"))
+                        .shares(new java.math.BigDecimal("100.0000"))
+                        .closePrice(new java.math.BigDecimal("11.0000"))
+                        .equity(new java.math.BigDecimal("91000.00")).build()));
+        when(paperTraceService.count(10L)).thenReturn(3L);
+        when(paperTraceService.listRecent(10L, 1)).thenReturn(List.of(PaperTradeTrace.builder()
+                .id(9L).strategy(strategy).tradeDate(LocalDate.now())
+                .settlementKind(ExecutionContract.SETTLEMENT_DAILY)
+                .trigger(ExecutionContract.TRIGGER_CRON)
+                .decision(ExecutionContract.DECISION_SKIP)
+                .skipReason(ExecutionContract.SKIP_ALREADY_TRADED_TODAY)
+                .signal("buy")
+                .decisionMode(ExecutionContract.DECISION_MODE_AGENT)
+                .agentLlmCalls(8).agentTokens(21457)
+                .repeatCount(1)
+                .createdAt(LocalDate.now().atTime(15, 30))
+                .build()));
+        when(expectationService.latest(1L, 10L)).thenReturn(new ExpectationService.Expectation(
+                LocalDate.now().minusDays(1), "excess_vs_buy_and_hold_pct", java.math.BigDecimal.ZERO,
+                LocalDate.now().plusDays(20), ExpectationService.STATUS_PENDING, null, null));
+
+        List<com.happyericsix.stocktracker.dto.PaperOverviewResponse> overview =
+                paperTradingService.getOverview("alice");
+
+        assertEquals(1, overview.size());
+        var item = overview.get(0);
+
+        // ① 在跑什么
+        assertEquals(10L, item.getStrategyId());
+        assertEquals(ExecutionContract.DECISION_MODE_AGENT, item.getDecisionMode());
+        assertEquals(LocalDate.of(2026, 9, 1), item.getDecisionModeSince());
+        assertTrue(item.isPaperEnabled());
+        assertTrue(item.isEvaluated());
+        // ② 赚没赚：持仓市值按**最新价**算（不是成本），汇总走同一份算法
+        assertEquals(0, new java.math.BigDecimal("1100.00").compareTo(item.getPositionValue()));
+        assertNotNull(item.getSummary());
+        assertTrue(item.getSummary().hasData());
+        assertEquals(0, new java.math.BigDecimal("91000.00").compareTo(item.getSummary().latestEquity()));
+        // ③ 今天动没动：结论 + 一句人话 + agent 成本
+        assertNotNull(item.getLastSettlement());
+        assertEquals(ExecutionContract.SKIP_ALREADY_TRADED_TODAY, item.getLastSettlement().skipReason());
+        assertTrue(item.getLastSettlement().sentence().contains("今天已经成交过"),
+                item.getLastSettlement().sentence());
+        assertEquals(Integer.valueOf(8), item.getLastSettlement().agentLlmCalls());
+        assertEquals(3, item.getTraceCount());
+        // ④ 下次什么时候：agent 模式不许承诺盘中评估
+        assertNotNull(item.getNextEvaluation());
+        assertEquals("daily", item.getNextEvaluation().kind());
+        assertTrue(item.getNextEvaluation().note().contains("只在日线结算时决策"));
+        assertTrue(item.getNextEvaluationNote().contains("按工作日近似"),
+                "没有交易日历这件事必须写在明处：" + item.getNextEvaluationNote());
+        // 预期也在：把"有没有变好"变成能判的问题
+        assertNotNull(item.getExpectation());
+        assertTrue(item.getExpectation().pending());
+        assertTrue(item.getExpectation().sentence().contains("已登记预期"));
+        // 隔离：只查这个用户自己的策略
+        verify(strategyRepository, times(1)).findByUserIdOrderByUpdatedAtDesc(1L);
+    }
+
+    /**
+     * 还没被评估过的账户：总览必须说"没有"，而不是拿初始资金冒充净值。
+     *
+     * <p>这正是实测里"看起来像坏了"的那个画面（agent 模式刚启动、盘中不会评估），
+     * 所以读视图要给出可判定的 {@code evaluated=false}，让界面能解释而不是摆一串 N/A。
+     */
+    @Test
+    void aNeverEvaluatedAccountIsFlaggedRatherThanShownAsFlat() {
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("委员会策略").symbol("600519")
+                .configJson("{\"initial_capital\":1000000.0}").user(user).paperEnabled(true)
+                .decisionMode(ExecutionContract.DECISION_MODE_AGENT)
+                .build();
+        PaperAccount fresh = PaperAccount.builder()
+                .id(4L).strategy(strategy).user(user)
+                .initialCapital(new java.math.BigDecimal("1000000.00"))
+                .cash(new java.math.BigDecimal("1000000.00"))
+                .shares(new java.math.BigDecimal("0.0000"))
+                .avgCost(new java.math.BigDecimal("0.0000"))
+                .equity(new java.math.BigDecimal("1000000.00"))
+                .build();   // lastEvalAt / lastPrice 都是 null
+
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(user));
+        when(strategyRepository.findByUserIdOrderByUpdatedAtDesc(1L)).thenReturn(List.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.of(fresh));
+        when(paperEquitySnapshotRepository.findByStrategyIdOrderByTradeDateAsc(10L)).thenReturn(List.of());
+        when(paperTraceService.count(10L)).thenReturn(0L);
+        when(paperTraceService.listRecent(10L, 1)).thenReturn(List.of());
+
+        var item = paperTradingService.getOverview("alice").get(0);
+
+        assertFalse(item.isEvaluated(), "没评估过就是没评估过，不能靠初始资金装作有净值");
+        assertNull(item.getPositionValue(), "拿不到最新价时不许用成本冒充市值");
+        assertNull(item.getSummary());
+        assertNull(item.getLastSettlement());
+        assertNull(item.getExpectation());
+        assertEquals(0, new java.math.BigDecimal("1000000.00").compareTo(item.getInitialCapital()));
     }
 
     @Test

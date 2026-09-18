@@ -4,6 +4,7 @@ import com.happyericsix.stocktracker.client.StrategyClient;
 import com.happyericsix.stocktracker.dto.MemoryFactRequest;
 import com.happyericsix.stocktracker.dto.PaperAccountResponse;
 import com.happyericsix.stocktracker.dto.PaperEquityResponse;
+import com.happyericsix.stocktracker.dto.PaperOverviewResponse;
 import com.happyericsix.stocktracker.dto.PaperTradeResponse;
 import com.happyericsix.stocktracker.dto.PaperTradeTraceResponse;
 import com.happyericsix.stocktracker.entity.PaperAccount;
@@ -159,7 +160,12 @@ public class PaperTradingService {
                 if (settled != null && paperReviewReportService != null) {
                     transactionTemplate.execute(status -> {
                         Strategy fresh = strategyRepository.findById(strategyId).orElse(null);
-                        paperReviewReportService.composeDailyReport(fresh, settled, today);
+                        // 有事才说的日报没发 ⇒ 今天很安静。安静也要说一声：
+                        // "没消息"与"服务没在跑"在用户那边长得一模一样（实测反馈：
+                        // 不问 AI 都不知道有模拟盘这个功能）。所以每天必有一条简报。
+                        if (paperReviewReportService.composeDailyReport(fresh, settled, today) == null) {
+                            paperReviewReportService.composeDailyBriefing(fresh, settled, today);
+                        }
                         return null;
                     });
                 }
@@ -243,6 +249,116 @@ public class PaperTradingService {
         return paperTraceService.listRecent(strategyId, limit).stream()
                 .map(PaperTradeTraceResponse::from)
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * 模拟盘总览：**一次请求回答"在跑什么 / 赚没赚 / 今天动没动 / 下次什么时候"**。
+     *
+     * <h3>为什么要有这个方法（而不是让前端拼）</h3>
+     * 这条功能的失败方式不是算错，而是**用户根本不知道它在跑**：原来要
+     * 首页 → 策略库 → 某条策略 → 滚到底 才能看到账户，没有任何地方能一眼看出
+     * "哪条在跑、今天动没动、为什么没动"。所以这里把四个问题的答案拼成一份读视图，
+     * 页面只负责显示。
+     *
+     * <p>汇总数字一律来自 {@link PaperEquitySeries#summarize}，"下次评估时间"一律来自
+     * {@link PaperSchedule} —— 与详情页、周报共用同一份口径，不在这里另算一套。
+     *
+     * <p>只有**该用户自己的**策略：归属检查与账户/痕迹走同一条路（{@code listStrategies}），
+     * 总览不该成为绕过用户隔离的旁路。
+     */
+    public List<PaperOverviewResponse> getOverview(String username) {
+        User user = getUser(username);
+        return strategyRepository.findByUserIdOrderByUpdatedAtDesc(user.getId()).stream()
+                .map(this::overviewOf)
+                .toList();
+    }
+
+    private PaperOverviewResponse overviewOf(Strategy strategy) {
+        PaperOverviewResponse item = new PaperOverviewResponse();
+        item.setStrategyId(strategy.getId());
+        item.setName(strategy.getName());
+        item.setSymbol(strategy.getSymbol());
+        item.setPaperEnabled(Boolean.TRUE.equals(strategy.getPaperEnabled()));
+        item.setDecisionMode(ExecutionContract.normalizeDecisionMode(strategy.getDecisionMode()));
+        item.setDecisionModeSince(strategy.getDecisionModeSince());
+
+        PaperAccount account = paperAccountRepository.findByStrategyId(strategy.getId()).orElse(null);
+        if (account != null) {
+            item.setInitialCapital(Money.amount(account.getInitialCapital()));
+            item.setCash(Money.amount(account.getCash()));
+            item.setShares(Money.price(account.getShares()));
+            item.setAvgCost(Money.price(account.getAvgCost()));
+            item.setEquity(Money.amount(account.getEquity()));
+            item.setLastPrice(Money.price(account.getLastPrice()));
+            item.setLastSignal(account.getLastSignal());
+            item.setLastEvalAt(account.getLastEvalAt());
+            // 有没有被评估过，用 lastEvalAt 判定（与界面同一依据）：
+            // 刚启动、尤其是 agent 模式的账户只有初始资金，不能把那当成"净值就是本金"。
+            item.setEvaluated(account.getLastEvalAt() != null);
+            if (account.getShares() != null && account.getLastPrice() != null) {
+                item.setPositionValue(Money.amount(
+                        account.getShares().multiply(account.getLastPrice())));
+            }
+        }
+
+        List<PaperEquitySnapshot> series =
+                paperEquitySnapshotRepository.findByStrategyIdOrderByTradeDateAsc(strategy.getId());
+        if (!series.isEmpty()) {
+            item.setSummary(PaperEquitySeries.summarize(series));
+        }
+
+        try {
+            item.setTraceCount((int) paperTraceService.count(strategy.getId()));
+            item.setLastSettlement(paperTraceService.listRecent(strategy.getId(), 1).stream()
+                    .findFirst()
+                    .map(PaperTradingService::lastSettlementOf)
+                    .orElse(null));
+        } catch (Exception e) {
+            // 旁路读：痕迹读不出来不该让总览整页失败（页面会显示"最近一次结算：读不到"）
+            log.warn("读取总览痕迹失败 strategyId={}: {}", strategy.getId(), e.getMessage());
+        }
+
+        if (expectationService != null && strategy.getUser() != null) {
+            ExpectationService.Expectation expectation = expectationService.latest(
+                    strategy.getUser().getId(), strategy.getId());
+            if (expectation != null) {
+                item.setExpectation(new PaperOverviewResponse.Expectation(
+                        expectation.metric(), ExpectationService.label(expectation.metric()),
+                        expectation.threshold(), expectation.deadline(), expectation.status(),
+                        expectation.outcome(), expectation.isPending(),
+                        ExpectationService.describe(expectation)));
+            }
+        }
+
+        PaperSchedule.NextEvaluation next = PaperSchedule.next(item.getDecisionMode(), PaperSchedule.now());
+        item.setNextEvaluation(next);
+        item.setNextEvaluationNote(PaperSchedule.describe(next));
+        return item;
+    }
+
+    /**
+     * 最近一次结算的读视图：那句人话直接用痕迹读视图的**完整句子**。
+     *
+     * <p>不用 {@code sentenceFor(skip_reason)}：它在成交那天只会输出"有成交"，
+     * 而这一行要回答的是"今天动没动、动了多少" —— 痕迹的完整句子里已经有
+     * 方向、成交价、口径与成交后净值，措辞也只有那一处实现。
+     */
+    private static PaperOverviewResponse.LastSettlement lastSettlementOf(PaperTradeTrace trace) {
+        if (trace == null) {
+            return null;
+        }
+        return new PaperOverviewResponse.LastSettlement(
+                trace.getTradeDate(),
+                trace.getSettlementKind(),
+                trace.getDecision(),
+                trace.getSkipReason(),
+                trace.getSignal(),
+                trace.getDecisionMode(),
+                trace.getAgentLlmCalls(),
+                trace.getAgentTokens(),
+                trace.getTrigger(),
+                trace.getCreatedAt(),
+                PaperTradeTraceResponse.from(trace).getSummary());
     }
 
     public List<PaperTradeTraceResponse> getTracesForDay(String username, Long strategyId, LocalDate date) {

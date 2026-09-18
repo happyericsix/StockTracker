@@ -15,7 +15,8 @@ import {
   getPaperEquity,
   switchDecisionMode,
   getExpectation,
-  registerExpectation
+  registerExpectation,
+  getPaperOverview
 } from '../api/strategy.js'
 
 const router = useRouter()
@@ -49,6 +50,8 @@ const expectationForm = ref({ metric: 'excess_vs_buy_and_hold_pct', threshold: 0
 const expectationNotice = ref('')
 const equityChartRef = ref(null)
 let equityChart = null
+/** 模拟盘总览里这一条（含"下次评估时间"与"最近一次结算"的**后端原话**）。 */
+const overviewItem = ref(null)
 
 // 响应形状（Result 信封 vs 裸 DTO）由 api/request.js 的响应拦截器统一处理，
 // 信封会被剥掉，所以这里一律直接读 res.data —— 不再需要本地 unwrap()。
@@ -416,6 +419,23 @@ const loadTraces = async () => {
   }
 }
 
+/**
+ * 顶部状态条的数据：直接取总览里这一条。
+ *
+ * <p>刻意**不在前端自己拼**"下次评估时间"和"为什么没动"：那两句话的口径在
+ * PaperSchedule 与痕迹的人话映射里各只有一处实现，前端复述一遍迟早会与总览页不一致
+ * （而"三处各说一个时间"比不给时间更糟）。读失败就整条不显示，不影响页面其它部分。
+ */
+const loadOverview = async () => {
+  try {
+    const res = await getPaperOverview()
+    const list = Array.isArray(res.data) ? res.data : []
+    overviewItem.value = list.find((row) => String(row.strategyId) === String(strategy.value.id)) || null
+  } catch (e) {
+    overviewItem.value = null
+  }
+}
+
 const loadDetail = async () => {
   loading.value = true
   error.value = ''
@@ -428,6 +448,7 @@ const loadDetail = async () => {
       strategy.value = found
       await loadPaper()
       await loadExpectation()
+      await loadOverview()
     } else {
       notFound.value = true
     }
@@ -525,6 +546,38 @@ onUnmounted(() => {
       <template v-else-if="strategy">
         <!-- 操作类错误（回测 / 模拟盘 / 诊断）在内容区提示，不影响已加载的数据 -->
         <p v-if="error" class="error" role="alert">{{ error }}</p>
+
+        <!-- 运行状态条：把"它在不在跑、谁在做决定、今天动没动、下次什么时候"提到第一屏。
+             原来这些只能从下面几张卡里逐块拼，用户看不出这条策略此刻是什么状态。 -->
+        <section v-if="overviewItem" class="card run-strip num">
+          <div class="run-badges">
+            <span class="run-badge" :class="{ on: overviewItem.paperEnabled }">
+              {{ overviewItem.paperEnabled ? '模拟盘运行中' : '模拟盘未启动' }}
+            </span>
+            <span class="run-badge mode" :class="{ agent: overviewItem.decisionMode === 'agent' }">
+              {{ decisionModeLabel(overviewItem.decisionMode) }}
+            </span>
+            <span v-if="overviewItem.decisionModeSince" class="run-note">
+              自 {{ overviewItem.decisionModeSince }} 起生效
+            </span>
+          </div>
+          <p v-if="overviewItem.lastSettlement" class="run-line">
+            <span class="run-label">最近一次结算</span>
+            <!-- 痕迹那句人话本身就以"日期 时间（标的）"开头，这里只补口径，不再重复日期 -->
+            {{ overviewItem.lastSettlement.sentence }}
+            （{{ overviewItem.lastSettlement.settlementKind === 'daily' ? '日线结算' : '盘中评估' }}）
+            <template v-if="overviewItem.lastSettlement.decisionMode === 'agent' && overviewItem.lastSettlement.agentLlmCalls">
+              （委员会 {{ overviewItem.lastSettlement.agentLlmCalls }} 次调用 /
+              {{ overviewItem.lastSettlement.agentTokens ?? 0 }} token）
+            </template>
+          </p>
+          <p v-else class="run-line">
+            <span class="run-label">最近一次结算</span>还没有结算记录
+          </p>
+          <p class="run-line">
+            <span class="run-label">下次</span>{{ overviewItem.nextEvaluationNote }}
+          </p>
+        </section>
 
         <section class="card">
           <div class="detail-title">
@@ -1200,6 +1253,25 @@ main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }
   font-size: 11px;
   line-height: 1.5;
 }
+
+/* ---------- 顶部运行状态条 ---------- */
+/* 它是"这条策略此刻是什么状态"的唯一入口，所以放在第一屏；
+   徽章用中性色 + 语义色各一个，状态另有文字，不靠颜色单独表意。 */
+.run-strip { padding: 14px 20px; }
+.run-badges { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.run-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--color-bg-subtle);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-strong);
+}
+.run-badge.on { color: var(--color-success); background: var(--color-success-soft); border-color: var(--color-success-mark); }
+.run-badge.mode.agent { color: var(--color-accent); border-color: var(--color-accent); }
+.run-note { font-size: 12px; color: var(--color-text-muted); }
+.run-line { margin: 8px 0 0; font-size: 13px; color: var(--color-text-secondary); line-height: 1.7; }
+.run-label { display: inline-block; min-width: 92px; color: var(--color-text-muted); font-size: 12px; }
 
 /* ---------- 可验证预期 ---------- */
 .notice { color: var(--color-success); font-size: 13px; margin-bottom: 12px; }

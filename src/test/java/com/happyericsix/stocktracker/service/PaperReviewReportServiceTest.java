@@ -210,6 +210,70 @@ class PaperReviewReportServiceTest {
         assertFalse(content.getValue().contains("不能当作此刻的证据"), content.getValue());
     }
 
+    // ==================== 2.5 每日简报：安静的日子也要说一句 ====================
+
+    /**
+     * 安静的日子**必须有**一条简报。
+     *
+     * <p>这条用例守的是可发现性：原来的纪律是"有事才说"，代价是
+     * **"没消息"与"服务没在跑"在用户那边长得一模一样**。
+     * 实测反馈就是那句"我不问 AI 都不知道有模拟盘这个功能"。
+     */
+    @Test
+    void aQuietDayStillGetsABriefingThatSaysWhyNothingHappened() {
+        when(traceService.listForDay(10L, DAY)).thenReturn(List.of(
+                trace(ExecutionContract.DECISION_SKIP, ExecutionContract.SKIP_RULE_NOT_MET, null)));
+
+        // 断言的是"确实推了一条"：saveReport 的返回值由替身给出（单测里是 null），
+        // 断言它非空等于在测替身；生产路径上这条消息由 MessageService 落库。
+        service.composeDailyBriefing(strategy(), account(), DAY);
+
+        ArgumentCaptor<String> content = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> key = ArgumentCaptor.forClass(String.class);
+        verify(messageService, times(1)).saveReport(any(), eq(PaperReviewReportService.TYPE_PAPER_REPORT),
+                key.capture(), eq("600519"), content.capture());
+
+        String text = content.getValue();
+        assertTrue(text.contains("【模拟盘简报】"), text);
+        // 原因用痕迹那句人话（同一套翻译，不另写一份）
+        assertTrue(text.contains("规则条件不成立"), text);
+        // 赚没赚：至少要有净值与相对本金的收益
+        assertTrue(text.contains("净值 100900.00"), text);
+        assertTrue(text.contains("+0.90%"), text);
+        // 下次什么时候：把"它还在跑"这件事说成确定的时间点
+        assertTrue(text.contains("下一次评估："), text);
+        assertTrue(text.contains("按工作日近似"), "没有交易日历这件事必须写在明处：" + text);
+        // 幂等键带上策略与日期：重跑不会推第二条
+        assertEquals("paper_brief:10:2026-09-17", key.getValue());
+    }
+
+    /** 连痕迹都没有的日子**不发**简报：那是结算没走到留痕那一步，说"今天很平静"是假话。 */
+    @Test
+    void aBriefingIsNotSentWhenTheSettlementLeftNoTrace() {
+        when(traceService.listForDay(10L, DAY)).thenReturn(List.of());
+
+        assertNull(service.composeDailyBriefing(strategy(), account(), DAY));
+        verify(messageService, never()).saveReport(any(), anyString(), anyString(), any(), anyString());
+    }
+
+    /** agent 模式的简报要写明"只在日线结算决策"，否则用户会以为盘中还会自己动。 */
+    @Test
+    void aCommitteeModeBriefingExplainsThatItOnlyDecidesAtSettlement() {
+        Strategy agent = Strategy.builder()
+                .id(10L).name("委员会策略").symbol("600519")
+                .decisionMode(ExecutionContract.DECISION_MODE_AGENT)
+                .user(User.builder().id(1L).username("alice").email("a@b.c").password("x").build())
+                .build();
+        when(traceService.listForDay(10L, DAY)).thenReturn(List.of(
+                trace(ExecutionContract.DECISION_SKIP, ExecutionContract.SKIP_RULE_NOT_MET, null)));
+
+        service.composeDailyBriefing(agent, account(), DAY);
+
+        ArgumentCaptor<String> content = ArgumentCaptor.forClass(String.class);
+        verify(messageService).saveReport(any(), anyString(), anyString(), any(), content.capture());
+        assertTrue(content.getValue().contains("只在日线结算时决策"), content.getValue());
+    }
+
     // ==================== 3. 空转期：沉默本身也是信息 ====================
 
     @Test

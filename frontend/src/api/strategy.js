@@ -26,3 +26,7 @@ export const registerExpectation = (id, { metric, threshold, horizonDays }) =>
   request.post(`/strategies/${id}/expectation`, null, {
     params: { metric, threshold, horizonDays }
   })
+// 模拟盘总览：**一次请求回答四个问题** —— 在跑什么 / 赚没赚 / 今天动没动 / 下次什么时候。
+// 挂在 /paper 下（不是 /strategies/{id}/...）：它是跨策略的读视图，
+// 也是"这个功能在哪"的顶级入口 —— 原来必须先点进某条策略才看得到任何东西。
+export const getPaperOverview = () => request.get('/paper/overview')
