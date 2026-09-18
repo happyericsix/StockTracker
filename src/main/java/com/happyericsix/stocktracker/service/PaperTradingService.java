@@ -297,7 +297,7 @@ public class PaperTradingService {
         // 两条路都落进同一套封闭枚举与同一个结算管线；区别写在 fingerprint.decision_mode 里，
         // 于是两段曲线永远不会被当成可比（见 ExecutionContract.compareBlockReason）。
         String decisionMode = ExecutionContract.normalizeDecisionMode(strategy.getDecisionMode());
-        JsonNode result = ExecutionContract.DECISION_MODE_AGENT.equals(decisionMode)
+        JsonNode result = isAgentMode(strategy)
                 ? strategyClient.agentDecide(strategy.getConfigJson(), strategy.getSymbol(),
                         today.toString(), position, lastBriefingDate(strategy.getId()))
                 : strategyClient.evaluateBar(strategy.getConfigJson(), strategy.getSymbol(),
@@ -473,6 +473,18 @@ public class PaperTradingService {
         Strategy strategy = strategyRepository.findById(strategyId)
                 .orElseThrow(() -> new IllegalArgumentException("策略不存在"));
 
+        // agent 模式下**盘中不再问规则引擎**（2026-09-18 裁决，方案 A）。
+        //
+        // 换决策来源就是换决策者：之前这里无条件调 DSL，于是委员会当天说"不动"，
+        // 盘中的 DSL 信号照样能建仓 —— 决定被覆盖了，而"agent 段"的曲线里还混着
+        // DSL 触发的成交（痕迹会如实标成 rule，所以不算骗人，只是两段再也没法比较）。
+        // 代价写在明处：agent 模式下账户的最新价/净值在盘中不再刷新，只在每日结算后更新一次。
+        if (isAgentMode(strategy)) {
+            log.debug("Realtime check skipped for strategy id={}: decision_mode=agent "
+                    + "（只在日线结算时由委员会决策）", strategy.getId());
+            return null;
+        }
+
         var existingAccount = paperAccountRepository.findByStrategyId(strategy.getId());
         PaperAccount account = existingAccount.orElseGet(PaperAccount::new);
         boolean isNewAccount = existingAccount.isEmpty();
@@ -503,6 +515,18 @@ public class PaperTradingService {
         // 在这里记会把取代链冲成一天上百个值（见 recordPaperFacts 的说明）。
         return applyBarResult(strategy, account, result, LocalDate.now(), barTime,
                 ExecutionContract.SETTLEMENT_REALTIME, trigger);
+    }
+
+    /**
+     * 这条策略现在由谁做决定。
+     *
+     * <p>只留一个判定入口：日线结算、盘中检查、仓位上限三处都要问同一个问题，
+     * 各写一遍 {@code normalize + equals} 迟早会出现"这里算了那里没算"，
+     * 而那种偏差的表现是"某条路径偷偷用了另一个决策者"。
+     */
+    private static boolean isAgentMode(Strategy strategy) {
+        return strategy != null && ExecutionContract.DECISION_MODE_AGENT.equals(
+                ExecutionContract.normalizeDecisionMode(strategy.getDecisionMode()));
     }
 
     /** 最近一次真的开了会的日子（给门控用）。读不到返回 null（Python 侧按"从没开过"处理）。 */

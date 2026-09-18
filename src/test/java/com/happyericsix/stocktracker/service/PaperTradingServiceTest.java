@@ -838,6 +838,64 @@ class PaperTradingServiceTest {
         verify(memoryFactService, times(1)).recordObjective(eq(1L), anyString(), anyList());
     }
 
+    /**
+     * agent 模式下**盘中不再问规则引擎**（2026-09-18 裁决，方案 A）。
+     *
+     * <p>这条用例守的是一件事：换了决策来源就是换了决策者。之前盘中那条路无条件调 DSL，
+     * 于是委员会当天说"不动"，盘中的 DSL 信号照样能建仓 —— 决定被覆盖，而且"agent 段"的
+     * 曲线里混着 DSL 触发的成交。这种覆盖不会报错，只会让两段曲线悄悄失去可比性。
+     */
+    @Test
+    void agentModeNeverAsksTheRuleEngineIntraday() {
+        String configJson = "{\"initial_capital\":10000.0}";
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true)
+                .decisionMode("agent").decisionModeSince(LocalDate.now())
+                .build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+
+        paperTradingService.evaluateRealtime();
+
+        // 一次都不许问：既没有 DSL 信号，也不会有任何成交
+        verify(strategyClient, never()).evaluateBarRealtime(anyString(), anyString(), any());
+        verify(strategyClient, never()).agentDecide(anyString(), anyString(), anyString(), any(), any());
+        verify(paperTradeRepository, never()).save(any(PaperTrade.class));
+        // 连账户都不该被这次盘中检查改写（净值只由每日结算更新）
+        verify(paperAccountRepository, never()).save(any(PaperAccount.class));
+    }
+
+    /** 规则模式下盘中照旧走 DSL —— 上面那条守卫不能顺手把规则那条路也关掉。 */
+    @Test
+    void ruleModeStillAsksTheRuleEngineIntraday() throws Exception {
+        String configJson = "{\"initial_capital\":10000.0}";
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true)   // decisionMode 未设 = 存量数据
+                .build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        // bar_time 为空 → 结算提前返回（这条用例只关心"问了没问"）
+        JsonNode result = mapper.readTree("{\"signal\":\"hold\",\"price\":10.0,\"bar_time\":\"\"}");
+        when(strategyClient.evaluateBarRealtime(eq(configJson), eq("600519"), any()))
+                .thenReturn(result);
+
+        paperTradingService.evaluateRealtime();
+
+        verify(strategyClient, times(1)).evaluateBarRealtime(eq(configJson), eq("600519"), any());
+    }
+
     @Test
     void ruleModeStillUsesTheRuleEndpoint() throws Exception {
         String configJson = "{\"initial_capital\":10000.0}";
