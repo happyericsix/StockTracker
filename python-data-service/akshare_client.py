@@ -349,14 +349,30 @@ def _windows_for(start_date: str, end_date: str) -> list[tuple[str, str]]:
 
     windows = []
     cursor = start_dt
-    while cursor < end_dt and len(windows) < MAX_PAGES:
+    # 先把候选页全部切出来（留一个不至于失控的上限），**再**决定丢哪一头。
+    # 边切边丢是最容易写错的地方：见下面那条实测出来的注释。
+    while cursor < end_dt and len(windows) < MAX_PAGES * 4 + 8:
         page_end = min(cursor + timedelta(days=CHUNK_CALENDAR_DAYS - 1), end_dt)
         windows.append((cursor.strftime("%Y-%m-%d"), page_end.strftime("%Y-%m-%d")))
         cursor = page_end + timedelta(days=1)
-    if cursor <= end_dt:
-        # 页数用尽了还没到头：说清楚被丢掉的是**最早**那一段，而不是装作取全了
-        logger.warning("区间超过 %d 页上限，%s 之前的历史不再取（请求自 %s 起）",
-                       MAX_PAGES, windows[0][0], start_date)
+
+    if len(windows) > MAX_PAGES:
+        # <h3>页数不够时，**必须丢最早的一段，保住决策日附近**</h3>
+        # 这是真跑发现的 bug：agent 端点只给 end_date（决策日），于是"往前推 6 页"
+        # 正好把最后一页挤掉 —— 拿回来的最后一批数据停在**一个月前**，
+        # 而 agent 照样在上面做决策、报告上完全看不出来（价格、指标、辩论全都"合理"）。
+        dropped = windows[:len(windows) - MAX_PAGES]
+        windows = windows[-MAX_PAGES:]
+        logger.warning("区间需要 %d 页、超过上限 %d：%s 之前（%d 页）的历史不再取，"
+                       "保留最近 %d 页以保证**决策日附近的数据一定在**",
+                       len(dropped) + MAX_PAGES, MAX_PAGES, dropped[0][0], len(dropped), MAX_PAGES)
+
+    # 最后一页必须**真的落到请求的终点**上。
+    # 只给终点时，起点是按"往前推 MAX_PAGES 页"算的，而页长整除的结果会差一天 ——
+    # 于是"取到今天"实际只取到昨天。差一天听起来无所谓，但它会让 decision-day 的存在性判断
+    # （agent 那条"决策日必须有 bar"）在边界上偶发失败，而失败的样子是"今天休市"。
+    if end and windows[-1][1] != end:
+        windows[-1] = (windows[-1][0], end)
     return windows
 
 

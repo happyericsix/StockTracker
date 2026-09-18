@@ -95,10 +95,34 @@ def test_a_short_range_is_a_single_page():
     assert _windows_for("2026-01-01", "2026-03-01") == [("2026-01-01", "2026-03-01")]
 
 
-def test_pages_are_capped():
-    """页数有上限，成本才是可预期的；超出的部分**说清楚**是被丢掉的（最早那段）。"""
+def test_pages_are_capped_but_keep_the_end_near_the_decision_day():
+    """**这条是真跑逼出来的。**
+
+    只给 `end_date`（agent 端点就是这样调的：决策日）时，起点是"往前推 MAX_PAGES 页"算的，
+    所以窗口数恰好等于上限。但只要上限调小或页跨度变小，就出现"页数不够" ——
+    而当时实现丢的是**最近**那一页，于是拿回来的数据停在**一个月前**，
+    agent 照样在上面做决策，价格、指标、辩论全都"合理"，报告上完全看不出来。
+
+    页数不够时唯一正确的选择：丢最早的一段，**保住决策日附近**。
+    """
     windows = _windows_for("1995-01-01", TODAY)
+
     assert len(windows) == MAX_PAGES
+    assert windows[-1][1] == TODAY, "最后一页必须落到请求的终点上"
+    # 只给终点的调用（agent 端点）也必须覆盖到终点
+    open_ended = _windows_for("", TODAY)
+    assert open_ended[-1][1] == TODAY
+
+
+def test_dropping_pages_says_which_part_is_missing(caplog):
+    """丢掉的那一段必须报出来（而不是静默地少给一段）。"""
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        _windows_for("1995-01-01", TODAY)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("保留最近" in message for message in messages), messages
 
 
 def test_an_unparsable_range_falls_back_instead_of_raising():
