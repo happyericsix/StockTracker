@@ -145,7 +145,7 @@ class StrategyVerificationLiveTest {
         MessageService messageService = mock(MessageService.class);
         PaperReviewReportService report = new PaperReviewReportService(traceService,
                 mock(com.happyericsix.stocktracker.repository.PaperEquitySnapshotRepository.class),
-                reading, messageService);
+                reading, messageService, mock(com.happyericsix.stocktracker.service.ExpectationService.class));
 
         PaperAccount account = PaperAccount.builder().id(1L)
                 .initialCapital(new java.math.BigDecimal("100000.00"))

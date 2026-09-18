@@ -65,15 +65,24 @@ public class PaperReviewReportService {
     private final PaperEquitySnapshotRepository paperEquitySnapshotRepository;
     private final StrategyService strategyService;
     private final MessageService messageService;
+    /** 预期登记/回填。允许为 null（单测）；读失败只是少一行。 */
+    private final ExpectationService expectationService;
 
+    /**
+     * 单一构造函数（**不要再加重载**：两个构造函数而没有 {@code @Autowired} 时，
+     * Spring 会去找无参构造、整个上下文起不来 —— 这个坑在本项目已踩过两次）。
+     * 预期服务允许为 null（单测），读失败只是少一行。
+     */
     public PaperReviewReportService(PaperTraceService paperTraceService,
                                     PaperEquitySnapshotRepository paperEquitySnapshotRepository,
                                     StrategyService strategyService,
-                                    MessageService messageService) {
+                                    MessageService messageService,
+                                    ExpectationService expectationService) {
         this.paperTraceService = paperTraceService;
         this.paperEquitySnapshotRepository = paperEquitySnapshotRepository;
         this.strategyService = strategyService;
         this.messageService = messageService;
+        this.expectationService = expectationService;
     }
 
     /**
@@ -182,6 +191,7 @@ public class PaperReviewReportService {
 
         text.append('\n').append(accountLine(account)).append('\n');
         text.append(decisionModeLine(strategy)).append('\n');
+        appendExpectationLine(text, strategy);
 
         long evaluated = all.stream().filter(t -> ExecutionContract.SETTLEMENT_REALTIME
                 .equals(t.getSettlementKind())).count();
@@ -380,6 +390,28 @@ public class PaperReviewReportService {
                     + "想比较请看两段各自的区间表现，不要看一整条线。");
         }
         return line.toString();
+    }
+
+    /**
+     * 预期那一行：报告里唯一能回答"上次那个承诺兑现了吗"的地方。
+     *
+     * <p>三种状态说成三句不同的话（尚未到期 / 达成与未达成 / 算不出来）——
+     * 尤其最后一种：**"样本不足"不是"未达成"**，混起来会让一次数据缺口被读成策略失败。
+     */
+    private void appendExpectationLine(StringBuilder text, Strategy strategy) {
+        if (expectationService == null || strategy == null || strategy.getUser() == null) {
+            return;
+        }
+        try {
+            ExpectationService.Expectation expectation = expectationService.latest(
+                    strategy.getUser().getId(), strategy.getId());
+            String sentence = ExpectationService.describe(expectation);
+            if (!sentence.isBlank()) {
+                text.append(sentence).append('\n');
+            }
+        } catch (Exception e) {
+            log.debug("报告读取预期失败: {}", e.getMessage());
+        }
     }
 
     private static String formatPct(Double value) {

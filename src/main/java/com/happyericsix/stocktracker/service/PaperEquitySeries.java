@@ -94,6 +94,55 @@ public final class PaperEquitySeries {
     }
 
     /**
+     * 预期度量：**封闭集**，每一项都用已有的一段净值序列算出来。
+     *
+     * <h3>为什么度量只有这几个</h3>
+     * 它们全都是**账户层面可观测**的量（超额、收益、回撤），没有一个是"股价会涨到多少"。
+     * 这是本项目第一条原则的落点：可以承诺"未来 20 个交易日超额不低于 0"（到期能验），
+     * 不可以承诺"会涨 8%"（既不可验，也不该做）。
+     *
+     * <p>比较方向一律是"**实际 ≥ 门槛**记为达成"（回撤是负数，所以"回撤不超过 8%"
+     * 写成门槛 −8 就落在同一个方向上）—— 一个比较方向，少一处能写反的地方。
+     */
+    public static final String METRIC_EXCESS_VS_BUY_AND_HOLD = "excess_vs_buy_and_hold_pct";
+    public static final String METRIC_RETURN = "return_pct";
+    public static final String METRIC_MAX_DRAWDOWN = "max_drawdown_pct";
+
+    public static final java.util.List<String> METRICS = java.util.List.of(
+            METRIC_EXCESS_VS_BUY_AND_HOLD, METRIC_RETURN, METRIC_MAX_DRAWDOWN);
+
+    public static boolean isMetric(String metric) {
+        return metric != null && METRICS.contains(metric.trim());
+    }
+
+    /**
+     * 从 `from`（含）到序列末尾算一个度量。返回 {@code null} = **算不出来**（样本不足），
+     * 而不是 0 —— 0 会被读成"达标了"。
+     */
+    public static BigDecimal metricValue(List<PaperEquitySnapshot> series, String metric,
+                                         LocalDate from) {
+        if (series == null || series.isEmpty()) {
+            return null;
+        }
+        List<PaperEquitySnapshot> window = series.stream()
+                .filter(item -> item != null && item.getTradeDate() != null
+                        && (from == null || !item.getTradeDate().isBefore(from)))
+                .toList();
+        // 至少要两个点：一个点谈不上"期间表现"，也谈不上回撤
+        if (window.size() < 2) {
+            return null;
+        }
+        Summary summary = summarize(window);
+        String key = metric == null ? "" : metric.trim();
+        return switch (key) {
+            case METRIC_EXCESS_VS_BUY_AND_HOLD -> summary.excessVsBuyAndHoldPct();
+            case METRIC_RETURN -> summary.returnPct();
+            case METRIC_MAX_DRAWDOWN -> summary.maxDrawdownPct();
+            default -> null;
+        };
+    }
+
+    /**
      * 最大回撤：净值从历史高点的最大回落（%，≤0）。
      *
      * <p>用它而不是"最大单日跌幅"：前者是"最难受的那一段"，后者只是噪声。

@@ -43,7 +43,8 @@ class PaperReviewReportServiceTest {
     private final StrategyService strategyService = mock(StrategyService.class);
     private final MessageService messageService = mock(MessageService.class);
     private final PaperReviewReportService service =
-            new PaperReviewReportService(traceService, equityRepository, strategyService, messageService);
+            new PaperReviewReportService(traceService, equityRepository, strategyService, messageService,
+                    mock(ExpectationService.class));
 
     private static final LocalDate DAY = LocalDate.of(2026, 9, 17);
 

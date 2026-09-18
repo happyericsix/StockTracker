@@ -66,6 +66,8 @@ public class PaperTradingService {
     private final PaperReviewReportService paperReviewReportService;
     /** 样本外验证（周频）。允许为 null：单测里没有这个替身，周任务本身也不该被单测触发。 */
     private final StrategyService strategyService;
+    /** 预期登记/回填。允许为 null（单测）；失败只是少一次回填。 */
+    private final ExpectationService expectationService;
     private final ObjectMapper mapper = new ObjectMapper();
     private final TransactionTemplate transactionTemplate;
 
@@ -74,6 +76,12 @@ public class PaperTradingService {
      * Spring 遇到多个构造函数且没有 {@code @Autowired} 时会去找无参构造，直接起不来
      * （实测踩过：三个重载 → {@code NoSuchMethodException: <init>()} → 整个应用上下文挂掉）。
      * 可选依赖（报告、验证）允许为 null，用 null 判断兜住，而不是靠另一个构造函数。
+     */
+    /**
+     * 单一构造函数：**不要再为了"测试方便"加重载**。
+     * 多个构造函数而没有 {@code @Autowired} 时 Spring 会去找无参构造，直接起不来
+     * （实测踩过：整个应用上下文挂掉）。可选依赖（报告/验证/预期）允许为 null，
+     * 用 null 判断兜住，而不是靠另一个构造函数。
      */
     public PaperTradingService(StrategyRepository strategyRepository,
                                PaperAccountRepository paperAccountRepository,
@@ -86,7 +94,8 @@ public class PaperTradingService {
                                MemoryFactService memoryFactService,
                                MemoryService memoryService,
                                PaperReviewReportService paperReviewReportService,
-                               StrategyService strategyService) {
+                               StrategyService strategyService,
+                               ExpectationService expectationService) {
         this.strategyRepository = strategyRepository;
         this.paperAccountRepository = paperAccountRepository;
         this.paperTradeRepository = paperTradeRepository;
@@ -98,6 +107,7 @@ public class PaperTradingService {
         this.memoryService = memoryService;
         this.paperReviewReportService = paperReviewReportService;
         this.strategyService = strategyService;
+        this.expectationService = expectationService;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
@@ -317,6 +327,14 @@ public class PaperTradingService {
                 ExecutionContract.SETTLEMENT_DAILY, ExecutionContract.TRIGGER_CRON);
         recordEquitySnapshot(strategy, settled, result, today);
         recordPaperFacts(strategy, settled, today);
+        // 到期就回填预期（复用同一批净值快照，不额外查库）。
+        // 旁路：写不进去只是少一次回填，绝不影响结算（与 recordPaperFacts 同一条纪律）。
+        if (expectationService != null) {
+            expectationService.evaluate(strategy.getUser() == null ? null : strategy.getUser().getId(),
+                    strategy.getId(),
+                    paperEquitySnapshotRepository.findByStrategyIdOrderByTradeDateAsc(strategy.getId()),
+                    today);
+        }
         return settled;
     }
 

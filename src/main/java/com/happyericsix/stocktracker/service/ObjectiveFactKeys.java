@@ -90,6 +90,23 @@ public final class ObjectiveFactKeys {
     public static final String VERIFY_FEE_DRAG_PCT = "verify_fee_drag_pct";
     /** 验证：引擎版本（口径之一；与回测/模拟盘不同则数字不可比） */
     public static final String VERIFY_ENGINE_VERSION = "verify_engine_version";
+    // —— 预期登记与回填（建议闭环）——
+    // 复用客观事实通道而不是新建表：取代链天然给出"上一次预期是什么、有没有达成"的历史，
+    // 模型也能通过既有检索读到它 —— 而写在对话里的承诺下一轮就找不到了。
+    /** 预期：登记时间 */
+    public static final String EXPECTATION_AT = "expectation_at";
+    /** 预期：度量（封闭集，见 ExpectationService；都是账户层面可观测值，**不是股价预测**） */
+    public static final String EXPECTATION_METRIC = "expectation_metric";
+    /** 预期：门槛（度量 ≥ 门槛 记为达成） */
+    public static final String EXPECTATION_THRESHOLD = "expectation_threshold";
+    /** 预期：到期日（到这天之后回填） */
+    public static final String EXPECTATION_DEADLINE = "expectation_deadline";
+    /** 预期：状态（pending | met | unmet | unmeasurable） */
+    public static final String EXPECTATION_STATUS = "expectation_status";
+    /** 预期：到期时的实际度量值 */
+    public static final String EXPECTATION_OUTCOME = "expectation_outcome";
+    /** 预期：回填时间 */
+    public static final String EXPECTATION_EVALUATED_AT = "expectation_evaluated_at";
     // <<< OBJECTIVE_PREDICATES
 
     /**

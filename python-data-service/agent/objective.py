@@ -98,6 +98,22 @@ PREDICATES = (
     "verify_avg_excess_pct",
     "verify_fee_drag_pct",
     "verify_engine_version",
+    # —— 预期登记与回填（建议闭环）——
+    # "这条策略接下来会怎样"必须是一个**可验证的承诺**，而不是一句看法：
+    # 登记时写清度量、门槛、到期日，到期后回填实际值与达成与否。
+    # 复用客观事实通道而不是新建表，有三个直接好处：
+    #   ① 取代链天然给出"上一次预期是什么、有没有达成"的历史；
+    #   ② 模型可以通过既有检索读到它（写在对话里的承诺下一轮就找不到了）；
+    #   ③ 不需要新表、新 API、新权限。
+    # **刻意不写"预测股价"**：这些度量都是账户/规则层面的可观测值（超额、收益、回撤），
+    # 不涉及对价格方向的预测 —— 那是本项目从第一天就排除的东西。
+    "expectation_at",
+    "expectation_metric",
+    "expectation_threshold",
+    "expectation_deadline",
+    "expectation_status",
+    "expectation_outcome",
+    "expectation_evaluated_at",
 )
 PREDICATE_SET = frozenset(PREDICATES)
 
@@ -108,7 +124,8 @@ PREDICATE_SET = frozenset(PREDICATES)
 #      —— 客观事实是标量。明细留在 backtest-matrix 的响应与痕迹里，
 #         事实通道只留**汇总的样本量与结论**，否则取代链会被几十个键撑爆。
 #   advice_last_outcome / advice_prediction_hit
-#      —— 属于建议闭环（采纳/拒绝、预测是否命中），等教练角色落地后再加。
+#      —— 已实现为 `expectation_*`（2026-09-18）：改名为"预期"是因为本项目**不预测股价**，
+#         只承诺账户层面的可验证结果（超额 / 收益 / 回撤）。
 # 先占位的键是最糟的选择：它会让"这条通道写入了什么"变得不可回答。
 
 

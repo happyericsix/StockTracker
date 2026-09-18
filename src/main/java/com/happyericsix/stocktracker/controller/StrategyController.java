@@ -8,6 +8,10 @@ import com.happyericsix.stocktracker.dto.ModelDiagnosticResponse;
 import com.happyericsix.stocktracker.dto.Result;
 import com.happyericsix.stocktracker.dto.StrategyRequest;
 import com.happyericsix.stocktracker.dto.StrategyResponse;
+import com.happyericsix.stocktracker.entity.User;
+import com.happyericsix.stocktracker.repository.UserRepository;
+import com.happyericsix.stocktracker.service.ExpectationService;
+import com.happyericsix.stocktracker.service.PaperEquitySeries;
 import com.happyericsix.stocktracker.service.PaperTradingService;
 import com.happyericsix.stocktracker.service.StrategyService;
 import jakarta.validation.Valid;
@@ -27,6 +31,8 @@ public class StrategyController {
 
     private final StrategyService strategyService;
     private final PaperTradingService paperTradingService;
+    private final ExpectationService expectationService;
+    private final UserRepository userRepository;
 
     @GetMapping
     public Result<List<StrategyResponse>> listStrategies(Authentication authentication) {
@@ -148,6 +154,39 @@ public class StrategyController {
             Authentication authentication) {
         return Result.success(
                 strategyService.switchDecisionMode(authentication.getName(), id, mode));
+    }
+
+    /**
+     * 登记一条**可验证预期**：到 {@code horizonDays} 天后，指定度量是否 ≥ 门槛。
+     *
+     * <p>度量是封闭集（超额 / 收益 / 回撤），全部是**账户层面可观测值** ——
+     * 不涉及股价预测（本项目第一条原则）。到期后由每日结算自动回填，
+     * 复盘报告会写"达成 / 未达成 / 算不出来"。
+     *
+     * <p>刻意做成显式动作：一个承诺得有人下。Agent 的"继续观察"也应该走到这里来，
+     * 否则"不表态"永远是安全策略。
+     */
+    @PostMapping("/{id}/expectation")
+    public Result<String> registerExpectation(
+            @PathVariable Long id,
+            @RequestParam String metric,
+            @RequestParam java.math.BigDecimal threshold,
+            @RequestParam(required = false) Integer horizonDays,
+            Authentication authentication) {
+        User user = userRepository.findByUsername(authentication.getName())
+                .orElseThrow(() -> new IllegalArgumentException("用户不存在"));
+        // 归属检查走既有路径：拿不到这条策略就说明不属于该用户（与账户/痕迹同一条规矩）
+        strategyService.listStrategies(authentication.getName()).stream()
+                .filter(item -> id.equals(item.getId()))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("策略不存在"));
+        ExpectationService.Expectation expectation =
+                expectationService.register(user.getId(), id, metric, threshold, horizonDays);
+        if (expectation == null) {
+            return Result.error(400, "预期未登记：度量必须是 " + PaperEquitySeries.METRICS
+                    + "，门槛必须是数字");
+        }
+        return Result.success(ExpectationService.describe(expectation));
     }
 
     /**
