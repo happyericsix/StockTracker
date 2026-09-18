@@ -18,6 +18,7 @@ const loadingMore = ref(false)
 const loadError = ref('')
 const hasMore = ref(true)
 let unsubscribe = null
+let unsubscribeReconnect = null
 
 const activeTab = ref('all')
 
@@ -224,6 +225,11 @@ const viewChart = (symbol) => {
 
 const goChat = () => router.push('/assistant')
 
+/** SSE 断线重连后重新拉第一页（列表是从新到旧的，重拉首页即可覆盖断线窗口） */
+const onReconnect = async () => {
+  await load()
+}
+
 // 滚动到底自动加载
 const mainRef = ref(null)
 const onScroll = async (e) => {
@@ -238,10 +244,13 @@ onMounted(() => {
   load()
   messageBus.connect()
   unsubscribe = messageBus.subscribe(onBusMessage)
+  // 断线重连后补拉：SSE 不会补发断线期间的消息，不拉这一下就会缺消息
+  unsubscribeReconnect = messageBus.subscribeReconnect(onReconnect)
 })
 
 onUnmounted(() => {
   if (unsubscribe) unsubscribe()
+  if (unsubscribeReconnect) unsubscribeReconnect()
 })
 </script>
 

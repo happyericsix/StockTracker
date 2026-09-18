@@ -10,10 +10,22 @@ const input = ref('')
 const typing = ref(false)
 const sending = ref(false)
 const error = ref('')
+const notice = ref('')
 const composing = ref(false)
 const listEl = ref(null)
 const pendingLocalId = ref(null)
 let unsubscribe = null
+let unsubscribeReconnect = null
+let typingTimer = null
+
+/**
+ * "正在输入"的兜底时限。
+ *
+ * 为什么必须有：Java 侧调 Python 的超时是 60 秒，超时后它会用兜底文案**推送**一条消息，
+ * 所以正常情况下 90 秒还没收到回复，说明不是模型在想，而是**推送链路断了** ——
+ * 那时如果只把气泡留在那里转，用户唯一能做的就是干等。
+ */
+const TYPING_TIMEOUT_MS = 90000
 
 const scrollToBottom = async () => {
   await nextTick()
@@ -124,6 +136,8 @@ const onBusMessage = (msg) => {
   if (!msg || !msg.id) return
   if (msg.type === 'CHAT_BOT') {
     typing.value = false
+    clearTypingWatch()
+    notice.value = ''
   }
   if (msg.type === 'CHAT_BOT' || msg.type === 'CHAT_USER') {
     // 乐观气泡 id 是本地 'local-<ts>'，与服务端 SSE 回显的数据库自增 id 永不相等，
@@ -142,6 +156,31 @@ const onBusMessage = (msg) => {
       scrollToBottom()
     }
   }
+}
+
+const clearTypingWatch = () => {
+  if (typingTimer) {
+    clearTimeout(typingTimer)
+    typingTimer = null
+  }
+}
+
+/** 发出消息后启动兜底计时：超时不是"模型还在想"，而是推送断了 */
+const startTypingWatch = () => {
+  clearTypingWatch()
+  typingTimer = setTimeout(async () => {
+    typingTimer = null
+    typing.value = false
+    notice.value = '超过 90 秒没收到回复，可能是连接中断了 —— 已为你重新同步对话记录。'
+    await loadHistory()
+  }, TYPING_TIMEOUT_MS)
+}
+
+/** SSE 断线重连成功：断线期间的推送不会补发，必须自己再拉一次 */
+const onReconnect = async () => {
+  clearTypingWatch()
+  typing.value = false
+  await loadHistory()
 }
 
 const hasStrategyContent = (content) => {
@@ -185,11 +224,14 @@ const send = async () => {
   scrollToBottom()
   typing.value = true
   sending.value = true
+  notice.value = ''
+  startTypingWatch()
   try {
     await sendChat(text)
   } catch (e) {
     pendingLocalId.value = null
     typing.value = false
+    clearTypingWatch()
     error.value = '发送失败，请稍后重试'
   } finally {
     sending.value = false
@@ -204,10 +246,13 @@ onMounted(() => {
   loadHistory()
   messageBus.connect()
   unsubscribe = messageBus.subscribe(onBusMessage)
+  unsubscribeReconnect = messageBus.subscribeReconnect(onReconnect)
 })
 
 onUnmounted(() => {
   if (unsubscribe) unsubscribe()
+  if (unsubscribeReconnect) unsubscribeReconnect()
+  clearTypingWatch()
 })
 </script>
 
@@ -256,6 +301,10 @@ onUnmounted(() => {
         </div>
       </div>
 
+      <p v-if="notice" class="chat-notice">
+        <span>{{ notice }}</span>
+        <button class="notice-dismiss" type="button" @click="notice = ''">知道了</button>
+      </p>
       <p v-if="error" class="chat-error">{{ error }}</p>
     </div>
 
@@ -453,6 +502,34 @@ onUnmounted(() => {
 }
 
 .chat-error { color: var(--color-danger); font-size: 12px; text-align: center; }
+
+/* 兜底提示（例如"超时未收到回复"）：比错误轻、比静默重 —— 用户至少知道发生了什么 */
+.chat-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--color-warning);
+  background: var(--color-bg-subtle);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.notice-dismiss {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.notice-dismiss:hover { border-color: var(--color-border-strong); }
 
 .chat-input-bar {
   display: flex;

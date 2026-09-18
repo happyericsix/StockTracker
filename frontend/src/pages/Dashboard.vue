@@ -18,6 +18,7 @@ const favoritesLoaded = ref(false)
 const addError = ref('')
 const buyPrice = ref('')
 const quantity = ref('')
+let unsubscribeReconnect = null
 
 const searchInputRef = ref(null)
 
@@ -230,11 +231,14 @@ onMounted(() => {
   loadThsStatus()
   messageBus.connect()
   messageBus.refreshUnread()
+  // 断线期间错过的消息不会补发，重连后同步一次未读数（角标才不会少）
+  unsubscribeReconnect = messageBus.subscribeReconnect(() => messageBus.refreshUnread())
 })
 
 // 组件卸载时确保弹窗状态复位（避免残留遮罩）
 onBeforeUnmount(() => {
   showBindModal.value = false
+  if (unsubscribeReconnect) unsubscribeReconnect()
 })
 </script>
 

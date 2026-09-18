@@ -11,6 +11,14 @@ export const messageBus = reactive({
   latest: null,
   es: null,
   handlers: [],
+  /**
+   * 重连订阅者：SSE **只推新消息、不补发断线期间的**，所以恢复连接后必须让各页面
+   * 自己重新拉一次。少了这一步，断线窗口里产生的那条回复要等到用户手动刷新页面才出现
+   * （聊天气泡上表现为"永远在输入中"）。
+   */
+  reconnectHandlers: [],
+  /** 上一次连接是否断开过：EventSource 每次连上都会触发 onopen，首次不算重连 */
+  _errored: false,
 
   connect() {
     const token = localStorage.getItem('token')
@@ -23,6 +31,13 @@ export const messageBus = reactive({
     }
     this.es = new EventSource(`/api/v1/messages/stream?token=${encodeURIComponent(token)}`)
     this.es._token = token
+    this.es.onopen = () => {
+      // 只有"断开过又恢复"才通知：首次连接时页面本来就刚拉过数据
+      if (this._errored) {
+        this._errored = false
+        this.reconnectHandlers.forEach((h) => h())
+      }
+    }
     this.es.addEventListener('message', (e) => {
       try {
         const msg = JSON.parse(e.data)
@@ -39,7 +54,8 @@ export const messageBus = reactive({
         this.disconnect()
         return
       }
-      // 仍在线：EventSource 自带重连，这里只负责重新同步未读数
+      // 仍在线：EventSource 自带重连，这里负责重新同步未读数，并记下"断开过"
+      this._errored = true
       this.refreshUnread()
     }
   },
@@ -50,6 +66,8 @@ export const messageBus = reactive({
       this.es = null
     }
     this.handlers = []
+    this.reconnectHandlers = []
+    this._errored = false
     this.unread = 0
     this.latest = null
   },
@@ -60,6 +78,15 @@ export const messageBus = reactive({
     return () => {
       const idx = this.handlers.indexOf(fn)
       if (idx >= 0) this.handlers.splice(idx, 1)
+    }
+  },
+
+  /** 订阅"断线后重连成功"，返回取消订阅函数。用于补拉断线期间错过的数据。 */
+  subscribeReconnect(fn) {
+    this.reconnectHandlers.push(fn)
+    return () => {
+      const idx = this.reconnectHandlers.indexOf(fn)
+      if (idx >= 0) this.reconnectHandlers.splice(idx, 1)
     }
   },
 
