@@ -87,6 +87,8 @@ PREDICATES = (
     "paper_shares",
     "paper_return_pct",
     "paper_last_eval_at",
+    "paper_max_drawdown_pct",
+    "paper_flat_days",
     # —— 样本外验证（多标的 × 多时段）：由 Java 侧跑完矩阵后写入 ——
     # "这条规则到底行不行"的可复算回答。放进客观事实通道是为了能被**引用**：
     # 盘后复盘引用它，讨论协议拿它当裁决依据 —— 而写在对话里的话下一轮就找不到了。
@@ -100,9 +102,8 @@ PREDICATES = (
 PREDICATE_SET = frozenset(PREDICATES)
 
 # 刻意**还没有**的键（写在注释里，而不是先占位再忘记）：
-#   paper_flat_days / paper_max_drawdown_pct
-#      —— 需要"每日净值序列"才能算（PaperAccount 只存当前值），
-#         等 paper_equity_snapshot 落地后再加。
+#   （paper_max_drawdown_pct / paper_flat_days 已于 2026-09-18 补上 —— 每日净值快照落地后，
+#    这两个量才真的算得出来；在此之前它们只是"看起来该有"的键。）
 #   verify_* 的逐标的明细（每个标的/时段一行）
 #      —— 客观事实是标量。明细留在 backtest-matrix 的响应与痕迹里，
 #         事实通道只留**汇总的样本量与结论**，否则取代链会被几十个键撑爆。

@@ -4,11 +4,13 @@ import com.happyericsix.stocktracker.client.StrategyClient;
 import com.happyericsix.stocktracker.dto.MemoryFactRequest;
 import com.happyericsix.stocktracker.dto.PaperAccountResponse;
 import com.happyericsix.stocktracker.entity.PaperAccount;
+import com.happyericsix.stocktracker.entity.PaperEquitySnapshot;
 import com.happyericsix.stocktracker.entity.PaperTrade;
 import com.happyericsix.stocktracker.entity.PaperTradeTrace;
 import com.happyericsix.stocktracker.entity.Strategy;
 import com.happyericsix.stocktracker.entity.User;
 import com.happyericsix.stocktracker.repository.PaperAccountRepository;
+import com.happyericsix.stocktracker.repository.PaperEquitySnapshotRepository;
 import com.happyericsix.stocktracker.repository.PaperTradeRepository;
 import com.happyericsix.stocktracker.repository.StrategyRepository;
 import com.happyericsix.stocktracker.repository.UserRepository;
@@ -30,6 +32,7 @@ import java.util.Optional;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -56,6 +59,9 @@ class PaperTradingServiceTest {
 
     @Mock
     private PaperTraceService paperTraceService;
+
+    @Mock
+    private PaperEquitySnapshotRepository paperEquitySnapshotRepository;
 
     @Mock
     private StrategyClient strategyClient;
@@ -287,6 +293,12 @@ class PaperTradingServiceTest {
         when(paperTradeRepository.save(any(PaperTrade.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
         when(memoryService.currentSessionKey(1L)).thenReturn("1:2026-09-17");
+        // 天数类事实要靠净值序列算：给它一格（单点 → 回撤不可知，"连续空仓"= 1 天）
+        when(paperEquitySnapshotRepository.findByStrategyIdOrderByTradeDateAsc(10L)).thenReturn(List.of(
+                PaperEquitySnapshot.builder().tradeDate(LocalDate.parse("2026-09-17"))
+                        .equity(new java.math.BigDecimal("10000.00")).cash(new java.math.BigDecimal("0.00"))
+                        .shares(new java.math.BigDecimal("1000.0000"))
+                        .closePrice(new java.math.BigDecimal("10.0000")).build()));
 
         JsonNode result = mapper.readTree(
                 "{\"signal\":\"buy\",\"price\":10.0,\"matched_conditions\":[\"ma_cross\"]}");
@@ -308,6 +320,53 @@ class PaperTradingServiceTest {
         // 收益率口径在服务里算，不让调用方各算一遍：买满仓后净值等于本金
         assertEquals("0", sent.get(ObjectiveFactKeys.PAPER_RETURN_PCT).getObject());
         assertTrue(sent.containsKey(ObjectiveFactKeys.PAPER_LAST_EVAL_AT));
+        // 由净值序列派生的两个量：这一天只有一格，回撤算不出来（**不记**，而不是记 0），
+        // 但"连续空仓天数"算得出来
+        assertTrue(sent.containsKey(ObjectiveFactKeys.PAPER_FLAT_DAYS));
+        assertFalse(sent.containsKey(ObjectiveFactKeys.PAPER_MAX_DRAWDOWN_PCT),
+                "只有一个点时回撤不可知，记成 0 会被读成「从未回撤」");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void theDrawdownFactAppearsOnceThereIsACurve() throws Exception {
+        String configJson = "{\"initial_capital\":10000.0}";
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true).build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(memoryService.currentSessionKey(1L)).thenReturn("1:2026-09-17");
+        // 曲线：100000 → 120000 → 90000，峰值回落到 90000 即 -25%
+        when(paperEquitySnapshotRepository.findByStrategyIdOrderByTradeDateAsc(10L)).thenReturn(List.of(
+                PaperEquitySnapshot.builder().tradeDate(LocalDate.parse("2026-09-15"))
+                        .equity(new java.math.BigDecimal("100000.00")).cash(new java.math.BigDecimal("0.00"))
+                        .shares(java.math.BigDecimal.ZERO).closePrice(new java.math.BigDecimal("10.0000")).build(),
+                PaperEquitySnapshot.builder().tradeDate(LocalDate.parse("2026-09-16"))
+                        .equity(new java.math.BigDecimal("120000.00")).cash(new java.math.BigDecimal("0.00"))
+                        .shares(java.math.BigDecimal.ZERO).closePrice(new java.math.BigDecimal("12.0000")).build(),
+                PaperEquitySnapshot.builder().tradeDate(LocalDate.parse("2026-09-17"))
+                        .equity(new java.math.BigDecimal("90000.00")).cash(new java.math.BigDecimal("0.00"))
+                        .shares(java.math.BigDecimal.ZERO).closePrice(new java.math.BigDecimal("9.0000")).build()));
+
+        JsonNode result = mapper.readTree("{\"signal\":\"hold\",\"price\":9.0,\"matched_conditions\":[]}");
+        when(strategyClient.evaluateBar(eq(configJson), eq("600519"), anyString(), isNull()))
+                .thenReturn(result);
+
+        paperTradingService.evaluateDaily();
+
+        ArgumentCaptor<List<MemoryFactRequest>> captor = ArgumentCaptor.forClass(List.class);
+        verify(memoryFactService, times(1)).recordObjective(eq(1L), anyString(), captor.capture());
+        Map<String, MemoryFactRequest> sent = captor.getValue().stream()
+                .collect(Collectors.toMap(MemoryFactRequest::getPredicate, fact -> fact));
+        assertEquals("-25", sent.get(ObjectiveFactKeys.PAPER_MAX_DRAWDOWN_PCT).getObject());
+        assertEquals("3", sent.get(ObjectiveFactKeys.PAPER_FLAT_DAYS).getObject());
     }
 
     /**
@@ -621,6 +680,58 @@ class PaperTradingServiceTest {
         assertEquals(100.0, account.getShares(), 1e-9);
         assertEquals(0.0, account.getCash(), 1e-9);
         verify(paperTradeRepository, never()).save(any(PaperTrade.class));
+    }
+
+    /**
+     * 信号与账户状态对不上时，宁可留一条"状态不一致"，也不能写"规则没成立"。
+     *
+     * <p>编一个看起来合理的原因是这类痕迹系统最容易犯的错 —— 它会把一个真 bug
+     * 藏进一堆正常行里。
+     */
+    @Test
+    void aDailySettlementWritesExactlyOneEquityPoint() throws Exception {
+        /**
+         * 净值曲线是"这次结算到底把账户变成什么样"的时序记录，
+         * 也是报告里"机会成本"那一行的唯一依据。所以每次日线结算必须**恰好**留下一格，
+         * 且格子里的值就是结算后的账户值（不是结算前的）。
+         */
+        String configJson = "{\"initial_capital\":10000.0,"
+                + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0},"
+                + "\"position\":{\"type\":\"full\",\"size_pct\":100.0}}";
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true).build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(paperTradeRepository.save(any(PaperTrade.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(paperEquitySnapshotRepository.findByStrategyIdAndTradeDate(eq(10L), any(LocalDate.class)))
+                .thenReturn(Optional.empty());
+
+        JsonNode result = mapper.readTree(
+                "{\"signal\":\"buy\",\"price\":10.0,\"matched_conditions\":[\"ma_cross\"]}");
+        when(strategyClient.evaluateBar(eq(configJson), eq("600519"), anyString(), isNull()))
+                .thenReturn(result);
+
+        paperTradingService.evaluateDaily();
+
+        ArgumentCaptor<PaperEquitySnapshot> captor = ArgumentCaptor.forClass(PaperEquitySnapshot.class);
+        verify(paperEquitySnapshotRepository, times(1)).save(captor.capture());
+        PaperEquitySnapshot snapshot = captor.getValue();
+        // 满仓买入后：现金 0、1000 股、收盘价 10 → 净值 10000
+        assertEquals(0, new java.math.BigDecimal("0.00").compareTo(snapshot.getCash()));
+        assertEquals(0, new java.math.BigDecimal("1000.0000").compareTo(snapshot.getShares()));
+        assertEquals(0, new java.math.BigDecimal("10.0000").compareTo(snapshot.getClosePrice()));
+        assertEquals(0, new java.math.BigDecimal("10000.00").compareTo(snapshot.getEquity()));
+        // 快照必须自洽（净值 = 现金 + 股数 × 价格），否则曲线从第一天起就是错的
+        assertTrue(Money.equityIdentityHolds(snapshot.getCash(), snapshot.getShares(),
+                snapshot.getClosePrice(), snapshot.getEquity()));
     }
 
     /**

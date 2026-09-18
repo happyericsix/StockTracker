@@ -3,9 +3,11 @@ package com.happyericsix.stocktracker.service;
 import com.happyericsix.stocktracker.dto.PaperTradeTraceResponse;
 import com.happyericsix.stocktracker.entity.Message;
 import com.happyericsix.stocktracker.entity.PaperAccount;
+import com.happyericsix.stocktracker.entity.PaperEquitySnapshot;
 import com.happyericsix.stocktracker.entity.PaperTradeTrace;
 import com.happyericsix.stocktracker.entity.Strategy;
 import com.happyericsix.stocktracker.entity.User;
+import com.happyericsix.stocktracker.repository.PaperEquitySnapshotRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -60,13 +62,16 @@ public class PaperReviewReportService {
     public static final int IDLE_WINDOW_DAYS = 7;
 
     private final PaperTraceService paperTraceService;
+    private final PaperEquitySnapshotRepository paperEquitySnapshotRepository;
     private final StrategyService strategyService;
     private final MessageService messageService;
 
     public PaperReviewReportService(PaperTraceService paperTraceService,
+                                    PaperEquitySnapshotRepository paperEquitySnapshotRepository,
                                     StrategyService strategyService,
                                     MessageService messageService) {
         this.paperTraceService = paperTraceService;
+        this.paperEquitySnapshotRepository = paperEquitySnapshotRepository;
         this.strategyService = strategyService;
         this.messageService = messageService;
     }
@@ -197,7 +202,69 @@ public class PaperReviewReportService {
         text.append('\n');
 
         text.append('\n').append(verificationLine(strategy, tradeDate));
+        text.append('\n').append(equityLine(strategy, tradeDate));
         return text.toString().strip();
+    }
+
+    /**
+     * 净值与**机会成本**：报告里最容易被忽略、却最该看的一行。
+     *
+     * <h3>为什么必须有"同期买入持有"</h3>
+     * 空仓在账面上是 0 收益，于是"什么都不做"看起来没有代价 —— 这正是"不动不会被惩罚"
+     * 的根源。把同期的买入持有摆在旁边，代价立刻显形：<b>超额为负的那些天，
+     * 正是"不动"真正花了钱的日子</b>。这不是预测未来，只是把基准算清楚。
+     *
+     * <p>口径必须写明：曲线自哪天起、有多少个点（中间没结算的日子是缺口，不补）、
+     * 对照用的是同一批收盘价。少了这些，"超额 -2.5%"会被读成一个没有前提的数字。
+     */
+    private String equityLine(Strategy strategy, LocalDate asOf) {
+        if (strategy == null || strategy.getId() == null) {
+            return "";
+        }
+        List<PaperEquitySnapshot> series = paperEquitySnapshotRepository
+                .findByStrategyIdOrderByTradeDateAsc(strategy.getId());
+        PaperEquitySeries.Summary summary = PaperEquitySeries.summarize(series);
+        if (!summary.hasData()) {
+            return "净值曲线：还没有快照（每日结算后每个交易日会记一格）。";
+        }
+        StringBuilder text = new StringBuilder("净值曲线（自 ").append(summary.firstDate())
+                .append(" 起，共 ").append(summary.days()).append(" 个交易日");
+        if (summary.days() < 5) {
+            text.append("，样本还很少");
+        }
+        text.append("）：\n");
+        text.append("  · 最新 ").append(summary.latestEquity());
+        if (summary.hasPeriod() && summary.returnPct() != null) {
+            text.append("（期间 ").append(sign(summary.returnPct())).append("%）");
+        }
+        if (summary.maxDrawdownPct() != null) {
+            text.append("；最大回撤 ").append(summary.maxDrawdownPct()).append("%");
+        }
+        text.append('\n');
+        if (summary.flatRatioPct() != null) {
+            text.append("  · 空仓占 ").append(summary.flatRatioPct()).append("% 的交易日");
+            if (summary.flatDays() > 0) {
+                text.append("（当前已连续空仓 ").append(summary.flatDays()).append(" 个交易日）");
+            }
+            text.append('\n');
+        }
+        if (summary.excessVsBuyAndHoldPct() != null) {
+            text.append("  · 同期买入持有 ").append(sign(summary.buyAndHoldPct())).append("% → 超额 ")
+                    .append(sign(summary.excessVsBuyAndHoldPct())).append("%");
+            if (summary.excessVsBuyAndHoldPct().signum() < 0) {
+                text.append("（负超额就是「没动/慢半拍」的代价，空仓尤其明显）");
+            }
+            text.append('\n');
+        }
+        return text.toString().stripTrailing();
+    }
+
+    private static String sign(BigDecimal value) {
+        if (value == null) {
+            return "n/a";
+        }
+        BigDecimal shown = value.setScale(2, RoundingMode.HALF_UP);
+        return (shown.signum() >= 0 ? "+" : "") + shown;
     }
 
     private String idleReportText(Strategy strategy, PaperAccount account, LocalDate weekEnding,
@@ -216,6 +283,7 @@ public class PaperReviewReportService {
         }
         text.append('\n');
         text.append('\n').append(accountLine(account)).append('\n');
+        text.append('\n').append(equityLine(strategy, weekEnding)).append('\n');
         text.append('\n').append(verificationLine(strategy, weekEnding));
         if (!recent.isEmpty()) {
             PaperTradeTrace last = recent.get(recent.size() - 1);

@@ -11,7 +11,8 @@ import {
   stopPaper,
   getPaperAccount,
   getPaperTrades,
-  getPaperTraces
+  getPaperTraces,
+  getPaperEquity
 } from '../api/strategy.js'
 
 const router = useRouter()
@@ -22,6 +23,8 @@ const account = ref(null)
 const trades = ref([])
 const traces = ref([])
 const tracesError = ref('')
+const equity = ref(null)
+const equityError = ref('')
 const loading = ref(false)
 const notFound = ref(false)
 const error = ref('')
@@ -208,6 +211,26 @@ const loadPaper = async () => {
     trades.value = []
   }
   await loadTraces()
+  await loadEquity()
+}
+
+/**
+ * 净值曲线 + 机会成本。
+ *
+ * 这一块存在的理由只有一个：**让"不动"也有代价**。
+ * 空仓在账面上是 0，看起来没有代价；把同期的买入持有摆在旁边，
+ * 负超额就是那些"什么都没做"的日子真正花掉的钱。
+ * 汇总（回撤/空仓比例/超额）由后端同一份算法给出，前端只负责显示 —— 不自己再算一遍。
+ */
+const loadEquity = async () => {
+  equityError.value = ''
+  try {
+    const res = await getPaperEquity(strategy.value.id)
+    equity.value = res.data || null
+  } catch (e) {
+    equity.value = null
+    equityError.value = errorMessage(e, '净值曲线加载失败')
+  }
 }
 
 /**
@@ -518,6 +541,59 @@ onUnmounted(() => {
               <span class="trade-reason" v-else>无痕迹（痕迹功能上线前的成交，或痕迹写入失败）</span>
             </div>
           </div>
+        </section>
+
+        <section class="card">
+          <h3>净值曲线与机会成本</h3>
+          <p class="trace-hint">
+            空仓在账面上是 0，看起来没有代价。<strong>把同期的买入持有摆在旁边，代价就显形了</strong>：
+            负超额正是那些"什么都没做"的日子花掉的钱。汇总由后端同一份算法给出，此处只负责显示。
+          </p>
+          <p v-if="equityError" class="error" role="alert">{{ equityError }}</p>
+          <div v-else-if="!equity || !equity.summary || equity.summary.days === 0" class="empty">
+            暂无净值快照（模拟盘每日结算后，每个交易日会记一格）
+          </div>
+          <template v-else>
+            <div class="metric-grid num">
+              <div class="metric">
+                <span>最新净值</span>
+                <strong>{{ formatMoney(equity.summary.latestEquity) }}</strong>
+              </div>
+              <div class="metric">
+                <span>期间收益</span>
+                <strong :class="pnlClass(equity.summary.returnPct)">{{ formatPct(equity.summary.returnPct) }}</strong>
+              </div>
+              <div class="metric">
+                <span>最大回撤</span>
+                <strong class="negative">{{ formatPct(equity.summary.maxDrawdownPct) }}</strong>
+              </div>
+              <div class="metric">
+                <span>同期买入持有</span>
+                <strong :class="pnlClass(equity.summary.buyAndHoldPct)">{{ formatPct(equity.summary.buyAndHoldPct) }}</strong>
+              </div>
+              <div class="metric">
+                <span>超额（不动的代价）</span>
+                <strong :class="pnlClass(equity.summary.excessVsBuyAndHoldPct)">{{ formatPct(equity.summary.excessVsBuyAndHoldPct) }}</strong>
+              </div>
+              <div class="metric">
+                <span>空仓占比</span>
+                <strong>{{ equity.summary.flatRatioPct === null ? 'N/A' : equity.summary.flatRatioPct + '%' }}</strong>
+              </div>
+              <div class="metric">
+                <span>连续空仓</span>
+                <strong>{{ equity.summary.flatDays }} 天</strong>
+              </div>
+              <div class="metric">
+                <span>样本</span>
+                <strong>{{ equity.summary.days }} 天</strong>
+              </div>
+            </div>
+            <!-- 起点必须写出来：曲线从哪天开始，决定它能不能被当成"一直如此" -->
+            <p class="trace-hint">
+              曲线自 {{ equity.summary.firstDate }} 起，共 {{ equity.summary.days }} 个交易日
+              （中间没结算的日子是缺口，不补）。
+            </p>
+          </template>
         </section>
 
         <section class="card">

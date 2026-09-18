@@ -143,7 +143,9 @@ class StrategyVerificationLiveTest {
         when(traceService.listForDay(eq(999L), any(LocalDate.class))).thenReturn(List.of(blocking));
 
         MessageService messageService = mock(MessageService.class);
-        PaperReviewReportService report = new PaperReviewReportService(traceService, reading, messageService);
+        PaperReviewReportService report = new PaperReviewReportService(traceService,
+                mock(com.happyericsix.stocktracker.repository.PaperEquitySnapshotRepository.class),
+                reading, messageService);
 
         PaperAccount account = PaperAccount.builder().id(1L).initialCapital(100000.0)
                 .cash(100000.0).shares(0.0).equity(100000.0).build();

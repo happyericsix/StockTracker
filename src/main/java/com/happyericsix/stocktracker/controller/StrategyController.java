@@ -1,6 +1,7 @@
 package com.happyericsix.stocktracker.controller;
 
 import com.happyericsix.stocktracker.dto.PaperAccountResponse;
+import com.happyericsix.stocktracker.dto.PaperEquityResponse;
 import com.happyericsix.stocktracker.dto.PaperTradeResponse;
 import com.happyericsix.stocktracker.dto.PaperTradeTraceResponse;
 import com.happyericsix.stocktracker.dto.ModelDiagnosticResponse;
@@ -132,5 +133,19 @@ public class StrategyController {
             @PathVariable Long id,
             Authentication authentication) {
         return Result.success(strategyService.verifyMatrix(authentication.getName(), id));
+    }
+
+    /**
+     * 净值曲线：点 + 由同一份点算出的汇总（回撤、空仓比例、相对买入持有的超额）。
+     *
+     * <p>汇总里的 {@code excessVsBuyAndHoldPct} 就是"不动"的代价 —— 空仓那些天，
+     * 账面上是 0，相对基准却是负的。
+     */
+    @GetMapping("/{id}/paper/equity")
+    public Result<PaperEquityResponse> getPaperEquity(
+            @PathVariable Long id,
+            @RequestParam(defaultValue = "120") int days,
+            Authentication authentication) {
+        return Result.success(paperTradingService.getEquityCurve(authentication.getName(), id, days));
     }
 }

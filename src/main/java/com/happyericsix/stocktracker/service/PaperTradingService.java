@@ -3,19 +3,23 @@ package com.happyericsix.stocktracker.service;
 import com.happyericsix.stocktracker.client.StrategyClient;
 import com.happyericsix.stocktracker.dto.MemoryFactRequest;
 import com.happyericsix.stocktracker.dto.PaperAccountResponse;
+import com.happyericsix.stocktracker.dto.PaperEquityResponse;
 import com.happyericsix.stocktracker.dto.PaperTradeResponse;
 import com.happyericsix.stocktracker.dto.PaperTradeTraceResponse;
 import com.happyericsix.stocktracker.entity.PaperAccount;
+import com.happyericsix.stocktracker.entity.PaperEquitySnapshot;
 import com.happyericsix.stocktracker.entity.PaperTrade;
 import com.happyericsix.stocktracker.entity.PaperTradeTrace;
 import com.happyericsix.stocktracker.entity.Strategy;
 import com.happyericsix.stocktracker.entity.User;
 import com.happyericsix.stocktracker.repository.PaperAccountRepository;
+import com.happyericsix.stocktracker.repository.PaperEquitySnapshotRepository;
 import com.happyericsix.stocktracker.repository.PaperTradeRepository;
 import com.happyericsix.stocktracker.repository.StrategyRepository;
 import com.happyericsix.stocktracker.repository.UserRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -50,6 +54,7 @@ public class PaperTradingService {
     private final PaperAccountRepository paperAccountRepository;
     private final PaperTradeRepository paperTradeRepository;
     private final PaperTraceService paperTraceService;
+    private final PaperEquitySnapshotRepository paperEquitySnapshotRepository;
     private final StrategyClient strategyClient;
     private final UserRepository userRepository;
     /** 客观事实写入（W1）。允许为 null：单测没有替身，且"记不进记忆"不该影响结算。 */
@@ -72,6 +77,7 @@ public class PaperTradingService {
                                PaperAccountRepository paperAccountRepository,
                                PaperTradeRepository paperTradeRepository,
                                PaperTraceService paperTraceService,
+                               PaperEquitySnapshotRepository paperEquitySnapshotRepository,
                                StrategyClient strategyClient,
                                UserRepository userRepository,
                                PlatformTransactionManager transactionManager,
@@ -83,6 +89,7 @@ public class PaperTradingService {
         this.paperAccountRepository = paperAccountRepository;
         this.paperTradeRepository = paperTradeRepository;
         this.paperTraceService = paperTraceService;
+        this.paperEquitySnapshotRepository = paperEquitySnapshotRepository;
         this.strategyClient = strategyClient;
         this.userRepository = userRepository;
         this.memoryFactService = memoryFactService;
@@ -234,6 +241,26 @@ public class PaperTradingService {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * 净值曲线（最近 N 个交易日）+ 由同一批点算出的汇总。
+     *
+     * <p>汇总走 {@link PaperEquitySeries} —— 报告与界面共用同一份算法，
+     * 不让"界面一个数、报告另一个数"这种事有机会发生。
+     */
+    public PaperEquityResponse getEquityCurve(String username, Long strategyId, int days) {
+        User user = getUser(username);
+        loadStrategy(user, strategyId);
+        int size = Math.max(1, Math.min(days, 500));
+        List<PaperEquitySnapshot> series = new ArrayList<>(
+                paperEquitySnapshotRepository.findByStrategyIdOrderByTradeDateDesc(
+                        strategyId, PageRequest.of(0, size)));
+        // 仓储按倒序取（要"最近 N 天"），算法要求正序 —— 在这里翻一次，别让算法去猜
+        java.util.Collections.reverse(series);
+        return new PaperEquityResponse(
+                series.stream().map(PaperEquityResponse.Point::from).collect(Collectors.toList()),
+                PaperEquitySeries.summarize(series));
+    }
+
     private PaperAccount evaluateStrategy(Long strategyId, LocalDate today) {
         Strategy strategy = strategyRepository.findById(strategyId)
                 .orElseThrow(() -> new IllegalArgumentException("策略不存在"));
@@ -277,8 +304,60 @@ public class PaperTradingService {
 
         PaperAccount settled = applyBarResult(strategy, account, result, today, null,
                 ExecutionContract.SETTLEMENT_DAILY, ExecutionContract.TRIGGER_CRON);
+        recordEquitySnapshot(strategy, settled, result, today);
         recordPaperFacts(strategy, settled, today);
         return settled;
+    }
+
+    /**
+     * 记一行每日净值快照 —— 只记**日线结算**，且与账户更新在**同一个事务**里。
+     *
+     * <h3>为什么必须在同一个事务</h3>
+     * 净值曲线是时序查询的唯一真相源，客观事实链是它的"记忆语义"副本。
+     * 两者若各写各的，"曲线上的净值"与"记忆里的净值"迟早会不一致，
+     * 而这种不一致最难查：两边都看起来对。所以：账户、快照、事实在同一笔里落。
+     *
+     * <h3>为什么结算被跳过时不写</h3>
+     * 休市/取数失败那天账户一个字段都没动，补一行"净值不变"是把**没结算**画成**没变化**。
+     * 缺口就是缺口：报告会写清楚曲线有多少个点、从哪天到哪天。
+     *
+     * <p>失败**不吞**：快照属于结算记录本身（不是痕迹那样的旁路），写不进去就该让这笔结算回滚
+     * —— 一次写失败意味着那天既没有成交记录也没有净值，重跑一遍即可；
+     * 而"吞掉异常、账户动了但曲线缺一格"是**没法事后发现**的错。
+     * 所以这里刻意**不**包 try/catch（与 {@code PaperTraceService} 的 fail-open 相反，
+     * 因为两者的角色不同：痕迹是旁路证据，净值曲线是主记录）。
+     */
+    private void recordEquitySnapshot(Strategy strategy, PaperAccount account, JsonNode result,
+                                      LocalDate tradeDate) {
+        if (strategy == null || account == null || tradeDate == null) {
+            return;
+        }
+        PaperEquitySnapshot snapshot = paperEquitySnapshotRepository
+                .findByStrategyIdAndTradeDate(strategy.getId(), tradeDate)
+                .orElseGet(() -> PaperEquitySnapshot.builder()
+                        .user(strategy.getUser())
+                        .strategy(strategy)
+                        .tradeDate(tradeDate)
+                        .build());
+        snapshot.setAccount(account);
+        snapshot.setEquity(Money.equity(account.getEquity()));
+        snapshot.setCash(Money.amount(account.getCash()));
+        snapshot.setShares(Money.price(account.getShares()));
+        snapshot.setClosePrice(Money.price(priceOf(result)));
+        paperEquitySnapshotRepository.save(snapshot);
+    }
+
+    /** 当日收盘价：优先用引擎回传的成交参考价，缺了就用快照里的 close。 */
+    private static Double priceOf(JsonNode result) {
+        if (result == null) {
+            return null;
+        }
+        Double price = numberOrNull(result.get("price"));
+        if (price != null && price > 0) {
+            return price;
+        }
+        JsonNode bar = result.get("snapshot") == null ? null : result.get("snapshot").get("bar");
+        return bar == null ? null : numberOrNull(bar.get("close"));
     }
 
     /**
@@ -319,6 +398,22 @@ public class PaperTradingService {
             }
             addFact(facts, subject, ObjectiveFactKeys.PAPER_LAST_EVAL_AT,
                     at.withNano(0).toString(), at);
+            // 由净值序列算出来的两个量：**回撤**与**连续空仓天数**。
+            // 它们回答的是"这段时间最难受的一段有多难受"和"已经多久没动了" ——
+            // 账户快照只存当前值，所以这两个数只有曲线在才算得出来。
+            PaperEquitySeries.Summary series = PaperEquitySeries.summarize(
+                    paperEquitySnapshotRepository.findByStrategyIdOrderByTradeDateAsc(strategy.getId()));
+            if (series.maxDrawdownPct() != null) {
+                // 走 doubleValue()：事实通道的值格式有统一口径（≤3 位小数、整数归一成整数），
+                // 由 ObjectiveFactKeys.format 一处决定，Python 侧同规则。
+                // 直接塞 BigDecimal 会绕过它，于是同一个量在两边写成 "-25.0000" 与 "-25" ——
+                // 那正是"值没变、取代链却多一条"的来源。
+                addFact(facts, subject, ObjectiveFactKeys.PAPER_MAX_DRAWDOWN_PCT,
+                        series.maxDrawdownPct().doubleValue(), at);
+            }
+            if (series.hasData()) {
+                addFact(facts, subject, ObjectiveFactKeys.PAPER_FLAT_DAYS, series.flatDays(), at);
+            }
             if (facts.isEmpty()) {
                 return;
             }

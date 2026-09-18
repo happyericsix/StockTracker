@@ -2,9 +2,11 @@ package com.happyericsix.stocktracker.service;
 
 import com.happyericsix.stocktracker.entity.Message;
 import com.happyericsix.stocktracker.entity.PaperAccount;
+import com.happyericsix.stocktracker.entity.PaperEquitySnapshot;
 import com.happyericsix.stocktracker.entity.PaperTradeTrace;
 import com.happyericsix.stocktracker.entity.Strategy;
 import com.happyericsix.stocktracker.entity.User;
+import com.happyericsix.stocktracker.repository.PaperEquitySnapshotRepository;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -36,10 +38,12 @@ import static org.mockito.Mockito.when;
 class PaperReviewReportServiceTest {
 
     private final PaperTraceService traceService = mock(PaperTraceService.class);
+    private final PaperEquitySnapshotRepository equityRepository =
+            mock(PaperEquitySnapshotRepository.class);
     private final StrategyService strategyService = mock(StrategyService.class);
     private final MessageService messageService = mock(MessageService.class);
     private final PaperReviewReportService service =
-            new PaperReviewReportService(traceService, strategyService, messageService);
+            new PaperReviewReportService(traceService, equityRepository, strategyService, messageService);
 
     private static final LocalDate DAY = LocalDate.of(2026, 9, 17);
 
@@ -249,5 +253,77 @@ class PaperReviewReportServiceTest {
         assertEquals(PaperReviewReportService.dailyDedupeKey(10L, DAY),
                 PaperReviewReportService.dailyDedupeKey(10L, DAY));
         assertNotNull(PaperReviewReportService.dailyDedupeKey(10L, DAY));
+    }
+
+    // ==================== 4. 机会成本：空仓也要被记账 ====================
+
+    private static PaperEquitySnapshot snapshot(String date, String equity, String close, double shares) {
+        return PaperEquitySnapshot.builder()
+                .tradeDate(LocalDate.parse(date))
+                .equity(new java.math.BigDecimal(equity))
+                .cash(new java.math.BigDecimal("0.00"))
+                .shares(java.math.BigDecimal.valueOf(shares))
+                .closePrice(new java.math.BigDecimal(close))
+                .build();
+    }
+
+    @Test
+    void theReportPricesTheCostOfDoingNothing() {
+        /**
+         * 这是整份报告里最该看的一行：账户一直空仓（净值不动），标的涨了 10%。
+         * 账面上"什么都没发生"，实际上相对基准亏了 10% —— 把那 10% 写出来，
+         * "不动"才第一次有了代价（而不是一个看起来中性的 0）。
+         */
+        when(traceService.listForDay(10L, DAY)).thenReturn(List.of(
+                trace(ExecutionContract.DECISION_SKIP, ExecutionContract.SKIP_RULE_NOT_MET, null)));
+        // 最近没有"值得说"的动作（否则空转期摘要会主动跳过自己）
+        when(traceService.listRecent(eq(10L), any(Integer.class))).thenReturn(List.of(
+                trace(ExecutionContract.DECISION_SKIP, ExecutionContract.SKIP_RULE_NOT_MET, null)));
+        when(strategyService.latestVerification(1L, 10L)).thenReturn(null);
+        when(equityRepository.findByStrategyIdOrderByTradeDateAsc(10L)).thenReturn(List.of(
+                snapshot("2026-09-01", "100000.00", "10.0000", 0),
+                snapshot("2026-09-02", "100000.00", "10.5000", 0),
+                snapshot("2026-09-03", "100000.00", "11.0000", 0)));
+
+        service.composeIdleWeeklyReport(strategy(), account(), DAY);
+
+        ArgumentCaptor<String> content = ArgumentCaptor.forClass(String.class);
+        verify(messageService).saveReport(any(), anyString(), anyString(), any(), content.capture());
+        String text = content.getValue();
+        assertTrue(text.contains("净值曲线（自 2026-09-01 起"), text);
+        assertTrue(text.contains("空仓占 100.0%"), text);
+        assertTrue(text.contains("同期买入持有 +10.00%"), text);
+        assertTrue(text.contains("超额 -10.00%"), text);
+        assertTrue(text.contains("代价"), "负超额必须写明这是「不动」的代价：" + text);
+    }
+
+    @Test
+    void theReportSaysThereIsNoCurveYetInsteadOfInventingOne() {
+        when(traceService.listForDay(10L, DAY)).thenReturn(List.of(
+                trace(ExecutionContract.DECISION_BUY, null, null)));
+        when(strategyService.latestVerification(1L, 10L)).thenReturn(null);
+        when(equityRepository.findByStrategyIdOrderByTradeDateAsc(10L)).thenReturn(List.of());
+
+        service.composeDailyReport(strategy(), account(), DAY);
+
+        ArgumentCaptor<String> content = ArgumentCaptor.forClass(String.class);
+        verify(messageService).saveReport(any(), anyString(), anyString(), any(), content.capture());
+        assertTrue(content.getValue().contains("还没有快照"), content.getValue());
+    }
+
+    @Test
+    void aShortCurveIsMarkedAsTooFewSamples() {
+        when(traceService.listForDay(10L, DAY)).thenReturn(List.of(
+                trace(ExecutionContract.DECISION_BUY, null, null)));
+        when(strategyService.latestVerification(1L, 10L)).thenReturn(null);
+        when(equityRepository.findByStrategyIdOrderByTradeDateAsc(10L)).thenReturn(List.of(
+                snapshot("2026-09-01", "100000.00", "10.0000", 0),
+                snapshot("2026-09-02", "100000.00", "10.0000", 0)));
+
+        service.composeDailyReport(strategy(), account(), DAY);
+
+        ArgumentCaptor<String> content = ArgumentCaptor.forClass(String.class);
+        verify(messageService).saveReport(any(), anyString(), anyString(), any(), content.capture());
+        assertTrue(content.getValue().contains("样本还很少"), content.getValue());
     }
 }

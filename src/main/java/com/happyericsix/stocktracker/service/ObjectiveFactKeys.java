@@ -70,6 +70,10 @@ public final class ObjectiveFactKeys {
     public static final String PAPER_RETURN_PCT = "paper_return_pct";
     /** 模拟盘：最近一次结算时间 */
     public static final String PAPER_LAST_EVAL_AT = "paper_last_eval_at";
+    /** 模拟盘：至今最大回撤（%，≤0）—— 由每日净值快照序列算出，单点算不出来就不记 */
+    public static final String PAPER_MAX_DRAWDOWN_PCT = "paper_max_drawdown_pct";
+    /** 模拟盘：当前连续空仓的交易日数（"已经多久没动了"） */
+    public static final String PAPER_FLAT_DAYS = "paper_flat_days";
     // —— 样本外验证（多标的 × 多时段）：**"这条规则到底行不行"的可复算回答** ——
     // 为什么它必须进客观事实：盘后复盘要引用它，P2 的讨论协议要拿它当裁决依据，
     // 而"引用"的前提是有一份**带时间戳、可被替代、可查历史**的记录。
