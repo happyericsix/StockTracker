@@ -5,6 +5,7 @@ import com.happyericsix.stocktracker.dto.MemoryFactRequest;
 import com.happyericsix.stocktracker.dto.PaperAccountResponse;
 import com.happyericsix.stocktracker.entity.PaperAccount;
 import com.happyericsix.stocktracker.entity.PaperTrade;
+import com.happyericsix.stocktracker.entity.PaperTradeTrace;
 import com.happyericsix.stocktracker.entity.Strategy;
 import com.happyericsix.stocktracker.entity.User;
 import com.happyericsix.stocktracker.repository.PaperAccountRepository;
@@ -52,6 +53,9 @@ class PaperTradingServiceTest {
 
     @Mock
     private PaperTradeRepository paperTradeRepository;
+
+    @Mock
+    private PaperTraceService paperTraceService;
 
     @Mock
     private StrategyClient strategyClient;
@@ -347,5 +351,314 @@ class PaperTradingServiceTest {
         assertEquals(1000.0, account.getShares(), 1e-9);
         assertEquals(0.0, account.getCash(), 1e-9);
         assertNull(account.getLastEvalAt(), "跳过结算就不该写 lastEvalAt");
+    }
+
+    // ==================== 痕迹：每条"什么都没发生"的路都要说出原因 ====================
+
+    /**
+     * 现金不够一手：这是最容易"什么都没发生、也没人知道为什么"的一条。
+     *
+     * <p>真实的例子就在本项目的回测里：¥10 万本金买茅台（一手约 ¥14 万）——
+     * 信号触发了 6 次，成交 0 笔，账户数字一动不动。以前这条路径只有一行 warn 日志。
+     */
+    @Test
+    void notEnoughCashForOneLotLeavesATraceInsteadOfSilence() throws Exception {
+        String configJson = "{\"initial_capital\":10000.0,"
+                + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0},"
+                + "\"position\":{\"type\":\"full\",\"size_pct\":100.0}}";
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true).build();
+        PaperAccount account = PaperAccount.builder()
+                .id(5L).user(user).strategy(strategy)
+                .initialCapital(10000.0).cash(10000.0).shares(0.0).avgCost(0.0)
+                .equity(10000.0).highWatermark(0.0).build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.of(account));
+
+        JsonNode result = mapper.readTree(
+                "{\"signal\":\"buy\",\"price\":1500.0,\"matched_conditions\":[\"price_cross_ma\"],"
+                        + "\"fill_basis\":\"close\",\"fingerprint\":{\"engine_version\":\"abc123\","
+                        + "\"adjust_mode\":\"qfq\",\"money_policy_version\":1,\"fill_basis\":\"close\"},"
+                        + "\"snapshot\":{\"schema_version\":1,\"bar\":{\"date\":\"2026-09-17\",\"close\":1500.0}}}");
+        when(strategyClient.evaluateBar(eq(configJson), eq("600519"), anyString(), isNull()))
+                .thenReturn(result);
+
+        paperTradingService.evaluateDaily();
+
+        ArgumentCaptor<PaperTradeTrace> captor = ArgumentCaptor.forClass(PaperTradeTrace.class);
+        verify(paperTraceService, times(1)).record(captor.capture());
+        PaperTradeTrace trace = captor.getValue();
+        assertEquals(ExecutionContract.DECISION_SKIP, trace.getDecision());
+        assertEquals(ExecutionContract.SKIP_INSUFFICIENT_CASH_FOR_ONE_LOT, trace.getSkipReason());
+        // 账户一个字段都不能动
+        assertEquals(10000.0, account.getCash(), 1e-9);
+        assertEquals(0.0, account.getShares(), 1e-9);
+        // 结算前后都记下来，痕迹才能回答"从什么状态到（没）什么状态"
+        assertEquals(0, trace.getEquityBefore().compareTo(trace.getEquityAfter()));
+        // 证据与口径一起留：事后要能看出"当时价格是 1500、按 close 成交"
+        assertEquals(0, new java.math.BigDecimal("1500.0000").compareTo(trace.getBarClose()));
+        assertEquals(ExecutionContract.FILL_CLOSE, trace.getFillBasis());
+        assertEquals("abc123", trace.getEngineVersion());
+        assertEquals(1, trace.getSnapshotSchemaVersion());
+        assertTrue(trace.getSnapshotJson().contains("1500.0"), trace.getSnapshotJson());
+        verify(paperTradeRepository, never()).save(any(PaperTrade.class));
+    }
+
+    /**
+     * 成交那一次的痕迹必须能被**反向找到**（成交行 → 痕迹行）。
+     *
+     * <p>没有这条链接，界面只能把成交和痕迹并排显示，读者自己猜哪条对应哪笔。
+     */
+    @Test
+    void aFillLinksBackToItsTrace() throws Exception {
+        String configJson = "{\"initial_capital\":10000.0,"
+                + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0},"
+                + "\"position\":{\"type\":\"full\",\"size_pct\":100.0}}";
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true).build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(paperTradeRepository.save(any(PaperTrade.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        // 痕迹落库后带回了 id
+        when(paperTraceService.record(any(PaperTradeTrace.class))).thenAnswer(invocation -> {
+            PaperTradeTrace trace = invocation.getArgument(0);
+            trace.setId(99L);
+            return trace;
+        });
+
+        JsonNode result = mapper.readTree(
+                "{\"signal\":\"buy\",\"price\":10.0,\"matched_conditions\":[\"ma_cross\"]}");
+        when(strategyClient.evaluateBar(eq(configJson), eq("600519"), anyString(), isNull()))
+                .thenReturn(result);
+
+        paperTradingService.evaluateDaily();
+
+        ArgumentCaptor<PaperTrade> tradeCaptor = ArgumentCaptor.forClass(PaperTrade.class);
+        verify(paperTradeRepository, times(1)).save(tradeCaptor.capture());
+        assertEquals(99L, tradeCaptor.getValue().getTraceId());
+
+        ArgumentCaptor<PaperTradeTrace> traceCaptor = ArgumentCaptor.forClass(PaperTradeTrace.class);
+        verify(paperTraceService, times(1)).record(traceCaptor.capture());
+        assertEquals(ExecutionContract.DECISION_BUY, traceCaptor.getValue().getDecision());
+        assertNull(traceCaptor.getValue().getSkipReason(), "成交那一次不许带跳过原因");
+    }
+
+    /**
+     * 引擎给的 `skip_reason` 必须被**原样采信**：`warmup` 与 `rule_not_met` 是两件事。
+     *
+     * <p>Java 手里没有指标值，无法自己判断"是条件不成立还是指标还没算出来"。
+     * 让它去猜，痕迹里就会出现一个看起来很确定、实际是编的原因。
+     */
+    @Test
+    void theEngineReasonIsPassedThroughNotGuessed() throws Exception {
+        String configJson = "{\"initial_capital\":10000.0}";
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true).build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        JsonNode result = mapper.readTree(
+                "{\"signal\":\"hold\",\"price\":10.0,\"matched_conditions\":[],"
+                        + "\"decision\":\"skip\",\"skip_reason\":\"warmup\"}");
+        when(strategyClient.evaluateBar(eq(configJson), eq("600519"), anyString(), isNull()))
+                .thenReturn(result);
+
+        paperTradingService.evaluateDaily();
+
+        ArgumentCaptor<PaperTradeTrace> captor = ArgumentCaptor.forClass(PaperTradeTrace.class);
+        verify(paperTraceService, times(1)).record(captor.capture());
+        assertEquals(ExecutionContract.SKIP_WARMUP, captor.getValue().getSkipReason());
+    }
+
+    @Test
+    void aHoldWithoutAnEngineReasonFallsBackToRuleNotMet() throws Exception {
+        String configJson = "{\"initial_capital\":10000.0}";
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true).build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        JsonNode result = mapper.readTree("{\"signal\":\"hold\",\"price\":10.0,\"matched_conditions\":[]}");
+        when(strategyClient.evaluateBar(eq(configJson), eq("600519"), anyString(), isNull()))
+                .thenReturn(result);
+
+        paperTradingService.evaluateDaily();
+
+        ArgumentCaptor<PaperTradeTrace> captor = ArgumentCaptor.forClass(PaperTradeTrace.class);
+        verify(paperTraceService, times(1)).record(captor.capture());
+        assertEquals(ExecutionContract.SKIP_RULE_NOT_MET, captor.getValue().getSkipReason());
+    }
+
+    @Test
+    void aMissingBarLeavesATraceWithNoSnapshot() throws Exception {
+        // 休市/数据未出：没有证据，但**口径与原因**都要留下，否则这天为什么没结算无从查起
+        String configJson = "{\"initial_capital\":10000.0}";
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true).build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        JsonNode result = mapper.readTree(
+                "{\"signal\":\"hold\",\"price\":null,\"matched_conditions\":[],\"bar_date_missing\":true,"
+                        + "\"skip_reason\":\"no_bar\",\"fill_basis\":\"close\",\"snapshot\":null,"
+                        + "\"fingerprint\":{\"engine_version\":\"abc123\",\"adjust_mode\":\"qfq\","
+                        + "\"money_policy_version\":1,\"fill_basis\":\"close\"}}");
+        when(strategyClient.evaluateBar(eq(configJson), eq("600519"), anyString(), isNull()))
+                .thenReturn(result);
+
+        paperTradingService.evaluateDaily();
+
+        ArgumentCaptor<PaperTradeTrace> captor = ArgumentCaptor.forClass(PaperTradeTrace.class);
+        verify(paperTraceService, times(1)).record(captor.capture());
+        PaperTradeTrace trace = captor.getValue();
+        assertEquals(ExecutionContract.SKIP_NO_BAR, trace.getSkipReason());
+        assertNull(trace.getSnapshotJson());
+        assertEquals(ExecutionContract.FILL_CLOSE, trace.getFillBasis(), "没有证据也要有口径");
+    }
+
+    @Test
+    void anUnreachableEngineLeavesATraceToo() {
+        String configJson = "{\"initial_capital\":10000.0}";
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true).build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(strategyClient.evaluateBar(anyString(), anyString(), anyString(), isNull())).thenReturn(null);
+
+        paperTradingService.evaluateDaily();
+
+        ArgumentCaptor<PaperTradeTrace> captor = ArgumentCaptor.forClass(PaperTradeTrace.class);
+        verify(paperTraceService, times(1)).record(captor.capture());
+        assertEquals(ExecutionContract.SKIP_DATA_UNAVAILABLE, captor.getValue().getSkipReason());
+    }
+
+    /**
+     * T+1 挡单也要留痕：它是**执行层**的阻塞，不是"规则没成立"。
+     *
+     * <p>以前这条路径只有一行 debug 日志（默认还不打印），
+     * 于是"信号出现了却没卖出去"在痕迹里完全不存在。
+     */
+    @Test
+    void t1BlockedSellIsTracedAsABlockingSkip() throws Exception {
+        String configJson = "{\"initial_capital\":10000.0,"
+                + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0}}";
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true).build();
+        PaperAccount account = PaperAccount.builder()
+                .id(5L).user(user).strategy(strategy)
+                .initialCapital(10000.0).cash(0.0).shares(100.0).avgCost(10.0)
+                .equity(1000.0).highWatermark(10.0)
+                .lastBuyBar("2026-09-17 09:35:00")
+                .build();
+
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(user));
+        when(strategyRepository.findByIdAndUserId(10L, 1L)).thenReturn(Optional.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.of(account));
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        JsonNode result = mapper.readTree(
+                "{\"signal\":\"sell\",\"price\":11.0,\"matched_conditions\":[\"stop_loss_pct\"],"
+                        + "\"bar_time\":\"2026-09-17 09:40:00\"}");
+        when(strategyClient.evaluateBarRealtime(eq(configJson), eq("600519"), any()))
+                .thenReturn(result);
+
+        paperTradingService.startPaper("alice", 10L);
+
+        ArgumentCaptor<PaperTradeTrace> captor = ArgumentCaptor.forClass(PaperTradeTrace.class);
+        verify(paperTraceService, times(1)).record(captor.capture());
+        PaperTradeTrace trace = captor.getValue();
+        assertEquals(ExecutionContract.SKIP_T1_BLOCKED, trace.getSkipReason());
+        assertEquals(ExecutionContract.SETTLEMENT_REALTIME, trace.getSettlementKind());
+        assertEquals(ExecutionContract.TRIGGER_MANUAL, trace.getTrigger(),
+                "手动启动触发的首次评估要能被区分出来");
+        // 没卖出去：持仓与现金都不许变
+        assertEquals(100.0, account.getShares(), 1e-9);
+        assertEquals(0.0, account.getCash(), 1e-9);
+        verify(paperTradeRepository, never()).save(any(PaperTrade.class));
+    }
+
+    /**
+     * 信号与账户状态对不上时，宁可留一条"状态不一致"，也不能写"规则没成立"。
+     *
+     * <p>编一个看起来合理的原因是这类痕迹系统最容易犯的错 —— 它会把一个真 bug
+     * 藏进一堆正常行里。
+     */
+    @Test
+    void aSignalContradictingTheAccountIsNotDisguisedAsRuleNotMet() throws Exception {
+        String configJson = "{\"initial_capital\":10000.0,"
+                + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0}}";
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true).build();
+        PaperAccount account = PaperAccount.builder()
+                .id(5L).user(user).strategy(strategy)
+                .initialCapital(10000.0).cash(0.0).shares(100.0).avgCost(10.0)
+                .equity(1000.0).highWatermark(10.0)
+                .build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.of(account));
+
+        // 已经持仓，却收到买入信号（结构上不该发生 → 一旦出现多半是并发或契约变更）
+        JsonNode result = mapper.readTree(
+                "{\"signal\":\"buy\",\"price\":10.0,\"matched_conditions\":[\"ma_cross\"]}");
+        when(strategyClient.evaluateBar(eq(configJson), eq("600519"), anyString(), any()))
+                .thenReturn(result);
+
+        paperTradingService.evaluateDaily();
+
+        ArgumentCaptor<PaperTradeTrace> captor = ArgumentCaptor.forClass(PaperTradeTrace.class);
+        verify(paperTraceService, times(1)).record(captor.capture());
+        assertEquals(ExecutionContract.SKIP_STATE_MISMATCH, captor.getValue().getSkipReason());
+        assertEquals(100.0, account.getShares(), 1e-9, "不该加仓");
     }
 }

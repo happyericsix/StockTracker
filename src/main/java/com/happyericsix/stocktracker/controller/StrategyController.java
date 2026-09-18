@@ -2,6 +2,7 @@ package com.happyericsix.stocktracker.controller;
 
 import com.happyericsix.stocktracker.dto.PaperAccountResponse;
 import com.happyericsix.stocktracker.dto.PaperTradeResponse;
+import com.happyericsix.stocktracker.dto.PaperTradeTraceResponse;
 import com.happyericsix.stocktracker.dto.ModelDiagnosticResponse;
 import com.happyericsix.stocktracker.dto.Result;
 import com.happyericsix.stocktracker.dto.StrategyRequest;
@@ -10,10 +11,12 @@ import com.happyericsix.stocktracker.service.PaperTradingService;
 import com.happyericsix.stocktracker.service.StrategyService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 import tools.jackson.databind.JsonNode;
 
+import java.time.LocalDate;
 import java.util.List;
 
 @RestController
@@ -93,5 +96,28 @@ public class StrategyController {
             @PathVariable Long id,
             Authentication authentication) {
         return Result.success(paperTradingService.getTrades(authentication.getName(), id));
+    }
+
+    /**
+     * 最近的结算痕迹：每一行 = 一根 bar 上的一个结论（含"为什么没成交"）。
+     *
+     * <p>这是"随机抽 5 次阻塞跳过，不看代码能明白为什么"的入口。
+     */
+    @GetMapping("/{id}/paper/traces")
+    public Result<List<PaperTradeTraceResponse>> getPaperTraces(
+            @PathVariable Long id,
+            @RequestParam(defaultValue = "50") int limit,
+            Authentication authentication) {
+        return Result.success(paperTradingService.getTraces(authentication.getName(), id, limit));
+    }
+
+    /** 某一天的痕迹（按时间正序）：排查"那天到底发生了什么"用。 */
+    @GetMapping("/{id}/paper/traces/{date}")
+    public Result<List<PaperTradeTraceResponse>> getPaperTracesForDay(
+            @PathVariable Long id,
+            @PathVariable @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+            Authentication authentication) {
+        return Result.success(
+                paperTradingService.getTracesForDay(authentication.getName(), id, date));
     }
 }

@@ -4,8 +4,10 @@ import com.happyericsix.stocktracker.client.StrategyClient;
 import com.happyericsix.stocktracker.dto.MemoryFactRequest;
 import com.happyericsix.stocktracker.dto.PaperAccountResponse;
 import com.happyericsix.stocktracker.dto.PaperTradeResponse;
+import com.happyericsix.stocktracker.dto.PaperTradeTraceResponse;
 import com.happyericsix.stocktracker.entity.PaperAccount;
 import com.happyericsix.stocktracker.entity.PaperTrade;
+import com.happyericsix.stocktracker.entity.PaperTradeTrace;
 import com.happyericsix.stocktracker.entity.Strategy;
 import com.happyericsix.stocktracker.entity.User;
 import com.happyericsix.stocktracker.repository.PaperAccountRepository;
@@ -47,6 +49,7 @@ public class PaperTradingService {
     private final StrategyRepository strategyRepository;
     private final PaperAccountRepository paperAccountRepository;
     private final PaperTradeRepository paperTradeRepository;
+    private final PaperTraceService paperTraceService;
     private final StrategyClient strategyClient;
     private final UserRepository userRepository;
     /** 客观事实写入（W1）。允许为 null：单测没有替身，且"记不进记忆"不该影响结算。 */
@@ -58,6 +61,7 @@ public class PaperTradingService {
     public PaperTradingService(StrategyRepository strategyRepository,
                                PaperAccountRepository paperAccountRepository,
                                PaperTradeRepository paperTradeRepository,
+                               PaperTraceService paperTraceService,
                                StrategyClient strategyClient,
                                UserRepository userRepository,
                                PlatformTransactionManager transactionManager,
@@ -66,6 +70,7 @@ public class PaperTradingService {
         this.strategyRepository = strategyRepository;
         this.paperAccountRepository = paperAccountRepository;
         this.paperTradeRepository = paperTradeRepository;
+        this.paperTraceService = paperTraceService;
         this.strategyClient = strategyClient;
         this.userRepository = userRepository;
         this.memoryFactService = memoryFactService;
@@ -90,7 +95,7 @@ public class PaperTradingService {
         account = paperAccountRepository.save(account);
         strategyRepository.save(strategy);
 
-        PaperAccount evaluated = evaluateRealtimeStrategy(strategyId);
+        PaperAccount evaluated = evaluateRealtimeStrategy(strategyId, ExecutionContract.TRIGGER_MANUAL);
         if (evaluated != null) {
             account = evaluated;
         }
@@ -155,6 +160,27 @@ public class PaperTradingService {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * 最近的结算痕迹（含"为什么没成交"）。
+     *
+     * <p>归属检查走与账户/成交同一条路（`loadStrategy`），痕迹不该成为绕过用户隔离的旁路。
+     */
+    public List<PaperTradeTraceResponse> getTraces(String username, Long strategyId, int limit) {
+        User user = getUser(username);
+        loadStrategy(user, strategyId);
+        return paperTraceService.listRecent(strategyId, limit).stream()
+                .map(PaperTradeTraceResponse::from)
+                .collect(Collectors.toList());
+    }
+
+    public List<PaperTradeTraceResponse> getTracesForDay(String username, Long strategyId, LocalDate date) {
+        User user = getUser(username);
+        loadStrategy(user, strategyId);
+        return paperTraceService.listForDay(strategyId, date).stream()
+                .map(PaperTradeTraceResponse::from)
+                .collect(Collectors.toList());
+    }
+
     private PaperAccount evaluateStrategy(Long strategyId, LocalDate today) {
         Strategy strategy = strategyRepository.findById(strategyId)
                 .orElseThrow(() -> new IllegalArgumentException("策略不存在"));
@@ -176,17 +202,28 @@ public class PaperTradingService {
         JsonNode result = strategyClient.evaluateBar(
                 strategy.getConfigJson(), strategy.getSymbol(), today.toString(), position);
         if (result == null) {
+            // 之前这里只打一行日志：那天为什么没结算，除了翻日志没有别的办法查。
             log.warn("Strategy evaluateBar returned null for strategy id={}", strategy.getId());
-            return account;
+            return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_DAILY,
+                    ExecutionContract.TRIGGER_CRON, today, null, null,
+                    ExecutionContract.SKIP_DATA_UNAVAILABLE);
         }
         // 休市/数据未出：Python 端明确标记请求日无 bar 时，禁止用旧 bar 冒充当日成交
         if (result.has("bar_date_missing") && result.get("bar_date_missing").asBoolean(false)) {
             log.warn("Paper settlement skipped for strategy id={} on {}: bar missing (休市/数据未出)",
                     strategy.getId(), today);
+            PaperTradeTrace trace = newTrace(strategy, account, ExecutionContract.SETTLEMENT_DAILY,
+                    ExecutionContract.TRIGGER_CRON, today, null, result);
+            trace.setDecision(ExecutionContract.DECISION_SKIP);
+            trace.setSkipReason(skipReasonOf(result, ExecutionContract.SKIP_NO_BAR));
+            trace.setSignal(textOr(result.get("signal"), null));
+            fillAccountAfter(trace, account);
+            paperTraceService.record(trace);
             return account;
         }
 
-        PaperAccount settled = applyBarResult(strategy, account, result, today, null);
+        PaperAccount settled = applyBarResult(strategy, account, result, today, null,
+                ExecutionContract.SETTLEMENT_DAILY, ExecutionContract.TRIGGER_CRON);
         recordPaperFacts(strategy, settled, today);
         return settled;
     }
@@ -249,6 +286,10 @@ public class PaperTradingService {
     }
 
     private PaperAccount evaluateRealtimeStrategy(Long strategyId) {
+        return evaluateRealtimeStrategy(strategyId, ExecutionContract.TRIGGER_EVENT);
+    }
+
+    private PaperAccount evaluateRealtimeStrategy(Long strategyId, String trigger) {
         Strategy strategy = strategyRepository.findById(strategyId)
                 .orElseThrow(() -> new IllegalArgumentException("策略不存在"));
 
@@ -280,11 +321,32 @@ public class PaperTradingService {
         account.setLastBarTime(barTime);
         // 刻意**不**在这里写客观事实：本方法由每次价格刷新触发，
         // 在这里记会把取代链冲成一天上百个值（见 recordPaperFacts 的说明）。
-        return applyBarResult(strategy, account, result, LocalDate.now(), barTime);
+        return applyBarResult(strategy, account, result, LocalDate.now(), barTime,
+                ExecutionContract.SETTLEMENT_REALTIME, trigger);
+    }
+
+    /**
+     * 只写痕迹、不改账户（用于"这一轮什么都没做"的路径）。
+     *
+     * <p>把它单独拿出来，是因为这类分支以前全都是 `return account;` ——
+     * 对调用方而言与"结算了但没动"完全一样，而它们的原因可能天差地别
+     * （取数不可用 / 休市 / 涨停挡单 / 现金不足一手）。痕迹是唯一能把它们分开的地方。
+     */
+    private PaperAccount traceOnly(Strategy strategy, PaperAccount account, String settlementKind,
+                                   String trigger, LocalDate tradeDate, String barTime,
+                                   JsonNode result, String skipReason) {
+        PaperTradeTrace trace = newTrace(strategy, account, settlementKind, trigger, tradeDate,
+                barTime, result);
+        trace.setDecision(ExecutionContract.DECISION_SKIP);
+        trace.setSkipReason(ExecutionContract.normalizeSkipReason(skipReason));
+        fillAccountAfter(trace, account);
+        paperTraceService.record(trace);
+        return account;
     }
 
     private PaperAccount applyBarResult(Strategy strategy, PaperAccount account,
-                                        JsonNode result, LocalDate tradeDate, String barTime) {
+                                        JsonNode result, LocalDate tradeDate, String barTime,
+                                        String settlementKind, String trigger) {
         JsonNode config = parseConfig(strategy.getConfigJson());
         JsonNode risk = config.get("risk");
         double commission = doubleOr(field(risk, "commission_pct"), DEFAULT_COMMISSION_PCT) / 100.0;
@@ -299,6 +361,14 @@ public class PaperTradingService {
 
         String signal = textOr(result.get("signal"), "").toLowerCase(Locale.ROOT);
         double price = doubleOr(result.get("price"), 0.0);
+
+        // 痕迹在**结算开始前**就建好（含账户的"结算前"状态与这根 bar 的证据）：
+        // 这样每一条提前返回的分支都只是补上"结论 + 原因"，不会有哪条路悄悄漏掉痕迹。
+        PaperTradeTrace trace = newTrace(strategy, account, settlementKind, trigger, tradeDate,
+                barTime, result);
+        trace.setSignal(signal.isEmpty() ? null : signal);
+        trace.setMatchedConditions(joinMatchedConditions(result.get("matched_conditions")));
+
         // 没有可用价格就**不结算**（原样返回，什么都不改）。
         //
         // 这里以前会带着 price=0 继续走到底部的 updateEquityAndHighWatermark，
@@ -306,12 +376,14 @@ public class PaperTradingService {
         // 而净值现在还会写进客观事实通道被长期记住。跳过才是正确行为：
         // 宁可不结算（并留下 skip 原因），也不要写一个错的净值。
         if (price <= 0.0) {
-            log.warn("Skipping paper settlement for strategy id={} on {}: no usable price "
-                            + "(skip_reason={})", strategy.getId(), tradeDate,
+            String reason = ExecutionContract.normalizeSkipReason(
                     result.has("error") ? ExecutionContract.SKIP_DATA_UNAVAILABLE
                             : ExecutionContract.SKIP_INVALID_PRICE);
-            return account;
+            log.warn("Skipping paper settlement for strategy id={} on {}: no usable price "
+                    + "(skip_reason={})", strategy.getId(), tradeDate, reason);
+            return skip(account, trace, reason);
         }
+
         String reason = joinMatchedConditions(result.get("matched_conditions"));
         double cash = account.getCash() == null ? 0.0 : account.getCash();
 
@@ -320,13 +392,13 @@ public class PaperTradingService {
             double fill = price * (1.0 + slippage);
             if (fill <= 0.0) {
                 log.warn("Invalid fill price for buy on strategy id={}", strategy.getId());
-                return account;
+                return skip(account, trace, ExecutionContract.SKIP_INVALID_PRICE);
             }
 
             double budget = "percent".equals(positionType) ? cash * sizePct : cash;
             if (budget <= 0.0) {
                 log.warn("No cash available for buy on strategy id={}", strategy.getId());
-                return account;
+                return skip(account, trace, ExecutionContract.SKIP_INSUFFICIENT_CASH);
             }
 
             // 整手取整：按 (预算 / (成交价*(1+佣金)*手数)) 向下取整手
@@ -339,14 +411,16 @@ public class PaperTradingService {
                 shares -= lot;
             }
             if (shares <= 0.0) {
+                // 这一条最容易"什么都没发生却没人知道"：涨得越高的票越容易撞上
+                //（茅台一手 ~14 万 > 10 万本金），而且账户数字一动不动。
                 log.warn("Not enough cash for even one lot on strategy id={} (fill={})", strategy.getId(), fill);
-                return account;
+                return skip(account, trace, ExecutionContract.SKIP_INSUFFICIENT_CASH_FOR_ONE_LOT);
             }
             double fee = commissionFee(shares * fill, commission);
             double cashAfter = cash - shares * fill - fee;
             if (cashAfter < 0.0) {
                 log.warn("Buy would exceed cash on strategy id={}", strategy.getId());
-                return account;
+                return skip(account, trace, ExecutionContract.SKIP_INSUFFICIENT_CASH);
             }
             account.setShares(shares);
             account.setAvgCost(fill);
@@ -362,8 +436,10 @@ public class PaperTradingService {
             if (t1Blocked) {
                 log.debug("Paper: T+1 blocks sell on same trading day (bar {}) for strategy id={}",
                         barTime, strategy.getId());
+                return skip(account, trace, ExecutionContract.SKIP_T1_BLOCKED);
             } else if (fill <= 0.0) {
                 log.warn("Invalid fill price for sell on strategy id={}", strategy.getId());
+                return skip(account, trace, ExecutionContract.SKIP_INVALID_PRICE);
             } else {
                 double shares = account.getShares();
                 double fee = commissionFee(shares * fill, commission);
@@ -376,6 +452,15 @@ public class PaperTradingService {
                 account.setLastBuyBar(null);
                 trade = buildTrade(strategy, account, tradeDate, "SELL", fill, shares, reason);
             }
+        } else if ("buy".equals(signal) || "sell".equals(signal)) {
+            // 信号与账户状态对不上：已持仓时收到买入信号，或空仓时收到卖出信号。
+            //
+            // 结构上不该发生（引擎按 position 决定评估 entry 还是 exit），所以它一旦出现
+            // 往往意味着并发或契约变更。**不能**把它写成"规则没成立"（那是假话），
+            // 也不能继续往下走（下行分支按 signal 各自处理，会走到 else 把它标成 hold）。
+            log.warn("Paper: signal={} contradicts account state (shares={}) for strategy id={}",
+                    signal, account.getShares(), strategy.getId());
+            return skip(account, trace, ExecutionContract.SKIP_STATE_MISMATCH);
         }
 
         updateEquityAndHighWatermark(account, price);
@@ -384,13 +469,128 @@ public class PaperTradingService {
         account.setLastEvalAt(LocalDateTime.now());
 
         if (trade != null) {
+            trace.setDecision(trade.getSide().toLowerCase(Locale.ROOT));
+            fillAccountAfter(trace, account);
+            PaperTradeTrace savedTrace = paperTraceService.record(trace);
+            if (savedTrace != null) {
+                trade.setTraceId(savedTrace.getId());
+            }
             paperTradeRepository.save(trade);
+        } else {
+            // 信号是 hold：这一根 bar 的结论是"按策略不动"。
+            // 原因由**引擎**给（它有指标值）：`rule_not_met` 与 `warmup` 是两件事，
+            // 前者是"验证过、规则没动"，后者是"指标还没算出来、这段没有样本"。
+            trace.setDecision(ExecutionContract.DECISION_SKIP);
+            trace.setSkipReason(skipReasonOf(result, ExecutionContract.SKIP_RULE_NOT_MET));
+            fillAccountAfter(trace, account);
+            paperTraceService.record(trace);
         }
         account = paperAccountRepository.save(account);
 
         strategy.setLastPaperEvalAt(account.getLastEvalAt());
         strategyRepository.save(strategy);
         return account;
+    }
+
+    /**
+     * 信号触发了、但结算路径把它挡下了：把原因写进痕迹，账户一个字段都不改。
+     *
+     * <p>这是"7 条静默 return"的统一改写：以前它们对调用方完全不可见，
+     * 现在每一条都会留下一行带原因的痕迹。
+     */
+    private PaperAccount skip(PaperAccount account, PaperTradeTrace trace, String skipReason) {
+        trace.setDecision(ExecutionContract.DECISION_SKIP);
+        trace.setSkipReason(ExecutionContract.normalizeSkipReason(skipReason));
+        fillAccountAfter(trace, account);
+        paperTraceService.record(trace);
+        return account;
+    }
+
+    /** 引擎回传的 `skip_reason`（它有指标值，比 Java 猜得准）；缺失或未知时用兜底值。 */
+    private static String skipReasonOf(JsonNode result, String fallback) {
+        String raw = result == null ? null : textOrStatic(result.get("skip_reason"), "");
+        return ExecutionContract.normalizeSkipReason(raw == null || raw.isBlank() ? fallback : raw);
+    }
+
+    private static String textOrStatic(JsonNode node, String fallback) {
+        if (node == null || node.isNull()) {
+            return fallback;
+        }
+        String text = node.asText();
+        return text == null || text.isBlank() ? fallback : text;
+    }
+
+    /**
+     * 建一条痕迹：identity + 证据 + 账户的**结算前**状态。
+     *
+     * <p>证据全部取自 Python 回传的快照（`snapshot` / `fingerprint` / `fill_basis`）——
+     * Java 不自己组装指标值，也不自己推口径：原则 4（单一真相源）。
+     */
+    private PaperTradeTrace newTrace(Strategy strategy, PaperAccount account, String settlementKind,
+                                     String trigger, LocalDate tradeDate, String barTime,
+                                     JsonNode result) {
+        JsonNode snapshot = result == null ? null : result.get("snapshot");
+        JsonNode fingerprint = result == null ? null : result.get("fingerprint");
+        JsonNode bar = snapshot == null ? null : snapshot.get("bar");
+
+        PaperTradeTrace trace = PaperTradeTrace.builder()
+                .user(strategy.getUser())
+                .strategy(strategy)
+                .account(account)
+                .settlementKind(ExecutionContract.normalize(settlementKind,
+                        ExecutionContract.SETTLEMENT_KINDS))
+                .trigger(ExecutionContract.normalize(trigger, ExecutionContract.TRACE_TRIGGERS))
+                .tradeDate(tradeDate)
+                .barTime(barTime)
+                .symbol(strategy.getSymbol())
+                .repeatCount(1)
+                .build();
+
+        trace.setBarDate(textOrStatic(bar == null ? null : bar.get("date"), null));
+        trace.setFillBasis(ExecutionContract.normalize(
+                result == null ? null : textOrStatic(result.get("fill_basis"), null),
+                ExecutionContract.FILL_BASES));
+        trace.setBarClose(Money.price(result == null ? null : numberOrNull(result.get("price"))));
+        trace.setEngineVersion(textOrStatic(fingerprint == null ? null : fingerprint.get("engine_version"), null));
+        trace.setAdjustMode(ExecutionContract.normalize(
+                textOrStatic(fingerprint == null ? null : fingerprint.get("adjust_mode"), null),
+                ExecutionContract.ADJUST_MODES));
+        trace.setMoneyPolicyVersion(fingerprint == null ? Money.POLICY_VERSION
+                : intOr(fingerprint.get("money_policy_version"), Money.POLICY_VERSION));
+        trace.setSnapshotJson(snapshot == null || snapshot.isNull() ? null : snapshot.toString());
+        trace.setSnapshotSchemaVersion(snapshot == null || snapshot.isNull() ? null
+                : intOr(snapshot.get("schema_version"), null));
+        fillAccountBefore(trace, account);
+        return trace;
+    }
+
+    /** 账户的**结算前**状态：痕迹要能回答"这一笔是从什么状态变成什么状态"。 */
+    private void fillAccountBefore(PaperTradeTrace trace, PaperAccount account) {
+        if (account == null) {
+            return;
+        }
+        trace.setCashBefore(Money.amount(account.getCash()));
+        trace.setSharesBefore(Money.price(account.getShares()));
+        trace.setAvgCostBefore(Money.price(account.getAvgCost()));
+        trace.setEquityBefore(Money.equity(account.getEquity()));
+    }
+
+    private void fillAccountAfter(PaperTradeTrace trace, PaperAccount account) {
+        if (account == null) {
+            return;
+        }
+        trace.setCashAfter(Money.amount(account.getCash()));
+        trace.setSharesAfter(Money.price(account.getShares()));
+        trace.setAvgCostAfter(Money.price(account.getAvgCost()));
+        trace.setEquityAfter(Money.equity(account.getEquity()));
+    }
+
+    private static Double numberOrNull(JsonNode node) {
+        return node == null || !node.isNumber() ? null : node.asDouble();
+    }
+
+    private static Integer intOr(JsonNode node, Integer fallback) {
+        return node == null || !node.isNumber() ? fallback : node.asInt();
     }
 
     private void initializeAccount(PaperAccount account, Strategy strategy) {

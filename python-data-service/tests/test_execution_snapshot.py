@@ -147,6 +147,60 @@ def test_missing_bar_still_carries_the_basis_but_no_snapshot():
     assert result["fingerprint"]["adjust_mode"] == "qfq"
 
 
+# ==================== 1b. "为什么没动"必须由有指标的那一侧回答 ====================
+
+
+def test_a_hold_says_which_kind_of_hold_it_is():
+    """`hold` 只有一种写法，但至少有两种完全不同的意思。
+
+    `rule_not_met` = 条件都算出来了、只是不成立（**有样本**）；
+    `warmup` = 指标窗口还没凑够，这条规则当时**不可能**触发（**没有样本**）。
+    Java 结算侧手里没有指标值，让它去猜就会在痕迹里写一个看起来很确定的错原因 ——
+    所以这个判断留在引擎这一侧。
+    """
+    records = make_bars()
+    # 第 10 根：MA20 还没算出来（引擎的 idx < 20 守卫）
+    early = evaluate_bar(CONFIG, records, records[10]["date"], None, "daily", "qfq")
+    assert early["signal"] == "hold"
+    assert early["decision"] == ec.DECISION_SKIP
+    assert early["skip_reason"] == ec.SKIP_WARMUP
+
+    # 第 15 根之后仍然 hold，但那时条件已经能算了 —— 平盘，没有上穿
+    settled = evaluate_bar(CONFIG, records, records[FLAT - 1]["date"], None, "daily", "qfq")
+    assert settled["signal"] == "hold"
+    assert settled["skip_reason"] == ec.SKIP_RULE_NOT_MET
+
+
+def test_an_indicator_that_is_still_nan_counts_as_warmup_not_as_a_missing_signal():
+    """窗口内但指标仍是 NaN（例如只有 25 根却要 MA60）：这也是"没样本"，不是"没信号"。"""
+    records = make_bars()
+    long_window = {**CONFIG, "entry": {"logic": "all", "conditions": [
+        {"type": "price_cross_ma", "window": 60, "direction": "above"}]}}
+    result = evaluate_bar(long_window, records[:40], records[39]["date"], None, "daily", "qfq")
+
+    assert result["signal"] == "hold"
+    assert result["skip_reason"] == ec.SKIP_WARMUP
+
+
+def test_a_missing_bar_is_not_reported_as_warmup():
+    """bar 不存在（非交易日/数据未出）既不是预热也不是规则没成立 —— 三者必须分得开。"""
+    records = make_bars()
+    result = evaluate_bar(CONFIG, records, "2099-01-01", None, "daily", "qfq")
+
+    assert result["skip_reason"] == ec.SKIP_NO_BAR
+    assert result["decision"] == ec.DECISION_SKIP
+
+
+def test_a_real_decision_carries_no_skip_reason():
+    """成交的那一次不许带 skip_reason —— 带了就会让"跳过统计"把成交也算进去。"""
+    records = make_bars()
+    result = evaluate_bar(CONFIG, records, _crossing_date(records), None, "daily", "qfq")
+
+    assert result["signal"] == "buy"
+    assert result["skip_reason"] is None
+    assert result["decision"] is None
+
+
 def test_snapshot_bar_normalises_string_numbers():
     """真实数据源把 OHLC 给成**字符串**（`"1277.270"`）：快照里必须变成数字。
 

@@ -54,6 +54,17 @@ public class PaperTrade {
     @Column
     private String reason;
 
+    /**
+     * 这一笔对应的痕迹行 id（{@code paper_trade_traces.id}）。
+     *
+     * <p><b>为 null 有两种含义，界面必须区分</b>：痕迹功能上线**之前**的成交（历史行不可能回填），
+     * 或者痕迹写入失败（fail-open：成交照常，记录少了 —— 这种情况由
+     * {@code PaperTraceService.writeFailures()} 计数暴露）。
+     * 用普通列而不是 {@code @ManyToOne}：痕迹可能不存在，而这里只需要一个可跳转的 id。
+     */
+    @Column(name = "trace_id")
+    private Long traceId;
+
     @Column(nullable = false, updatable = false)
     private LocalDateTime createdAt;
 

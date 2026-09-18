@@ -368,10 +368,50 @@ def _snapshot_bar(record: dict) -> dict:
     return bar
 
 
+def _warmup_pending(cfg_dict: dict, ind: dict, idx: int) -> bool:
+    """这条规则**需要的**指标在第 idx 根上算出来了没有。
+
+    <h3>为什么"没触发"必须再分一层（这是痕迹逼出来的）</h3>
+    没有它，所有 `hold` 在痕迹里都只能写成 `rule_not_met`，于是
+    "指标窗口还没凑够（这条规则当时**不可能**触发）"和
+    "条件都算出来了、只是不成立"长成同一个样子。
+    前者是**没有样本**，后者是**有样本且规则没动** —— 判读结论正好相反。
+
+    只看这条策略真正用到的指标（`indicator_keys_for`），不是"全部指标都算好了"：
+    一个只用 RSI 的策略不该因为 MA60 还没算出来就被判成预热中。
+    """
+    for key in ec.indicator_keys_for(cfg_dict):
+        values = ind.get(key)
+        if values is None:
+            continue                      # 引擎没有这个键（如自定义窗口的均线）→ 不猜
+        value = values[idx]
+        if value is None or np.isnan(value):
+            return True
+    return False
+
+
+def _hold_facts(signal: str, cfg_dict: dict, ind: dict, idx: int | None,
+                settlement_kind, adjust_mode, *, warmup: bool = False) -> dict:
+    """`hold` 时把**为什么没动**说清楚，随结果一起回传。
+
+    调用方（Java 结算）没有指标值，无法自己判断"是规则没成立还是指标没算出来"，
+    所以这个判断必须留在有指标的这一侧 —— 让 Java 去猜，等于让它在痕迹里写一个
+    看起来很确定的错原因。
+    """
+    if idx is None:
+        reason = ec.SKIP_NO_BAR
+    elif warmup:
+        reason = ec.SKIP_WARMUP
+    else:
+        reason = ec.SKIP_RULE_NOT_MET
+    return {"decision": ec.DECISION_SKIP if signal == "hold" else None,
+            "skip_reason": reason if signal == "hold" else None}
+
+
 def evaluate_bar(config: dict, records: list[dict], date: str, position: dict | None,
                  settlement_kind: str | None = None,
                  adjust_mode: str | None = None) -> dict:
-    """评估某一天的信号，并回传"这次结算的执行口径 + 证据快照"。
+    """评估某一天的信号，并回传"这次结算的执行口径 + 证据快照 + 没成交的原因"。
 
     `settlement_kind` / `adjust_mode` 由**调用方声明**（它才知道这是日线结算还是实时结算、
     以及行情是按哪种复权口径取的）。缺省时不会去猜：契约会把它们归一成 `unknown_*`，
@@ -389,22 +429,32 @@ def evaluate_bar(config: dict, records: list[dict], date: str, position: dict | 
         else:
             return {"signal": "hold", "matched_conditions": [], "date": date,
                     "bar_date_missing": True, "price": None,
+                    **_hold_facts("hold", cfg_dict, ind, None, settlement_kind, adjust_mode),
                     **_execution_facts(cfg_dict, ind, records, None, settlement_kind, adjust_mode)}
     if idx < 20:
         return {"signal": "hold", "matched_conditions": [], "date": date,
                 "price": float(ind["closes"][idx]),
+                **_hold_facts("hold", cfg_dict, ind, idx, settlement_kind, adjust_mode, warmup=True),
                 **_execution_facts(cfg_dict, ind, records, idx, settlement_kind, adjust_mode)}
     if position and position.get("shares", 0) > 0:
         ok, reasons = evaluate_rule(cfg.exit, ind, idx, position)
         facts = _execution_facts(cfg_dict, ind, records, idx, settlement_kind, adjust_mode)
         facts["snapshot"]["extra"]["matched_detail"] = _matched_detail(cfg.exit, ind, idx, position)
-        return {"signal": "sell" if ok else "hold", "matched_conditions": reasons,
-                "date": date, "price": float(ind["closes"][idx]), **facts}
+        signal = "sell" if ok else "hold"
+        return {"signal": signal, "matched_conditions": reasons,
+                "date": date, "price": float(ind["closes"][idx]),
+                **_hold_facts(signal, cfg_dict, ind, idx, settlement_kind, adjust_mode,
+                              warmup=_warmup_pending(cfg_dict, ind, idx)),
+                **facts}
     ok, reasons = evaluate_rule(cfg.entry, ind, idx, None)
     facts = _execution_facts(cfg_dict, ind, records, idx, settlement_kind, adjust_mode)
     facts["snapshot"]["extra"]["matched_detail"] = _matched_detail(cfg.entry, ind, idx, None)
-    return {"signal": "buy" if ok else "hold", "matched_conditions": reasons,
-            "date": date, "price": float(ind["closes"][idx]), **facts}
+    signal = "buy" if ok else "hold"
+    return {"signal": signal, "matched_conditions": reasons,
+            "date": date, "price": float(ind["closes"][idx]),
+            **_hold_facts(signal, cfg_dict, ind, idx, settlement_kind, adjust_mode,
+                          warmup=_warmup_pending(cfg_dict, ind, idx)),
+            **facts}
 
 
 # ==================== 真实化执行引擎（A 股近似规则） ====================

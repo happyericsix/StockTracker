@@ -57,6 +57,8 @@ public final class ExecutionContract {
     public static final String SKIP_SUSPENDED = "suspended";
     public static final String SKIP_NO_BAR = "no_bar";
     public static final String SKIP_DATA_UNAVAILABLE = "data_unavailable";
+    /** 指标还没算出来（窗口不够）：这条规则当时**不可能**触发，与"规则没成立"是两回事。 */
+    public static final String SKIP_WARMUP = "warmup";
     public static final String SKIP_LIMIT_BLOCKED = "limit_blocked";
     public static final String SKIP_T1_BLOCKED = "t1_blocked";
     public static final String SKIP_EX_DIVIDEND_DAY = "ex_dividend_day";
@@ -64,6 +66,8 @@ public final class ExecutionContract {
     public static final String SKIP_INSUFFICIENT_CASH = "insufficient_cash";
     public static final String SKIP_INVALID_PRICE = "invalid_price";
     public static final String SKIP_RULE_NOT_MET = "rule_not_met";
+    /** 信号与账户状态对不上（已持仓却收到买入信号 / 空仓却收到卖出信号）。 */
+    public static final String SKIP_STATE_MISMATCH = "state_mismatch";
 
     // ---------- 归一与版本 ----------
     public static final String UNKNOWN_PREFIX = "unknown_";
@@ -73,6 +77,19 @@ public final class ExecutionContract {
 
     /** 枚举值的长度上限（与 Python 侧一致）。 */
     public static final int MAX_ENUM_CHARS = 32;
+
+    // ---------- 痕迹的触发来源 ----------
+    // 刻意放在契约区域**之外**：它记录的是"谁触发了这次结算"（运维口径），
+    // 不参与"两份结果能不能对比"的判定，所以不该被跨语言一致性测试当成口径常量。
+    /** 每日定时任务（`PaperTradingJob`）。 */
+    public static final String TRIGGER_CRON = "cron";
+    /** 价格刷新事件（`PaperTradingListener` → 实时结算）。 */
+    public static final String TRIGGER_EVENT = "event";
+    /** 用户手动触发（启动模拟盘时的首次评估）。 */
+    public static final String TRIGGER_MANUAL = "manual";
+
+    public static final List<String> TRACE_TRIGGERS =
+            List.of(TRIGGER_CRON, TRIGGER_EVENT, TRIGGER_MANUAL);
 
     /** 请求体里声明结算类型的字段名（Python 侧 `app.py` 读同名键）。 */
     public static final String SETTLEMENT_KIND_FIELD = "settlement_kind";
@@ -91,9 +108,9 @@ public final class ExecutionContract {
 
     public static final List<String> SKIP_REASONS = List.of(
             SKIP_MARKET_CLOSED, SKIP_SUSPENDED, SKIP_NO_BAR, SKIP_DATA_UNAVAILABLE,
-            SKIP_LIMIT_BLOCKED, SKIP_T1_BLOCKED, SKIP_EX_DIVIDEND_DAY,
+            SKIP_WARMUP, SKIP_LIMIT_BLOCKED, SKIP_T1_BLOCKED, SKIP_EX_DIVIDEND_DAY,
             SKIP_INSUFFICIENT_CASH_FOR_ONE_LOT, SKIP_INSUFFICIENT_CASH,
-            SKIP_INVALID_PRICE, SKIP_RULE_NOT_MET);
+            SKIP_INVALID_PRICE, SKIP_RULE_NOT_MET, SKIP_STATE_MISMATCH);
 
     /** 结算类型 → 成交价口径。**唯一的映射处**（Python 侧同名映射）。 */
     public static final Map<String, String> FILL_BASIS_BY_SETTLEMENT = Map.of(

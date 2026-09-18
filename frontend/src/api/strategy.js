@@ -10,3 +10,6 @@ export const startPaper = (id) => request.post(`/strategies/${id}/paper/start`)
 export const stopPaper = (id) => request.post(`/strategies/${id}/paper/stop`)
 export const getPaperAccount = (id) => request.get(`/strategies/${id}/paper/account`)
 export const getPaperTrades = (id) => request.get(`/strategies/${id}/paper/trades`)
+// 结算痕迹：每一行 = 一根 bar 上的一个结论，含"为什么没成交"（skip_reason → 一句人话）
+export const getPaperTraces = (id, limit = 50) =>
+  request.get(`/strategies/${id}/paper/traces`, { params: { limit } })

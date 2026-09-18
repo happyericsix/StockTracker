@@ -14,12 +14,20 @@ public class PaperTradeResponse {
     private Double amount;
     private String reason;
     private LocalDateTime createdAt;
+    /**
+     * 这笔对应的痕迹 id。
+     *
+     * <p><b>为 null 时界面必须说清是哪一种</b>：痕迹功能上线**之前**的成交（历史无法回填），
+     * 或者痕迹写入失败（结算照常，记录少了一份）。把 null 当成"没有痕迹"直接留白，
+     * 会让"记录缺失"看起来像"一切正常"。
+     */
+    private Long traceId;
 
     public PaperTradeResponse() {}
 
     public PaperTradeResponse(LocalDate tradeDate, String symbol, String side,
                               Double price, Double shares, Double amount,
-                              String reason, LocalDateTime createdAt) {
+                              String reason, LocalDateTime createdAt, Long traceId) {
         this.tradeDate = tradeDate;
         this.symbol = symbol;
         this.side = side;
@@ -28,6 +36,7 @@ public class PaperTradeResponse {
         this.amount = amount;
         this.reason = reason;
         this.createdAt = createdAt;
+        this.traceId = traceId;
     }
 
     public static PaperTradeResponse from(PaperTrade entity) {
@@ -39,9 +48,13 @@ public class PaperTradeResponse {
                 entity.getShares(),
                 entity.getAmount(),
                 entity.getReason(),
-                entity.getCreatedAt()
+                entity.getCreatedAt(),
+                entity.getTraceId()
         );
     }
+
+    public Long getTraceId() { return traceId; }
+    public void setTraceId(Long traceId) { this.traceId = traceId; }
 
     public LocalDate getTradeDate() { return tradeDate; }
     public void setTradeDate(LocalDate tradeDate) { this.tradeDate = tradeDate; }

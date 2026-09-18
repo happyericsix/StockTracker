@@ -10,7 +10,8 @@ import {
   startPaper,
   stopPaper,
   getPaperAccount,
-  getPaperTrades
+  getPaperTrades,
+  getPaperTraces
 } from '../api/strategy.js'
 
 const router = useRouter()
@@ -19,6 +20,8 @@ const route = useRoute()
 const strategy = ref(null)
 const account = ref(null)
 const trades = ref([])
+const traces = ref([])
+const tracesError = ref('')
 const loading = ref(false)
 const notFound = ref(false)
 const error = ref('')
@@ -55,6 +58,20 @@ const formatTime = (iso) => {
   const d = new Date(iso)
   if (isNaN(d.getTime())) return 'N/A'
   return d.toLocaleString('zh-CN', { hour12: false })
+}
+
+/**
+ * 快照是"当时的证据"，原样展示、**不做美化**：
+ * 它是给对账和排查用的，改成好看的形状反而会让数字与落库的内容不一致。
+ * 解析失败就原样显示字符串 —— 证据宁可难看，不能不可信。
+ */
+const prettySnapshot = (json) => {
+  if (!json) return ''
+  try {
+    return JSON.stringify(JSON.parse(json), null, 2)
+  } catch (e) {
+    return json
+  }
 }
 
 const formatMoney = (value) => {
@@ -189,6 +206,26 @@ const loadPaper = async () => {
     trades.value = Array.isArray(data) ? data : []
   } catch (e) {
     trades.value = []
+  }
+  await loadTraces()
+}
+
+/**
+ * 痕迹：这一块存在的唯一理由是回答"**为什么今天没成交**"。
+ *
+ * 账户数字没变、成交列表为空时，用户以前无从判断是"没信号"还是"信号来了但被挡住"。
+ * 失败时也**要说出来**（而不是留白）：留白会被读成"什么都没发生"，
+ * 而这里恰恰是"发生了什么但没成交"的地方。
+ */
+const loadTraces = async () => {
+  tracesError.value = ''
+  try {
+    const res = await getPaperTraces(strategy.value.id)
+    const data = res.data
+    traces.value = Array.isArray(data) ? data : []
+  } catch (e) {
+    traces.value = []
+    tracesError.value = errorMessage(e, '痕迹加载失败，暂时看不到"为什么没成交"')
   }
 }
 
@@ -475,6 +512,49 @@ onUnmounted(() => {
               <span>数量: {{ trade.shares }}</span>
               <span>金额: {{ formatMoney(trade.amount) }}</span>
               <span class="trade-reason" v-if="trade.reason">{{ trade.reason }}</span>
+              <!-- 有痕迹就给出跳转依据；为空时说明是"上线前的成交"或"记录写入失败"，
+                   不能留白 —— 留白会被读成"一切正常" -->
+              <span class="trade-reason" v-if="trade.traceId">痕迹 #{{ trade.traceId }}</span>
+              <span class="trade-reason" v-else>无痕迹（痕迹功能上线前的成交，或痕迹写入失败）</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <h3>结算痕迹</h3>
+          <p class="trace-hint">
+            每一行 = 一根 K 线上的一个结论，包括"什么都没做"和"为什么"。账户数字不动时，这里能看出
+            是<strong>没信号</strong>、<strong>指标还没算出来</strong>，还是<strong>信号来了但被挡住</strong>。
+          </p>
+          <p v-if="tracesError" class="error" role="alert">{{ tracesError }}</p>
+          <div v-if="traces.length === 0 && !tracesError" class="empty">
+            暂无结算痕迹（模拟盘开始结算后，每个交易日会留下一行）
+          </div>
+          <div v-else class="trades-list num">
+            <div v-for="trace in traces" :key="trace.id" class="trace-row">
+              <div class="trace-head">
+                <span class="trace-date">{{ formatTime(trace.barTime || trace.tradeDate) }}</span>
+                <span class="trace-decision" :class="trace.decision">
+                  {{ trace.decision === 'buy' ? '买入' : trace.decision === 'sell' ? '卖出' : '未成交' }}
+                </span>
+                <span class="trace-kind">{{ trace.settlementKind === 'daily' ? '日线结算' : '盘中评估' }}</span>
+                <span v-if="trace.repeatCount > 1" class="trace-kind">同一结论 {{ trace.repeatCount }} 次</span>
+              </div>
+              <!-- 一句人话（后端确定性拼出来，不由模型生成）：这是"不看代码也能明白"的那一层 -->
+              <p class="trace-summary">{{ trace.summary }}</p>
+              <div class="trace-meta">
+                <span v-if="trace.barClose">价格 {{ formatNumber(trace.barClose, 3) }}</span>
+                <span v-if="trace.fillBasis">口径 {{ trace.fillBasis }}</span>
+                <span v-if="trace.equityAfter !== null && trace.equityAfter !== undefined">
+                  净值 {{ formatMoney(trace.equityAfter) }}
+                </span>
+                <span v-if="trace.engineVersion">引擎 {{ trace.engineVersion }}</span>
+                <span v-if="trace.adjustMode">复权 {{ trace.adjustMode }}</span>
+              </div>
+              <details v-if="trace.snapshotJson" class="trace-evidence">
+                <summary>当时的证据快照</summary>
+                <pre>{{ prettySnapshot(trace.snapshotJson) }}</pre>
+              </details>
             </div>
           </div>
         </section>
@@ -707,6 +787,38 @@ main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }
 .trade-side.BUY, .trade-side.buy { color: var(--color-gain); background: var(--color-bg-subtle); }
 .trade-side.SELL, .trade-side.sell { color: var(--color-loss); background: var(--color-bg-subtle); }
 .trade-reason { color: var(--color-text-muted); width: 100%; }
+
+/* ---------- 结算痕迹 ---------- */
+.trace-hint { font-size: 12px; color: var(--color-text-muted); margin: 4px 0 12px; line-height: 1.6; }
+.trace-row {
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.trace-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.trace-date { color: var(--color-text-secondary); }
+.trace-decision { font-weight: 600; padding: 1px 6px; border-radius: var(--radius-sm); }
+/* 沿用同一套方向语义：买=涨色、卖=跌色、"未成交"用中性色（它不是好事也不是坏事） */
+.trace-decision.buy { color: var(--color-gain); background: var(--color-bg-subtle); }
+.trace-decision.sell { color: var(--color-loss); background: var(--color-bg-subtle); }
+.trace-decision.skip { color: var(--color-text-secondary); background: var(--color-bg-subtle); }
+.trace-kind { color: var(--color-text-muted); }
+.trace-summary { margin: 6px 0 4px; color: var(--color-text-primary); line-height: 1.6; }
+.trace-meta { display: flex; flex-wrap: wrap; gap: 10px; color: var(--color-text-muted); }
+.trace-evidence { margin-top: 6px; }
+.trace-evidence summary { cursor: pointer; color: var(--color-text-muted); }
+.trace-evidence pre {
+  margin: 6px 0 0;
+  padding: 8px;
+  max-height: 260px;
+  overflow: auto;
+  background: var(--color-bg-subtle);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  line-height: 1.5;
+}
 
 /* 旧灰字对灰底仅 2.54:1 */
 .empty { color: var(--color-text-muted); text-align: center; padding: 40px 16px; font-size: 14px; }

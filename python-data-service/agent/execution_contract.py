@@ -81,6 +81,7 @@ SKIP_MARKET_CLOSED = "market_closed"                        # 非交易日（需
 SKIP_SUSPENDED = "suspended"                                # 停牌
 SKIP_NO_BAR = "no_bar"                                      # 当日无 K 线（数据未出）
 SKIP_DATA_UNAVAILABLE = "data_unavailable"                   # 取数失败
+SKIP_WARMUP = "warmup"                                      # 指标还没算出来（窗口不够）
 SKIP_LIMIT_BLOCKED = "limit_blocked"                        # 涨跌停挡单
 SKIP_T1_BLOCKED = "t1_blocked"                              # T+1 当日买入不可卖
 SKIP_EX_DIVIDEND_DAY = "ex_dividend_day"                    # 除权除息日（P0 跳过并标注）
@@ -88,12 +89,14 @@ SKIP_INSUFFICIENT_CASH_FOR_ONE_LOT = "insufficient_cash_for_one_lot"
 SKIP_INSUFFICIENT_CASH = "insufficient_cash"
 SKIP_INVALID_PRICE = "invalid_price"
 SKIP_RULE_NOT_MET = "rule_not_met"                          # 规则未命中（只出现在聚合行）
+SKIP_STATE_MISMATCH = "state_mismatch"                      # 信号与账户状态对不上（已持仓却要买 / 空仓却要卖）
 
 SKIP_REASONS = (
     SKIP_MARKET_CLOSED,
     SKIP_SUSPENDED,
     SKIP_NO_BAR,
     SKIP_DATA_UNAVAILABLE,
+    SKIP_WARMUP,
     SKIP_LIMIT_BLOCKED,
     SKIP_T1_BLOCKED,
     SKIP_EX_DIVIDEND_DAY,
@@ -101,6 +104,7 @@ SKIP_REASONS = (
     SKIP_INSUFFICIENT_CASH,
     SKIP_INVALID_PRICE,
     SKIP_RULE_NOT_MET,
+    SKIP_STATE_MISMATCH,
 )
 
 UNKNOWN_PREFIX = "unknown_"

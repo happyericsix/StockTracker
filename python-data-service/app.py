@@ -806,6 +806,7 @@ async def evaluate_bar_endpoint(req: Request):
         if not records:
             # 无数据也要带口径：否则调用方只能猜这条记录属于哪个口径，或者干脆不记
             return {"error": "insufficient history data", "signal": "hold", "matched_conditions": [],
+                    "decision": ec.DECISION_SKIP, "skip_reason": ec.SKIP_DATA_UNAVAILABLE,
                     **ec.no_bar_facts(settlement_kind, ADJUST_MODE)}
         bar_time = str(records[-1].get("date", ""))
         position = data.get("position")
@@ -821,6 +822,7 @@ async def evaluate_bar_endpoint(req: Request):
     except Exception as e:
         logger.error(f"strategy evaluate-bar error: {e}", exc_info=True)
         return {"error": "行情评估失败，请稍后重试", "signal": "hold", "matched_conditions": [],
+                "decision": ec.DECISION_SKIP, "skip_reason": ec.SKIP_DATA_UNAVAILABLE,
                 **ec.no_bar_facts(settlement_kind, ADJUST_MODE)}
 
 

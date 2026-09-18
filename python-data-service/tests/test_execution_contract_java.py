@@ -105,6 +105,43 @@ def test_compare_rule_is_declared_on_both_sides():
     assert callable(ec.compare_allowed)
 
 
+# ==================== 3. 钱的精度口径也必须两边一致 ====================
+
+MONEY_JAVA_FILE = (Path(__file__).resolve().parents[2] / "src" / "main" / "java"
+                   / "com" / "happyericsix" / "stocktracker" / "service" / "Money.java")
+
+
+def test_java_money_scales_match_python():
+    """净值恒等式要在两边都零容差成立，小数位与舍入方式就必须是同一个。
+
+    对不上的后果不是报错，而是**两边的账差一分钱**：Java 记的痕迹与 Python 算的成交价
+    永远无法逐笔对上，而"对不上"会被当成"数据有问题"，没人会想到是精度口径不同。
+    """
+    text = MONEY_JAVA_FILE.read_text(encoding="utf-8")
+    scales = {name: int(value) for name, value in
+              re.findall(r"static final int ([A-Z_]+)\s*=\s*(\d+)", text)}
+
+    assert scales.get("PRICE_SCALE") == ec.MONEY.price_scale, scales
+    assert scales.get("AMOUNT_SCALE") == ec.MONEY.amount_scale, scales
+    assert scales.get("EQUITY_SCALE") == ec.MONEY.equity_scale, scales
+    assert scales.get("RETURN_SCALE") == ec.MONEY.return_scale, scales
+    assert scales.get("POLICY_VERSION") == ec.MONEY.version, scales
+    # Python 用 ROUND_HALF_UP，Java 必须也是同一个（Java 的 HALF_UP 就是它）
+    assert "RoundingMode.HALF_UP" in text
+    assert ec.MONEY.rounding == "HALF_UP"
+
+
+def test_java_money_decides_from_the_string_not_the_binary_double():
+    """`new BigDecimal(0.1)` 会把 double 的二进制误差带进来；必须先转字符串。
+
+    这条不是洁癖：痕迹是钱的**证据**，而证据里出现 0.30000000000000004 这种数字，
+    对账的人只会得出"这个系统的钱不可信"。
+    """
+    text = MONEY_JAVA_FILE.read_text(encoding="utf-8")
+    assert "value.toString()" in text, "金额转换必须先走字符串"
+    assert "new BigDecimal(value)" not in text.replace("new BigDecimal(value.toString())", "")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

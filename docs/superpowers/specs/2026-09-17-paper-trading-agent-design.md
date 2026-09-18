@@ -127,15 +127,16 @@ agent 可自动化交易但**需要人工审批**；**每次交易都有惩罚**
 `paper_trade_trace`（一行 = 一次**值得留痕**的结算决策；粒度见 §4.C1）：
 
 ```
-identity   strategy_id / strategy_revision_id / settlement_kind(daily|realtime) / trigger
+identity   strategy_id / strategy_revision_id / settlement_kind(daily|realtime) / trigger(cron|event|manual)
 input      bar_date, bar_time, bar_ohlc(open/high/low/close/volume)
            indicators(当时算出的指标值快照), params(策略参数快照)
 account    结算前/后：cash / shares / avg_cost / high_watermark / equity
 decision   buy|sell|skip + matched_conditions(类型+参数+命中) + skip_reason
-           skip_reason ∈ {market_closed, no_bar, limit_blocked, t1_blocked,
-                          insufficient_cash_for_one_lot, rule_not_met, data_unavailable}
-provenance rule_version + engine_version
+           skip_reason ∈ 由 `execution_contract.SKIP_REASONS` 定义（**封闭集只在那里**，
+           本文件不抄一份：抄一份的下场是两边慢慢不一致，而两份都"看起来对"）
+provenance rule_version + engine_version + adjust_mode + money_policy_version
 integrity  trace_hash（用途＝**防篡改/可对账**，不是"可复算"）
+dedupe     dedupe_key（唯一）——"同一件事"的定义只在一处，见 §7.3.1
 ```
 
 **为什么不能承诺"可复算"（v2 修正 v1 的高估）**：行情按**前复权**取（`akshare_client.py:313`
@@ -323,9 +324,51 @@ R11 | 成本累积 | 见 §7.2 成本上限（v2 新增） |
 - `paper_equity_snapshot` 是否补历史：**不补**（无法重算受复权影响的历史净值），从上线日起记录，
   界面明确"曲线自 YYYY-MM-DD 起"；
 - 存量 `paper_trades`：`origin` 回填为 `rule`，`trace_id` 留空（**历史痕迹不可能回填**——G1 的实质，
-  必须在界面注明"该笔交易发生在痕迹功能上线前"）；
+  必须在界面注明"该笔交易发生在痕迹功能上线前"）；✅ **已实现**：界面上一笔无 `traceId` 的成交会写明
+  "痕迹功能上线前的成交，或痕迹写入失败" —— 留白会被读成"一切正常"。
 - 事实链与快照表的主从：**快照表为准**（时序查询用），事实链保留"记忆语义"用途，
   两者在同一事务里写入以避免不一致。
+
+### 7.3.1 痕迹（P0）的落地与实测修正（2026-09-17 补）
+
+**已实现**：`paper_trade_traces`（`entity/PaperTradeTrace`）+ `PaperTraceService`（写入策略）
++ `PaperTradingService` 全路径接线 + `GET /strategies/{id}/paper/traces[/{date}]`
++ 前端"结算痕迹"卡片（含证据快照折叠）+ 成交行反向链接 `paper_trades.trace_id`。
+
+落地时对设计做了四处**收紧**，每处都有真实理由：
+
+1. **去重键从"唯一索引三列"改成单列 `dedupe_key`**：MySQL 唯一索引里 NULL 互不相等，
+   而实时成交的 `bar_time` 在日线行里是 NULL —— 用三列做键等于"日线行可以无限重复"。
+   单列键的形状（`daily:<sid>:<date>` / `realtime:<sid>:<barTime>:<decision>` /
+   `realtime:<sid>:<date>:<reason>`）把"同一件事"的定义收在一处。
+   重复出现时**更新那一行**并累加 `repeatCount`：读者要的是"这个键上的结论"，
+   而不是"它被算过几次"。首次可能是取数失败、当天稍后成功，所以让最后一次结论生效。
+2. **`0.00%` 的第三种意思**：茅台上穿 60 日线在回测里触发 6 次、成交 0 笔 ——
+   因为一手（100 × ~1400 元）超过 10 万本金。所以新增 `insufficient_cash_for_one_lot`
+   与 `state_mismatch`（信号与账户状态对不上，结构上不该发生，一旦出现多半是并发或契约变更），
+   并且**不给它们编"规则没成立"这种看起来合理的原因**。
+3. **`warmup` 进了封闭集**：`rule_not_met`（条件算出来了、不成立 = **有样本**）与
+   `warmup`（指标还没算出来 = **没有样本**）必须分开，后者由**引擎**判定
+   （`strategy_engine._warmup_pending`）并随响应回传 `skip_reason` —— Java 手里没有指标值，
+   让它猜必然写出一个看起来很确定的错原因。
+4. **钱的精度先落到 Java**：`service/Money.java` 是 Python `MoneyPolicy` 的镜像
+   （price 4 / amount 2 / equity 2 / return 4，HALF_UP，且**先转字符串**再 `BigDecimal`）。
+   痕迹的金额列一律 `DECIMAL`：证据本身带二进制误差时，"对账"这件事就无从谈起。
+   ⚠️ **尚未迁移**：`paper_accounts` / `paper_trades` 的列仍是 `DOUBLE`。
+   `ddl-auto=update` 不会改已有列的类型，所以迁移需要显式的 DDL（见下），
+   在那之前痕迹记的是"当时账户里的值"（无损转换，但源头的精度仍是 double）。
+
+```sql
+-- 账户与成交的钱迁到 DECIMAL（与 Money.java / MoneyPolicy 同一口径）。
+-- 为什么要跑：double 让"净值 = 现金 + 股数 × 价格"结构上不可能零容差成立。
+ALTER TABLE paper_accounts
+  MODIFY initial_capital DECIMAL(18,2), MODIFY cash DECIMAL(18,2),
+  MODIFY shares DECIMAL(18,4),        MODIFY avg_cost DECIMAL(18,4),
+  MODIFY equity DECIMAL(18,2),        MODIFY high_watermark DECIMAL(18,4),
+  MODIFY last_price DECIMAL(18,4);
+ALTER TABLE paper_trades
+  MODIFY price DECIMAL(18,4), MODIFY shares DECIMAL(18,4), MODIFY amount DECIMAL(18,2);
+```
 
 ### 7.4 重放与幂等（v2 新增）
 
@@ -344,7 +387,7 @@ R11 | 成本累积 | 见 §7.2 成本上限（v2 新增） |
 
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|
-**P0** | §7.1 前置改造（P-1…P-5）+ `paper_trade_trace`（含阻塞型 skip）+ `paper_equity_snapshot` + **一句人话解释** | ① 能画净值曲线（并注明起点）② 随机抽 5 笔/5 次阻塞跳过，不看代码能明白"为什么这一刻"③ 所有 skip 的 `skip_reason` 都能区分 |
+**P0** | §7.1 前置改造（P-1…P-5）+ `paper_trade_trace`（含阻塞型 skip）✅ + `paper_equity_snapshot` + **一句人话解释** ✅（确定性拼装，见 §7.3.1） | ① 能画净值曲线（并注明起点）② 随机抽 5 笔/5 次阻塞跳过，不看代码能明白"为什么这一刻"③ 所有 skip 的 `skip_reason` 都能区分 |
 **P1** | 盘后复盘 + 空转期周报（含最小样本门槛）写入消息中心 | **用 `Message.read` 做验收**：报告已读率 ≥ 目标值（例：P1 上线 4 周内周报已读率 ≥ 60%）——这是"用户会不会看"的**可测**判据（`entity/Message.java:51-53`） |
 **P2** | `strategy_revision` + 讨论协议（命题化 + 引擎裁决 + 反证据校验）+ 观察白名单 ①③⑤ | 建议采纳率、expectation 命中率可统计；无一条建议未经多时段多标的验证 |
 **P3** | 审批通道（Java 侧 `pending_action` + 一次性令牌 + 审批卡 + 影子模式）+ 三个低频动作 | 每个动作有审批记录与幂等键；重放安全（§7.4）；延迟成本被如实记录 |
