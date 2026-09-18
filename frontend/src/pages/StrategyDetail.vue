@@ -90,11 +90,13 @@ const prettySnapshot = (json) => {
   }
 }
 
+// 模拟盘的账是**人民币**：整条链路（佣金最低 5 元、印花税、整手）都按 A 股规则结算，
+// 这里却一直按 USD 格式化，页面上会出现 $96887 这种与账户口径不符的符号。
 const formatMoney = (value) => {
   if (value === null || value === undefined) return 'N/A'
   const n = Number(value)
   if (Number.isNaN(n)) return 'N/A'
-  return n.toLocaleString('zh-CN', { style: 'currency', currency: 'USD' })
+  return n.toLocaleString('zh-CN', { style: 'currency', currency: 'CNY' })
 }
 
 const formatNumber = (value, digits = 2) => {
