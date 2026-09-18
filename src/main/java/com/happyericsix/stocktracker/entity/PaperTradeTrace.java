@@ -89,8 +89,14 @@ public class PaperTradeTrace {
     @Column(name = "agent_tokens")
     private Integer agentTokens;
 
-    /** cron | event | manual：这一行是谁触发的（运营口径，不参与"能不能对比"的判定）。 */
-    @Column(nullable = false, length = 32)
+    /**
+     * cron | event | manual：这一行是谁触发的（运营口径，不参与"能不能对比"的判定）。
+     *
+     * <p>列名**不叫 `trigger`**：`TRIGGER` 是 MySQL 的保留字，用它做列名会让建表语句
+     * 直接语法报错 —— 而 H2（测试库）接受它，所以这个错只会在真库上出现，
+     * 表现为"痕迹表永远建不出来、所有痕迹静默丢失"。见 {@code MySqlReservedColumnTest}。
+     */
+    @Column(name = "trigger_kind", nullable = false, length = 32)
     private String trigger;
 
     @Column(name = "trade_date", nullable = false)
@@ -117,8 +123,13 @@ public class PaperTradeTrace {
     @Column(name = "skip_reason", length = 32)
     private String skipReason;
 
-    /** 引擎判定的信号（buy/sell/hold）—— 与 decision 的区别：hold 但被 T+1 挡住时 decision 仍是 skip。 */
-    @Column(name = "signal", length = 16)
+    /**
+     * 引擎判定的信号（buy/sell/hold）—— 与 decision 的区别：hold 但被 T+1 挡住时 decision 仍是 skip。
+     *
+     * <p>列名**不叫 `signal`**：`SIGNAL` 是 MySQL 的保留字（存储程序用），
+     * 拿它当列名建表会语法报错，而 H2 不报 —— 于是这个错在测试里完全看不见。
+     */
+    @Column(name = "signal_value", length = 16)
     private String signal;
 
     @Column(name = "matched_conditions", length = 512)

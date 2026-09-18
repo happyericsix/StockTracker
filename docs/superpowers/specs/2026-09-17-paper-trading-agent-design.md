@@ -423,6 +423,35 @@ ALTER TABLE paper_trades
 每日结算的重跑不得重复写痕迹（以 `(strategy_id, trade_date, settlement_kind)` 为唯一键）、
 报告重跑不得重复推送。
 
+### 7.4 真库上才暴露的三件事（2026-09-18 实测）
+
+这一版代码第一次真正跑在**真 MySQL + 真 app**上时（此前所有 Java 侧验证都跑在 H2 上），
+暴露了三件测试库给不了的事。三条都不是"实现细节"，而是"只有真库会告诉你"的类别。
+
+1. **实体列名撞上 MySQL 保留字 → 建表直接语法报错，而 H2 不报**。
+   `create table paper_trade_traces` 里有列叫 `signal`，MySQL 8 的 `SIGNAL`（存储程序用）
+   是保留字，于是整条建表语句失败；`trigger` 同理。测试库 H2 接受这两个名字，
+   所以 200+ 条用例全绿、DDL 看起来正常。
+   后果不是"报个错"而是**痕迹永远写不进去**：结算照常成交、账户照常更新，
+   `PaperTraceService.record` 按设计吞掉异常（fail-open 是对的，记忆类旁路不该影响结算），
+   于是"为什么今天没成交"从此无人能答，界面痕迹页永远空白。
+   落点：列名改为 `signal_value` / `trigger_kind`；新增 `MySqlReservedColumnTest`，
+   保留字清单**从真库导出**（`SELECT WORD FROM INFORMATION_SCHEMA.KEYWORDS WHERE RESERVED=1`，
+   MySQL 8.0 共 262 个，存 `src/test/resources/mysql8-reserved-words.txt`），
+   并用一个故意违法的探针类证明"检测本身有效"——检测不出来时，全表扫描的绿灯毫无意义。
+   **规矩**：新增实体列一律先过这条用例；H2 绿不代表 DDL 能在真库跑。
+2. **`ddl-auto=update` 会改列类型（Hibernate 7.2），原来的说法是错的**。
+   启动日志里出现 `alter table paper_trades modify column amount decimal(18,2) not null`，
+   之后 `MoneySchemaCheck` 报"金额字段都是定点数"，`INFORMATION_SCHEMA` 确认全部 decimal。
+   也就是说 `2026-09-18-paper-money-decimal.sql` 正常情况下**不需要手工执行**
+   （该文件已按实测更正，降级为兜底与自检）。注意它会顺带加 `NOT NULL`，
+   历史数据里有 NULL 时仍需手工处理。
+3. **这套功能此前从未在真库上跑过**：真 `stockdb` 里根本没有 `paper_trade_traces` /
+   `paper_equity_snapshots` 两张表，`strategies` 也没有 `decision_mode` 列 ——
+   它们只存在于 H2 的测试会话里。追加式 DDL 在启动时补上了；
+   但这件事本身说明：**"集成测试通过"与"生产 schema 正确"是两件事**，
+   涉及新表/新列的改动必须至少启动一次真库。
+
 ### 7.5 可观测性（v2 新增）
 
 `/health` 需新增：`pending_action_queue_length`、`approval_overdue_count`、
