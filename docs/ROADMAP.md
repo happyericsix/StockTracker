@@ -3,6 +3,24 @@
 > 日期：2026-09-14 · 依据：`docs/superpowers/specs/` 三份设计文档 + **对当前代码的实测体检**
 > 本文档只写"下一步做什么、为什么这个顺序、怎么算做完"，不重复 spec 里的详细设计。
 
+> ## 🔴 实际主线（2026-09-18 更新 · 与下面的 2026-09-14 规划不同）
+> 这两周实际推进的是 **模拟盘 × Agent**（不是新闻模块，新闻模块仍是零代码）：
+> 设计 `docs/superpowers/specs/2026-09-17-paper-trading-agent-design.md`，
+> 分支 `codex/strategy-agent`，本轮之前的提交：事件驱动开会门、模型仓位真正被执行、
+> 决策来源可切换 + 可验证预期 + 界面、agent 模式下停用盘中 DSL 检查。
+>
+> 同步一下本文档 §1.2 那些**已经过时的体检数字**（原文是 2026-09-14 的）：
+> Java 测试 **213 passed / 0 failed**（`.\mvnw -o test`，含实时校验用例）；
+> Python 测试 **695 passed / 29 skipped**；工作区在该分支上已全部提交并推送；
+> `tests/test_endpoints.py` 的 401 早已修好；`server.port=` 仍为空（靠默认值兜底）。
+>
+> 另一件只有真库能告诉你的事（代价见 §7.4 in paper-trading-agent-design）：
+> 这套模拟盘/痕迹代码**直到 2026-09-18 才第一次跑在真 MySQL 上** ——
+> 真库里此前既没有 `paper_trade_traces` / `paper_equity_snapshots` 两张表，
+> 也没有 `decision_mode` 列；而第一次启动就暴露了"列名撞 MySQL 保留字导致建表失败"。
+>
+> 下面 §零～§十 的规划内容（新闻模块施工图）**未改动**，仍可作为后续路线参考。
+
 > ## 🔴 当前主线（2026-09-14 更新）
 > **新闻/资讯模块的「搜索 + 分析」**。
 > 施工图已就绪：`docs/superpowers/plans/2026-09-14-news-module.md`（N0–N6，约 8–13 人日）。
