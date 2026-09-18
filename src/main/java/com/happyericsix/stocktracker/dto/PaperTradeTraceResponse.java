@@ -46,6 +46,15 @@ public class PaperTradeTraceResponse {
     private String engineVersion;
     private String adjustMode;
     private Integer moneyPolicyVersion;
+    /**
+     * 这条决策是谁做的（{@code rule} / {@code agent}）与 agent 的实付成本。
+     *
+     * <p>读视图里必须有这两样：否则"这条曲线是谁做出来的"只能靠回忆，
+     * 而 agent 的代价（几次调用、多少 token）事后**无法重建** —— 只有痕迹里那一行记着。
+     */
+    private String decisionMode;
+    private Integer agentLlmCalls;
+    private Integer agentTokens;
     private Integer snapshotSchemaVersion;
     private String snapshotJson;
     private String traceHash;
@@ -87,6 +96,9 @@ public class PaperTradeTraceResponse {
         response.equityAfter = entity.getEquityAfter();
         response.engineVersion = entity.getEngineVersion();
         response.adjustMode = entity.getAdjustMode();
+        response.decisionMode = entity.getDecisionMode();
+        response.agentLlmCalls = entity.getAgentLlmCalls();
+        response.agentTokens = entity.getAgentTokens();
         response.moneyPolicyVersion = entity.getMoneyPolicyVersion();
         response.snapshotSchemaVersion = entity.getSnapshotSchemaVersion();
         response.snapshotJson = entity.getSnapshotJson();
@@ -222,6 +234,12 @@ public class PaperTradeTraceResponse {
     public void setEngineVersion(String engineVersion) { this.engineVersion = engineVersion; }
     public String getAdjustMode() { return adjustMode; }
     public void setAdjustMode(String adjustMode) { this.adjustMode = adjustMode; }
+    public String getDecisionMode() { return decisionMode; }
+    public void setDecisionMode(String decisionMode) { this.decisionMode = decisionMode; }
+    public Integer getAgentLlmCalls() { return agentLlmCalls; }
+    public void setAgentLlmCalls(Integer agentLlmCalls) { this.agentLlmCalls = agentLlmCalls; }
+    public Integer getAgentTokens() { return agentTokens; }
+    public void setAgentTokens(Integer agentTokens) { this.agentTokens = agentTokens; }
     public Integer getMoneyPolicyVersion() { return moneyPolicyVersion; }
     public void setMoneyPolicyVersion(Integer moneyPolicyVersion) { this.moneyPolicyVersion = moneyPolicyVersion; }
     public Integer getSnapshotSchemaVersion() { return snapshotSchemaVersion; }

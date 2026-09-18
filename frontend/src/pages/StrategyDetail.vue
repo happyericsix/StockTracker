@@ -12,7 +12,10 @@ import {
   getPaperAccount,
   getPaperTrades,
   getPaperTraces,
-  getPaperEquity
+  getPaperEquity,
+  switchDecisionMode,
+  getExpectation,
+  registerExpectation
 } from '../api/strategy.js'
 
 const router = useRouter()
@@ -36,6 +39,16 @@ const diagnosticData = ref(null)
 const diagnosticError = ref('')
 const backtestChartRef = ref(null)
 let backtestChart = null
+// 决策来源与预期
+const modeLoading = ref(false)
+const modeError = ref('')
+const expectation = ref(null)
+const expectationError = ref('')
+const expectationLoading = ref(false)
+const expectationForm = ref({ metric: 'excess_vs_buy_and_hold_pct', threshold: 0, horizonDays: 28 })
+const expectationNotice = ref('')
+const equityChartRef = ref(null)
+let equityChart = null
 
 // 响应形状（Result 信封 vs 裸 DTO）由 api/request.js 的响应拦截器统一处理，
 // 信封会被剥掉，所以这里一律直接读 res.data —— 不再需要本地 unwrap()。
@@ -231,6 +244,134 @@ const loadEquity = async () => {
     equity.value = null
     equityError.value = errorMessage(e, '净值曲线加载失败')
   }
+  await renderEquityChart()
+}
+
+/**
+ * 净值曲线：**只画后端给的点**，并在决策来源变更日画一条竖线。
+ *
+ * 竖线是这一块的重点：换决策来源之后，曲线两段的含义不同（规则那一段和委员会那一段
+ * 不是同一个东西做出来的），不标出来就会被当成一条连续的业绩。
+ * 汇总数字（回撤/超额）后端已经算好，这里不重算 —— 前端自己算一遍就会和报告对不上。
+ */
+const renderEquityChart = async () => {
+  await nextTick()
+  const el = equityChartRef.value
+  const points = equity.value?.points
+  if (!el || !Array.isArray(points) || points.length === 0) return
+
+  if (!equityChart) equityChart = echarts.init(el)
+
+  const accentColor = colorToken('--color-accent')
+  const accentSoftColor = colorToken('--color-accent-soft')
+  const mutedColor = colorToken('--color-text-muted')
+  const dates = points.map((point) => String(point.tradeDate || ''))
+  const since = strategy.value?.decisionModeSince ? String(strategy.value.decisionModeSince) : ''
+  const markLine = since && dates.includes(since)
+    ? {
+        symbol: 'none',
+        lineStyle: { color: mutedColor, type: 'dashed' },
+        label: { formatter: '切换决策来源', color: mutedColor },
+        data: [{ xAxis: since }]
+      }
+    : undefined
+
+  equityChart.setOption({
+    tooltip: { trigger: 'axis', confine: true },
+    grid: { left: 70, right: 20, top: 20, bottom: 36 },
+    xAxis: { type: 'category', data: dates, boundaryGap: false },
+    yAxis: { type: 'value', scale: true },
+    series: [
+      {
+        name: '账户净值',
+        type: 'line',
+        showSymbol: false,
+        data: points.map((point) => point.equity),
+        lineStyle: { width: 2, color: accentColor },
+        areaStyle: { color: accentSoftColor },
+        markLine
+      }
+    ]
+  }, { notMerge: true })
+}
+
+// 度量是封闭集（与后端 PaperEquitySeries.METRICS 同一批），界面只提供这三个。
+const METRIC_OPTIONS = [
+  { value: 'excess_vs_buy_and_hold_pct', label: '相对买入持有的超额（%）' },
+  { value: 'return_pct', label: '账户收益（%）' },
+  { value: 'max_drawdown_pct', label: '最大回撤（%，越大越好）' }
+]
+
+const EXPECTATION_STATUS_LABELS = {
+  pending: '尚未到期',
+  met: '已达成',
+  unmet: '未达成',
+  unmeasurable: '算不出来'
+}
+
+const expectationStatusLabel = (status) =>
+  EXPECTATION_STATUS_LABELS[status] || status || '未知'
+
+/**
+ * 预期：把"这条策略接下来会怎样"变成到期能验的承诺。
+ *
+ * 没有登记过时**要说出来**（而不是显示空白）：空白会被读成"一切都好"，
+ * 而这里恰恰是"还没有人下过承诺"的地方 —— 不表态不该看起来像没问题。
+ */
+const loadExpectation = async () => {
+  expectationError.value = ''
+  try {
+    const res = await getExpectation(strategy.value.id)
+    expectation.value = res.data || null
+  } catch (e) {
+    expectation.value = null
+    expectationError.value = errorMessage(e, '预期加载失败')
+  }
+}
+
+const submitExpectation = async () => {
+  expectationLoading.value = true
+  expectationError.value = ''
+  expectationNotice.value = ''
+  try {
+    const res = await registerExpectation(strategy.value.id, {
+      metric: expectationForm.value.metric,
+      threshold: Number(expectationForm.value.threshold),
+      horizonDays: Number(expectationForm.value.horizonDays)
+    })
+    expectation.value = res.data || null
+    expectationNotice.value = '已登记。到期后由每日结算自动判定达成与否。'
+  } catch (e) {
+    expectationError.value = errorMessage(e, '预期登记失败')
+  } finally {
+    expectationLoading.value = false
+  }
+}
+
+const decisionMode = computed(() => strategy.value?.decisionMode || 'rule')
+const decisionModeLabel = (mode) =>
+  (mode || 'rule') === 'agent' ? '多角色委员会（agent）' : '规则引擎（rule）'
+const isAgentMode = computed(() => decisionMode.value === 'agent')
+
+/**
+ * 切换决策来源。
+ *
+ * 这是一次**会改变历史解释依据**的操作（净值曲线从生效日起分成两段），
+ * 所以走显式接口、由后端记录生效日；界面上把代价（每次开会约 2 万 token）
+ * 直接写在按钮旁边，避免"点一下试试"变成一次没人预期的开销。
+ */
+const changeDecisionMode = async (mode) => {
+  if (mode === decisionMode.value) return
+  modeLoading.value = true
+  modeError.value = ''
+  try {
+    await switchDecisionMode(strategy.value.id, mode)
+    await loadDetail()
+  } catch (e) {
+    modeError.value = errorMessage(e, '切换决策来源失败')
+  } finally {
+    modeLoading.value = false
+  }
 }
 
 /**
@@ -263,6 +404,7 @@ const loadDetail = async () => {
     if (found) {
       strategy.value = found
       await loadPaper()
+      await loadExpectation()
     } else {
       notFound.value = true
     }
@@ -328,6 +470,10 @@ onUnmounted(() => {
     backtestChart.dispose()
     backtestChart = null
   }
+  if (equityChart) {
+    equityChart.dispose()
+    equityChart = null
+  }
 })
 </script>
 
@@ -390,6 +536,101 @@ onUnmounted(() => {
 
           <h3>策略配置</h3>
           <pre class="config-block">{{ prettyConfig }}</pre>
+        </section>
+
+        <!-- 决策来源：谁在做决定。放在配置之后、回测之前 ——
+             因为它决定了**下面所有数字是谁做出来的**，读者得先知道这件事。 -->
+        <section class="card">
+          <h3>决策来源</h3>
+          <p class="trace-hint">
+            当前由 <strong>{{ decisionModeLabel(decisionMode) }}</strong> 做决定<template
+              v-if="strategy.decisionModeSince"
+            >，自 {{ strategy.decisionModeSince }} 起生效</template>。
+            换来源之后，<strong>净值曲线从生效日起分成两段</strong>：规则那一段和委员会那一段
+            不是同一个东西做出来的，不能当成一条连续的业绩读。
+          </p>
+          <p v-if="modeError" class="error" role="alert">{{ modeError }}</p>
+          <div class="detail-actions">
+            <button
+              type="button"
+              class="btn-mode"
+              :disabled="modeLoading || !isAgentMode"
+              @click="changeDecisionMode('rule')"
+            >
+              {{ isAgentMode ? '切回规则引擎' : '当前：规则引擎' }}
+            </button>
+            <button
+              type="button"
+              class="btn-mode agent"
+              :disabled="modeLoading || isAgentMode"
+              @click="changeDecisionMode('agent')"
+            >
+              {{ isAgentMode ? '当前：多角色委员会' : '切换为多角色委员会' }}
+            </button>
+          </div>
+          <p class="trace-hint">
+            委员会的代价写在明处：**有事才开会**（规则信号 / 波动骤增 / 太久没看 / 首次决策），
+            开一次会 8 次模型调用、约 2 万 token；没有触发理由的日子不花一分钱，
+            痕迹里会写"没有值得开会的理由"而不是"模型决定不动"。
+          </p>
+        </section>
+
+        <!-- 预期：把"接下来会怎样"变成到期能验的承诺。 -->
+        <section class="card">
+          <h3>可验证预期</h3>
+          <p class="trace-hint">
+            写清度量、门槛与到期日，到期后由每日结算用同一份净值算出实际值 ——
+            <strong>达成 / 未达成 / 算不出来</strong>三者分开。都是账户层面可观测值，
+            不含任何股价预测。同一时刻只有一条有效预期，登记新的即取代旧的。
+          </p>
+          <p v-if="expectationError" class="error" role="alert">{{ expectationError }}</p>
+          <p v-if="expectationNotice" class="notice">{{ expectationNotice }}</p>
+
+          <template v-if="expectation">
+            <div class="expectation-head">
+              <span class="expectation-status" :class="expectation.status">
+                {{ expectationStatusLabel(expectation.status) }}
+              </span>
+              <span class="trace-kind">
+                度量：{{ expectation.metricLabel || expectation.metric }}
+                ｜ 门槛：{{ expectation.threshold }}
+                ｜ 到期：{{ expectation.deadline }}
+              </span>
+            </div>
+            <p class="expectation-sentence">{{ expectation.sentence }}</p>
+            <div class="trace-meta num">
+              <span v-if="expectation.registeredAt">登记于 {{ expectation.registeredAt }}</span>
+              <span v-if="expectation.outcome !== null && expectation.outcome !== undefined">
+                实际值 {{ expectation.outcome }}
+              </span>
+              <span v-if="expectation.evaluatedAt">回填于 {{ formatTime(expectation.evaluatedAt) }}</span>
+            </div>
+          </template>
+          <div v-else-if="!expectationError" class="expectation-empty">
+            还没有登记预期 —— 也就是说，**目前没有人对这条策略的未来下过承诺**。
+          </div>
+
+          <div class="expectation-form">
+            <label>
+              <span>度量</span>
+              <select v-model="expectationForm.metric">
+                <option v-for="option in METRIC_OPTIONS" :key="option.value" :value="option.value">
+                  {{ option.label }}
+                </option>
+              </select>
+            </label>
+            <label>
+              <span>门槛（实际 ≥ 门槛记为达成）</span>
+              <input v-model="expectationForm.threshold" type="number" step="0.1" />
+            </label>
+            <label>
+              <span>跨度（自然日）</span>
+              <input v-model="expectationForm.horizonDays" type="number" min="1" step="1" />
+            </label>
+            <button type="button" class="btn-expectation" :disabled="expectationLoading" @click="submitExpectation">
+              {{ expectationLoading ? '登记中...' : '登记预期' }}
+            </button>
+          </div>
         </section>
 
         <section v-if="backtestLoading || backtestData !== null" class="card">
@@ -592,7 +833,12 @@ onUnmounted(() => {
             <p class="trace-hint">
               曲线自 {{ equity.summary.firstDate }} 起，共 {{ equity.summary.days }} 个交易日
               （中间没结算的日子是缺口，不补）。
+              <template v-if="strategy.decisionModeSince">
+                虚线处（{{ strategy.decisionModeSince }}）换了决策来源：竖线两侧的曲线
+                不是同一个决策者做出来的。
+              </template>
             </p>
+            <div ref="equityChartRef" class="equity-chart"></div>
           </template>
         </section>
 
@@ -626,6 +872,14 @@ onUnmounted(() => {
                 </span>
                 <span v-if="trace.engineVersion">引擎 {{ trace.engineVersion }}</span>
                 <span v-if="trace.adjustMode">复权 {{ trace.adjustMode }}</span>
+                <!-- 谁做的决定 + 花了多少：agent 的调用与 token 事后只能从这里重建 -->
+                <span>
+                  决策者 {{ trace.decisionMode === 'agent' ? '多角色委员会' : '规则引擎' }}
+                  <template v-if="trace.decisionMode === 'agent' && trace.agentLlmCalls">
+                    （{{ trace.agentLlmCalls }} 次调用 / {{ trace.agentTokens ?? 0 }} token）
+                  </template>
+                </span>
+                <span v-if="trace.trigger && trace.trigger !== 'scheduled'">触发 {{ trace.trigger }}</span>
               </div>
               <details v-if="trace.snapshotJson" class="trace-evidence">
                 <summary>当时的证据快照</summary>
@@ -718,6 +972,10 @@ main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }
 /* 旧的橙色、绿色配白字只有 2.38:1 / 2.27:1，都不达 AA */
 .btn-paper { background: var(--color-warning); }
 .btn-paper.running { background: var(--color-success); }
+/* 决策来源按钮：不产生方向（买/卖）语义，所以用中性色与主色，而不是涨跌色 */
+.btn-mode { background: var(--c-neutral-800); }
+.btn-mode.agent { background: var(--color-accent); }
+.btn-mode:disabled { cursor: default; }
 
 .meta {
   display: flex;
@@ -895,6 +1153,65 @@ main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }
   font-size: 11px;
   line-height: 1.5;
 }
+
+/* ---------- 可验证预期 ---------- */
+.notice { color: var(--color-success); font-size: 13px; margin-bottom: 12px; }
+.expectation-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+/* 状态色沿用语义层：达成=成功、未达成=危险、"算不出来"=中性（它不是失败，是我们的数据不够），
+   尚未到期=普通中性。四种状态都另有文字，不靠颜色单独表意。 */
+.expectation-status {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--color-bg-subtle);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-strong);
+}
+.expectation-status.met { color: var(--color-success); background: var(--color-success-soft); border-color: var(--color-success-mark); }
+.expectation-status.unmet { color: var(--color-danger); background: var(--color-danger-soft); border-color: var(--color-danger); }
+.expectation-status.pending { color: var(--color-warning); background: var(--color-warning-soft); border-color: var(--color-warning-mark); }
+.expectation-status.unmeasurable { border-style: dashed; }
+.expectation-sentence { margin: 8px 0 6px; color: var(--color-text-primary); line-height: 1.6; font-size: 13px; }
+.expectation-empty {
+  margin: 8px 0 12px;
+  padding: 10px 12px;
+  background: var(--color-bg-subtle);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.expectation-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border);
+}
+.expectation-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--color-text-secondary); }
+.expectation-form select,
+.expectation-form input {
+  padding: 6px 8px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+}
+.expectation-form input { width: 120px; }
+.btn-expectation {
+  padding: 7px 14px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  cursor: pointer;
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
+}
+.btn-expectation:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* 旧灰字对灰底仅 2.54:1 */
 .empty { color: var(--color-text-muted); text-align: center; padding: 40px 16px; font-size: 14px; }

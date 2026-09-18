@@ -250,7 +250,8 @@ public class ExpectationService {
                 expectation.deadline(), metric, outcome, threshold);
     }
 
-    private static String label(String metric) {
+    /** 度量的中文名（界面与报告共用一份措辞，不两处各写一遍）。 */
+    public static String label(String metric) {
         if (metric == null) {
             return "度量";
         }

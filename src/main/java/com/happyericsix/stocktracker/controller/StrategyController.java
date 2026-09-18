@@ -1,5 +1,6 @@
 package com.happyericsix.stocktracker.controller;
 
+import com.happyericsix.stocktracker.dto.ExpectationResponse;
 import com.happyericsix.stocktracker.dto.PaperAccountResponse;
 import com.happyericsix.stocktracker.dto.PaperEquityResponse;
 import com.happyericsix.stocktracker.dto.PaperTradeResponse;
@@ -167,26 +168,45 @@ public class StrategyController {
      * 否则"不表态"永远是安全策略。
      */
     @PostMapping("/{id}/expectation")
-    public Result<String> registerExpectation(
+    public Result<ExpectationResponse> registerExpectation(
             @PathVariable Long id,
             @RequestParam String metric,
             @RequestParam java.math.BigDecimal threshold,
             @RequestParam(required = false) Integer horizonDays,
             Authentication authentication) {
-        User user = userRepository.findByUsername(authentication.getName())
-                .orElseThrow(() -> new IllegalArgumentException("用户不存在"));
-        // 归属检查走既有路径：拿不到这条策略就说明不属于该用户（与账户/痕迹同一条规矩）
-        strategyService.listStrategies(authentication.getName()).stream()
-                .filter(item -> id.equals(item.getId()))
-                .findFirst()
-                .orElseThrow(() -> new IllegalArgumentException("策略不存在"));
+        Long userId = currentUserId(authentication, id);
         ExpectationService.Expectation expectation =
-                expectationService.register(user.getId(), id, metric, threshold, horizonDays);
+                expectationService.register(userId, id, metric, threshold, horizonDays);
         if (expectation == null) {
             return Result.error(400, "预期未登记：度量必须是 " + PaperEquitySeries.METRICS
                     + "，门槛必须是数字");
         }
-        return Result.success(ExpectationService.describe(expectation));
+        return Result.success(ExpectationResponse.from(expectation));
+    }
+
+    /**
+     * 读回当前有效的预期（含到期后的实际值与达成状态）。
+     *
+     * <p>没有登记过时返回 {@code null} 数据而不是报错：**"还没有人下过承诺"是一个正常状态**，
+     * 界面要能把它和"有承诺但还没到期"分开说。
+     */
+    @GetMapping("/{id}/expectation")
+    public Result<ExpectationResponse> getExpectation(
+            @PathVariable Long id,
+            Authentication authentication) {
+        Long userId = currentUserId(authentication, id);
+        return Result.success(ExpectationResponse.from(expectationService.latest(userId, id)));
+    }
+
+    /** 归属检查走既有路径：拿不到这条策略就说明不属于该用户（与账户/痕迹同一条规矩）。 */
+    private Long currentUserId(Authentication authentication, Long strategyId) {
+        User user = userRepository.findByUsername(authentication.getName())
+                .orElseThrow(() -> new IllegalArgumentException("用户不存在"));
+        strategyService.listStrategies(authentication.getName()).stream()
+                .filter(item -> strategyId.equals(item.getId()))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("策略不存在"));
+        return user.getId();
     }
 
     /**
