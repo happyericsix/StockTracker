@@ -128,6 +128,11 @@ const sideLabel = (side) => {
   return side || 'N/A'
 }
 
+// 账户是否**被评估过至少一次**。判断依据是 lastEvalAt：
+// 刚启动的账户（尤其是 agent 模式）会只有初始资金，其余字段全空 ——
+// 那不是坏了，是还没轮到它被评估，界面必须说出来（留白会被读成"一切正常"或"坏了"）。
+const accountEvaluated = computed(() => Boolean(account.value?.lastEvalAt))
+
 /**
  * 持仓市值 = 股数 × **最新价**。
  *
@@ -768,23 +773,41 @@ onUnmounted(() => {
 
         <section class="card">
           <h3>模拟盘账户</h3>
-          <div v-if="account" class="account-grid num">
-            <div><span>总权益</span><strong>{{ formatMoney(account.equity) }}</strong></div>
-            <div><span>现金</span><strong>{{ formatMoney(account.cash) }}</strong></div>
-            <div><span>持仓市值</span><strong>{{ formatMoney(positionValue) }}</strong></div>
-            <div><span>初始资金</span><strong>{{ formatMoney(account.initialCapital) }}</strong></div>
-            <div><span>持仓数量</span><strong>{{ account.shares }}</strong></div>
-            <div><span>平均成本</span><strong>{{ formatMoney(account.avgCost) }}</strong></div>
-            <div><span>最高水位</span><strong>{{ formatMoney(account.highWatermark) }}</strong></div>
-            <div><span>最新价格</span><strong>{{ formatMoney(account.lastPrice) }}</strong></div>
-            <div>
-              <span>最新信号</span>
-              <strong>
-                {{ account.lastSignal === 'buy' ? '买入' : account.lastSignal === 'sell' ? '卖出' : account.lastSignal === 'hold' ? '持有' : (account.lastSignal || 'N/A') }}
-              </strong>
+          <template v-if="account">
+            <!-- 先给"还没有评估过"一个明确的说法，再决定要不要摆出那一格数字。
+                 只摆 N/A 的后果实测过一次：用户看到一片 N/A，第一反应是"这功能坏了"。 -->
+            <div v-if="!accountEvaluated" class="account-pending">
+              <strong>这个账户还没有被评估过一次</strong> —— 所以除了初始资金与现金，其余字段都还没有值。
+              <template v-if="isAgentMode">
+                当前决策来源是<strong>多角色委员会</strong>：委员会只在<strong>日线结算</strong>
+                （交易日 15:30）决策，盘中不再做规则检查。第一次决策会在
+                <strong>下一个交易日 15:30</strong> 产生，那之前账户不会更新，也不会有痕迹。
+              </template>
+              <template v-else>
+                下一次盘中检查会在几分钟内发生（价格刷新每 5 分钟一次），日线结算在下一个交易日 15:30。
+                若长时间停在这里，去看「结算痕迹」里那一行为什么（休市、取数失败都会写在里面）。
+              </template>
             </div>
-            <div><span>最近评估</span><strong>{{ formatTime(account.lastEvalAt) }}</strong></div>
-          </div>
+            <div class="account-grid num">
+              <div><span>初始资金</span><strong>{{ formatMoney(account.initialCapital) }}</strong></div>
+              <div><span>现金</span><strong>{{ formatMoney(account.cash) }}</strong></div>
+              <template v-if="accountEvaluated">
+                <div><span>总权益</span><strong>{{ formatMoney(account.equity) }}</strong></div>
+                <div><span>持仓市值</span><strong>{{ formatMoney(positionValue) }}</strong></div>
+                <div><span>持仓数量</span><strong>{{ account.shares }}</strong></div>
+                <div><span>平均成本</span><strong>{{ formatMoney(account.avgCost) }}</strong></div>
+                <div><span>最高水位</span><strong>{{ formatMoney(account.highWatermark) }}</strong></div>
+                <div><span>最新价格</span><strong>{{ formatMoney(account.lastPrice) }}</strong></div>
+                <div>
+                  <span>最新信号</span>
+                  <strong>
+                    {{ account.lastSignal === 'buy' ? '买入' : account.lastSignal === 'sell' ? '卖出' : account.lastSignal === 'hold' ? '持有' : (account.lastSignal || 'N/A') }}
+                  </strong>
+                </div>
+                <div><span>最近评估</span><strong>{{ formatTime(account.lastEvalAt) }}</strong></div>
+              </template>
+            </div>
+          </template>
           <div v-else class="empty">暂无模拟盘账户</div>
         </section>
 
@@ -1180,6 +1203,17 @@ main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }
 
 /* ---------- 可验证预期 ---------- */
 .notice { color: var(--color-success); font-size: 13px; margin-bottom: 12px; }
+/* "还没有评估过"的说明块：用中性色，不用错误色 —— 它是正常状态，不是故障 */
+.account-pending {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  background: var(--color-bg-subtle);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.7;
+}
 .expectation-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 /* 状态色沿用语义层：达成=成功、未达成=危险、"算不出来"=中性（它不是失败，是我们的数据不够），
    尚未到期=普通中性。四种状态都另有文字，不靠颜色单独表意。 */
