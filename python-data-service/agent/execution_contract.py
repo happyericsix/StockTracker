@@ -100,6 +100,11 @@ SKIP_AGENT_UNPARSABLE = "agent_unparsable"
 SKIP_AGENT_BUDGET_EXCEEDED = "agent_budget_exceeded"
 # agent 依赖的模型服务不可用。同样必须与"HOLD"分开：这是我们这边的故障，不是市场的结论。
 SKIP_AGENT_LLM_UNAVAILABLE = "agent_llm_unavailable"
+# **没有新信息，所以没开会**（事件驱动的召集门控）。
+# 为什么要一个独立原因而不是"就跳过"：它与"HOLD"在结果上都不动，但含义完全不同 ——
+# HOLD 是"委员们看过、决定不动"，这条是"今天没有任何值得开会的理由，所以没看"。
+# 混在一起，"agent 到底多久没真正看过行情了"就永远查不出来。
+SKIP_AGENT_NO_NEW_INFORMATION = "agent_no_new_information"
 
 SKIP_REASONS = (
     SKIP_MARKET_CLOSED,
@@ -118,6 +123,7 @@ SKIP_REASONS = (
     SKIP_AGENT_UNPARSABLE,
     SKIP_AGENT_BUDGET_EXCEEDED,
     SKIP_AGENT_LLM_UNAVAILABLE,
+    SKIP_AGENT_NO_NEW_INFORMATION,
 )
 
 UNKNOWN_PREFIX = "unknown_"

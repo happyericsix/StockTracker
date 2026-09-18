@@ -98,14 +98,23 @@ public class StrategyClient {
      * 模型决定**要不要动**，代码决定**怎么动**。
      *
      * <p>agent 走日线结算：委员会是每日一次的节奏（一次约 8 次 LLM 调用），
-     * 不像实时路径那样每 5 分钟触发。
+     * 不像实时路径那样每 5 分钟触发。**但并不是每天都真的开会** ——
+     * `lastDecisionAt` 交给 Python 侧的召集门控判断"是否有值得开会的理由"，
+     * 没有就零成本地跳过（记 `agent_no_new_information`，与"模型决定不动"分开）。
+     *
+     * @param lastDecisionAt 上次**真的召集了委员会**的日子（YYYY-MM-DD），可为 null
+     *                       （null = 从没开过会 → 门控会按"该开会"处理）
      */
-    public JsonNode agentDecide(String configJson, String symbol, String date, JsonNode position) {
+    public JsonNode agentDecide(String configJson, String symbol, String date, JsonNode position,
+                                String lastDecisionAt) {
         var body = new HashMap<String, Object>();
         body.put("strategy_json", raw(configJson));
         body.put("symbol", symbol);
         body.put("date", date);
         body.put(ExecutionContract.SETTLEMENT_KIND_FIELD, ExecutionContract.SETTLEMENT_DAILY);
+        if (lastDecisionAt != null && !lastDecisionAt.isBlank()) {
+            body.put("last_decision_at", lastDecisionAt);
+        }
         if (position != null) body.put("position", position);
         return post("/api/v1/agent/decide", body);
     }

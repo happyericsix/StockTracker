@@ -870,10 +870,11 @@ async def agent_decide_endpoint(req: Request):
 
     请求体：
         {"strategy_json": {...} | "symbol": "600519", "date": "2026-03-10",
-         "settlement_kind": "daily", "position": {...}}
+         "settlement_kind": "daily", "position": {...}, "last_decision_at": "2026-03-06"}
 
-    <h3>它不受策略 DSL 约束</h3>
-    `strategy_json` 里只有 `symbol`（以及可选的初始资金）会被用到 —— 委员会不看 entry/exit 条件。
+    <h3>它不受策略 DSL 约束，但 DSL 参与**门控**</h3>
+    `strategy_json` 里只有 `symbol` 会被委员会用到；entry/exit 条件**不参与决策**，
+    但会作为"召集门控"的一条触发理由（规则给出买/卖 = 值得开会）。
     这是"把决策源从规则换成 agent"的落点：同一张策略记录，换的是**谁做决定**，
     而 `fingerprint.decision_mode` 会把这个区别写进每一条痕迹。
     """
@@ -906,7 +907,12 @@ async def agent_decide_endpoint(req: Request):
 
         result = await asyncio.to_thread(
             trading_committee.decide, symbol, date, records or [], position,
-            settlement_kind=settlement_kind or ec.SETTLEMENT_DAILY, adjust_mode=ADJUST_MODE
+            settlement_kind=settlement_kind or ec.SETTLEMENT_DAILY, adjust_mode=ADJUST_MODE,
+            # 策略 JSON 只给门控用（"规则信号"触发理由复用规则引擎）；
+            # `last_decision_at` 决定"太久没看"这条 —— 由 Java 从痕迹里取上次**真的开了会**的日子，
+            # 而不是"上次结算的日子"（后者每天都有，定时器永远不会到期）。
+            config=cfg.model_dump() if cfg else None,
+            last_decision_at=data.get("last_decision_at"),
         )
         result["valid"] = True
         return result

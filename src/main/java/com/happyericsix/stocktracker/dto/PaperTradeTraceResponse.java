@@ -124,6 +124,8 @@ public class PaperTradeTraceResponse {
         map.put(ExecutionContract.SKIP_AGENT_UNPARSABLE, "agent 的输出读不懂（没有规范结论行或结构不完整），按不动处理");
         map.put(ExecutionContract.SKIP_AGENT_BUDGET_EXCEEDED, "agent 这一轮的调用/token 预算用完了，没做出决策");
         map.put(ExecutionContract.SKIP_AGENT_LLM_UNAVAILABLE, "agent 依赖的模型服务不可用，本轮没做出决策");
+        map.put(ExecutionContract.SKIP_AGENT_NO_NEW_INFORMATION,
+                "没有值得开会的触发理由（事件驱动门控），本轮**没有召集委员会** —— 这不是模型决定不动");
         return map;
     }
 

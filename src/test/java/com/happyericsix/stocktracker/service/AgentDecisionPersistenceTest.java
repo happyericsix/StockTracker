@@ -101,7 +101,7 @@ class AgentDecisionPersistenceTest {
         String committee = "{\"llm_calls\":8,\"total_tokens\":33449,\"as_of\":\"" + today + "\","
                 + "\"roles\":[{\"role\":\"bull\",\"label\":\"bull-researcher\","
                 + "\"sha256\":\"deadbeef0001\",\"excerpt\":\"均线多头排列\"}]}";
-        when(strategyClient.agentDecide(anyString(), eq("600519"), anyString(), isNull()))
+        when(strategyClient.agentDecide(anyString(), eq("600519"), anyString(), isNull(), any()))
                 .thenReturn(mapper.readTree(
                         "{\"valid\":true,\"decision\":\"buy\",\"signal\":\"buy\",\"size_fraction\":0.5,"
                                 + "\"price\":10.0,\"matched_conditions\":[],\"fill_basis\":\"close\","
@@ -158,7 +158,7 @@ class AgentDecisionPersistenceTest {
         Strategy strategy = agentStrategy();
         String today = LocalDate.now().toString();
 
-        when(strategyClient.agentDecide(anyString(), eq("600519"), anyString(), isNull()))
+        when(strategyClient.agentDecide(anyString(), eq("600519"), anyString(), isNull(), any()))
                 .thenReturn(mapper.readTree(
                         "{\"valid\":true,\"decision\":\"skip\",\"signal\":\"hold\","
                                 + "\"size_fraction\":0.0,\"skip_reason\":\"rule_not_met\","

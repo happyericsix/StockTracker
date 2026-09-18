@@ -272,4 +272,20 @@ public class PaperTraceService {
     public long count(Long strategyId) {
         return repository.countByStrategyId(strategyId);
     }
+
+    /**
+     * 最近一次**真的召集了委员会**的日子（agent 调用次数 > 0），没有则 null。
+     *
+     * <p>给召集门控的"太久没看"用。刻意不用账户上的 lastEvalAt：那个每天结算都刷新，
+     * 于是这条永远不到期 —— agent 会在规则停止出信号之后**永久沉默**。
+     */
+    public String lastBriefingDate(Long strategyId) {
+        if (strategyId == null) {
+            return null;
+        }
+        return repository
+                .findFirstByStrategyIdAndAgentLlmCallsGreaterThanOrderByCreatedAtDesc(strategyId, 0)
+                .map(trace -> trace.getTradeDate() == null ? null : trace.getTradeDate().toString())
+                .orElse(null);
+    }
 }

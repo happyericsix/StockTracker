@@ -22,4 +22,14 @@ public interface PaperTradeTraceRepository extends JpaRepository<PaperTradeTrace
     List<PaperTradeTrace> findByStrategyIdAndSkipReasonOrderByCreatedAtDesc(Long strategyId, String skipReason);
 
     long countByStrategyId(Long strategyId);
+
+    /**
+     * 最近一次**真的召集了委员会**的痕迹（agent 调用次数 > 0）。
+     *
+     * <p>为什么不用账户上的 {@code lastEvalAt}：那个每天结算都会刷新，
+     * 于是"太久没开会"这条触发理由永远不会到期 —— agent 会在规则停止出信号之后**永久沉默**。
+     * 要的是"上次真的看过行情是什么时候"。
+     */
+    Optional<PaperTradeTrace> findFirstByStrategyIdAndAgentLlmCallsGreaterThanOrderByCreatedAtDesc(
+            Long strategyId, Integer calls);
 }

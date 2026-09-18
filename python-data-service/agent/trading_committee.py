@@ -63,6 +63,42 @@ MAX_TOTAL_TOKENS = 60_000
 #: 实测一次决策 33.4k tokens 里有大半是这几行数字重复了八遍。
 #: 给模型看最近 30 根足够它读形态；成本省一半，信息没少。
 EVIDENCE_BARS = 30
+
+# ==================== 召集门控（事件驱动） ====================
+# <h3>为什么要有门控</h3>
+# 日频召集 = 每天花 ~21k tokens 让 8 个角色重新看一遍**几乎相同**的证据（只差一根 bar），
+# 而绝大多数日子结论都是 HOLD。这买的不是信息，是重复劳动。
+# 信息是**事件驱动**的：真正值得开会的时刻少而明确。
+#
+# <h3>四条触发理由（封闭集，全部确定性、不看模型）</h3>
+# - `rule_signal`：策略 DSL 在当天给出买/卖（**复用规则引擎本身**，不另写判断）
+# - `volatility_spike`：当日波动 ≥ 2×近 20 日平均波动，或量能 ≥ 2×20 日均量
+# - `stale`：太久没开会（有仓位时更短 —— 持仓时更需要盯着）
+# - `first_decision`：从来没有开过会（不能因为"没触发"就一直不开）
+#
+# <h3>两个刻意的取舍</h3>
+# ① 没有触发时**不猜**：返回 `skip` 且 `skip_reason=agent_no_new_information`，
+#    并记 0 次 LLM 调用 —— "没看"与"看过之后决定不动"必须分得开；
+# ② 门控是**多给**而不是少给：任何一条触发就开会；`last_decision_at` 缺失时也开会
+#    （fail-open：宁可多花钱，也不要因为传参缺失而永远沉默）。
+TRIGGER_RULE_SIGNAL = "rule_signal"
+TRIGGER_VOLATILITY_SPIKE = "volatility_spike"
+TRIGGER_STALE = "stale"
+TRIGGER_FIRST_DECISION = "first_decision"
+CONVENE_TRIGGERS = (TRIGGER_RULE_SIGNAL, TRIGGER_VOLATILITY_SPIKE, TRIGGER_STALE,
+                    TRIGGER_FIRST_DECISION)
+
+#: 空仓时最多几天不开会（自然日）。空仓时"错过机会"的代价与"没盯着"的代价都更小。
+MAX_DAYS_FLAT = 10
+#: 有仓位时最多几天不开会 —— 持仓时风险敞口是真实的，盯得紧一点。
+MAX_DAYS_HOLDING = 3
+#: 波动/量能异常的倍数门槛。
+SPIKE_MULTIPLE = 2.0
+#: 波动的**绝对**下限（%）。
+#: 为什么必须有它：极静市场里近 20 日平均波动可能是 0，"2×0 仍然是 0" ——
+#: 于是"一片平静之后突然跳一下"这种**最该开会**的日子反而不开会。
+#: 这是写测试时发现的：第一版的倍数判断在平盘序列上永远不触发。
+MIN_MOVE_PCT = 3.0
 #: 每个角色的输出只留这么长的摘要进痕迹（全文太大，哈希负责防篡改）。
 EXCERPT_CHARS = 400
 
@@ -228,13 +264,93 @@ def _position(position: dict | None) -> dict:
     """持仓状态也进证据包：**同一个行情，空仓与满仓该给不同的答案。**"""
     if not isinstance(position, dict):
         return {"shares": 0.0, "avg_cost": None, "high_watermark": None}
+
     def value(key):
         try:
             return round(float(position.get(key) or 0.0), 4)
         except (TypeError, ValueError):
             return None
+
     return {"shares": value("shares") or 0.0, "avg_cost": value("entry_price"),
             "high_watermark": value("high_watermark")}
+
+
+# ==================== 1b. 召集门控（事件驱动） ====================
+
+def _days_since(last_decision_at: Any, as_of: str) -> Optional[int]:
+    """距上次**真的开会**过了多少自然日。解析不出来返回 None（调用方按"该开会"处理）。"""
+    if not last_decision_at:
+        return None
+    text = str(last_decision_at).strip()[:10]
+    try:
+        from datetime import date as _date
+        return (_date.fromisoformat(str(as_of)[:10]) - _date.fromisoformat(text)).days
+    except (TypeError, ValueError):
+        return None
+
+
+def convene_reasons(records: list[dict], as_of: str, *, config: dict | None = None,
+                    position: dict | None = None,
+                    last_decision_at: Any = None) -> tuple[list[str], dict]:
+    """该不该召集委员会？返回 (触发的理由, 供痕迹记录的判定细节)。
+
+    **确定性、零 LLM 成本**。任何一条触发就开会；一条都没有就"今天没必要看"。
+
+    注意这里不是"省钱的开关"，而是**把信息密度提上来**：
+    日频召集时 8 个角色每天重新读一遍只差一根 bar 的证据，绝大多数结论是 HOLD ——
+    那买到的不是信息，是重复劳动。真正值得开会的时刻少而明确。
+    """
+    reasons: list[str] = []
+    detail: dict = {"as_of": str(as_of), "last_decision_at": str(last_decision_at or "")}
+
+    # ① 从没开过会：不能因为"没触发"就一直不开
+    if not last_decision_at:
+        reasons.append(TRIGGER_FIRST_DECISION)
+
+    # ② 规则信号：**复用规则引擎本身**（不另写一套判断）
+    signal = None
+    if config and records:
+        try:
+            rule = strategy_engine.evaluate_bar(config, records, str(as_of), position)
+            signal = rule.get("signal")
+            detail["rule_signal"] = signal
+        except Exception as exc:  # noqa: BLE001 —— 门控失败按"该开会"处理（fail-open）
+            detail["rule_signal_error"] = type(exc).__name__
+    if signal in ("buy", "sell"):
+        reasons.append(TRIGGER_RULE_SIGNAL)
+
+    # ③ 波动/量能异常（只用手边已有的 bar，不引入新指标）
+    closes = [float(record.get("close") or 0.0) for record in records or []]
+    volumes = [float(record.get("volume") or 0.0) for record in records or []]
+    if len(closes) >= 21:
+        moves = [abs(closes[i] / closes[i - 1] - 1.0) for i in range(len(closes) - 20, len(closes))
+                 if closes[i - 1]]
+        average_move = sum(moves[:-1]) / len(moves[:-1]) if len(moves) > 1 else 0.0
+        today_move = moves[-1] if moves else 0.0
+        volume_ratio = (volumes[-1] / (sum(volumes[-20:]) / 20.0)) if sum(volumes[-20:]) else 0.0
+        detail["today_move_pct"] = round(today_move * 100, 2)
+        detail["average_move_pct"] = round(average_move * 100, 2)
+        detail["volume_ratio"] = round(volume_ratio, 2)
+        # 两条判据取或：① 明显大于近期平均；② 绝对幅度过了下限（覆盖"极静之后突然一跳"）
+        relative = average_move > 0 and today_move >= SPIKE_MULTIPLE * average_move
+        absolute = today_move * 100.0 >= MIN_MOVE_PCT
+        detail["spike_basis"] = ("relative" if relative and not absolute
+                                 else "absolute" if absolute and not relative
+                                 else "both" if relative else "none")
+        if relative or absolute or volume_ratio >= SPIKE_MULTIPLE:
+            reasons.append(TRIGGER_VOLATILITY_SPIKE)
+
+    # ④ 太久没看（有仓位时更短：持仓的风险敞口是真实的）
+    holding = bool(isinstance(position, dict) and float(position.get("shares") or 0.0) > 0)
+    limit = MAX_DAYS_HOLDING if holding else MAX_DAYS_FLAT
+    age = _days_since(last_decision_at, as_of)
+    detail["days_since_last_decision"] = age
+    detail["stale_limit_days"] = limit
+    detail["holding"] = holding
+    if age is not None and age >= limit:
+        reasons.append(TRIGGER_STALE)
+
+    return reasons, detail
 
 
 # ==================== 2. 委员会 ====================
@@ -263,12 +379,15 @@ def _summarize(text: str) -> dict:
 
 def decide(symbol: str, as_of: str, records: list[dict],
            position: dict | None = None, *, settlement_kind: str = ec.SETTLEMENT_DAILY,
-           adjust_mode: str | None = None,
+           adjust_mode: str | None = None, config: dict | None = None,
+           last_decision_at: Any = None,
            completion: Optional[Callable] = None) -> dict:
     """跑一轮委员会并返回**与 `evaluate-bar` 同形状**的决策。
 
     形状相同是刻意的：结算侧只需要换一个调用地址，执行路径一行不改
     （整手/佣金下限/T+1/涨跌停/DECIMAL 全部照旧）。**模型决定要不要动，代码决定怎么动。**
+
+    `config`（策略 JSON）只用于门控里的"规则信号"判断 —— 委员会本身不看 entry/exit 条件。
     """
     evidence, warnings = build_evidence(symbol, as_of, records, position)
     fingerprint = ec.fingerprint_for(settlement_kind, adjust_mode=adjust_mode or "",
@@ -301,6 +420,20 @@ def decide(symbol: str, as_of: str, records: list[dict],
         return {**base, "bar_date_missing": True, "skip_reason": ec.SKIP_NO_BAR,
                 "committee": _empty_audit(as_of, warnings)}
 
+    # ==================== 召集门控（事件驱动） ====================
+    # 没有触发理由就不开会：**不花一次调用**，并且把"没看"记成一个真实原因。
+    reasons, gate = convene_reasons(records, str(as_of), config=config, position=position,
+                                    last_decision_at=last_decision_at)
+    gate["convened"] = bool(reasons)
+    gate["reasons"] = list(reasons)
+    if not reasons:
+        warnings.append("没有值得开会的触发理由（事件驱动门控），未运行委员会")
+        return {**base,
+                "price": evidence["last_close"],
+                "snapshot": _gate_snapshot(evidence, as_of, fingerprint, gate),
+                "skip_reason": ec.SKIP_AGENT_NO_NEW_INFORMATION,
+                "committee": {**_empty_audit(as_of, warnings), "gate": gate}}
+
     price = evidence["last_close"]
     snapshot = ec.build_snapshot(
         bar=_bar_of(evidence, str(as_of)),
@@ -317,7 +450,8 @@ def decide(symbol: str, as_of: str, records: list[dict],
 
     result = run_committee(symbol, as_of, evidence, warnings, completion=completion)
     decision = result.decision
-    snapshot["extra"]["committee"] = result.as_audit()
+    audit = {**result.as_audit(), "gate": gate}
+    snapshot["extra"]["committee"] = audit
 
     return {
         **base,
@@ -328,8 +462,25 @@ def decide(symbol: str, as_of: str, records: list[dict],
         "confidence": decision.confidence,
         "rationale": decision.rationale,
         "warnings": list(decision.warnings),
-        "committee": result.as_audit(),
+        "committee": audit,
     }
+
+
+def _gate_snapshot(evidence: dict, as_of: str, fingerprint, gate: dict) -> dict:
+    """"没开会"也要留证据：那天的 bar、指标、以及**为什么判定不必开会**。
+
+    为什么不能省：报告要回答"agent 多久没真正看过行情了"，
+    而这个答案只能从这些行里读出来 —— 什么都不记的话，"没开会"与"没跑"长得一样。
+    """
+    snapshot = ec.build_snapshot(
+        bar=_bar_of(evidence, str(as_of)),
+        indicators=dict(evidence.get("indicators") or {}),
+        params={"decision_mode": ec.DECISION_MODE_AGENT, "roles": list(ROLES),
+                "prompt_version": prompt_version(), "convened": False},
+        fingerprint=fingerprint,
+    )
+    snapshot["extra"]["gate"] = gate
+    return snapshot
 
 
 def _bar_of(evidence: dict, as_of: str) -> dict:
@@ -430,7 +581,7 @@ def _usage_of(choice: Any) -> dict:
 
 
 def describe() -> dict:
-    """给 /health 与调试用：角色、预算、口径。"""
+    """给 /health 与调试用：角色、预算、门控、口径。"""
     return {
         "roles": [{"key": role, "label": ROLE_LABELS.get(role, role)} for role in ROLES],
         "max_llm_calls": MAX_LLM_CALLS,
@@ -441,7 +592,12 @@ def describe() -> dict:
         "prompt_version": prompt_version(),
         "decision_mode": ec.DECISION_MODE_AGENT,
         "as_of_guard": "证据只到决策日为止，晚于该日的 bar 一律剔除并留警告",
+        # 门控必须可见：它直接决定"多久才真的看一次行情"
+        "convene_triggers": list(CONVENE_TRIGGERS),
+        "stale_limits": {"flat_days": MAX_DAYS_FLAT, "holding_days": MAX_DAYS_HOLDING},
+        "spike_multiple": SPIKE_MULTIPLE,
+        "skip_when_not_convened": ec.SKIP_AGENT_NO_NEW_INFORMATION,
         # 实测值（供成本规划用；刻意不换成金额 —— 金额需要价目表，猜出来的美元数是假信息）
-        "measured_tokens_per_decision": 33_000,
+        "measured_tokens_per_decision": 21_000,
         "cost_note": "token 由痕迹记录；金额取决于所用模型的价目表，系统不猜",
     }

@@ -804,19 +804,25 @@ class PaperTradingServiceTest {
                         + "\"snapshot\":{\"schema_version\":1,\"bar\":{\"date\":\"2026-09-18\",\"close\":10.0},"
                         + "\"indicators\":{\"ma_20\":9.8},"
                         + "\"extra\":{\"committee\":{\"llm_calls\":8,\"total_tokens\":33449}}}}");
-        when(strategyClient.agentDecide(eq(configJson), eq("600519"), anyString(), isNull()))
+        when(strategyClient.agentDecide(eq(configJson), eq("600519"), anyString(), isNull(), any()))
                 .thenReturn(result);
 
         paperTradingService.evaluateDaily();
 
         // ① 走的是 agent 端点，而且**没有**去调规则端点
-        verify(strategyClient, times(1)).agentDecide(eq(configJson), eq("600519"), anyString(), isNull());
+        verify(strategyClient, times(1)).agentDecide(eq(configJson), eq("600519"), anyString(), isNull(), any());
         verify(strategyClient, never()).evaluateBar(anyString(), anyString(), anyString(), any());
 
         // ② 决策被执行（成交 + 账户变化）
         ArgumentCaptor<PaperTrade> tradeCaptor = ArgumentCaptor.forClass(PaperTrade.class);
         verify(paperTradeRepository, times(1)).save(tradeCaptor.capture());
         assertEquals("BUY", tradeCaptor.getValue().getSide());
+        // ②' "动多大"也得是模型说的那个数：配置是 full/100%，模型说 0.3 →
+        // 预算 3000 元 ÷ 10 元 = 300 股。这一条是补上来的 —— 之前执行层**根本没读**
+        // size_fraction，模型说 30% 却按配置满仓买，而这种偏差不会报错，只会让
+        // "agent 的仓位判断"这类结论永远无法从成交记录里验证。
+        assertEquals(300, tradeCaptor.getValue().getShares().intValue(),
+                "agent 给的 size_fraction 必须真的决定仓位，而不是被配置悄悄覆盖");
 
         // ③ 痕迹照旧写，并且**标明是 agent 做的**、成本可查
         ArgumentCaptor<PaperTradeTrace> traceCaptor = ArgumentCaptor.forClass(PaperTradeTrace.class);
@@ -856,11 +862,105 @@ class PaperTradingServiceTest {
         paperTradingService.evaluateDaily();
 
         verify(strategyClient, times(1)).evaluateBar(eq(configJson), eq("600519"), anyString(), isNull());
-        verify(strategyClient, never()).agentDecide(anyString(), anyString(), anyString(), any());
+        verify(strategyClient, never()).agentDecide(anyString(), anyString(), anyString(), any(), any());
         ArgumentCaptor<PaperTradeTrace> captor = ArgumentCaptor.forClass(PaperTradeTrace.class);
         verify(paperTraceService, times(1)).record(captor.capture());
         assertEquals(ExecutionContract.DECISION_MODE_RULE, captor.getValue().getDecisionMode(),
                 "存量策略（decisionMode 为 null）必须按 rule 处理");
+    }
+
+    /**
+     * 模型说的仓位再大，也大不过用户设置的仓位上限。
+     *
+     * <p>谁说了算必须只有一种答案：策略配置是用户的风险约束，模型只能在它**之内**决定大小。
+     * 反过来的话，一个"最多 20% 仓位"的策略会被模型一句话变成满仓 —— 而这种越权
+     * 同样不会报错，只会体现在某天的净值上。
+     */
+    @Test
+    void theConfiguredPositionCeilingOutranksTheAgent() throws Exception {
+        String configJson = "{\"initial_capital\":10000.0,"
+                + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0},"
+                + "\"position\":{\"type\":\"percent\",\"size_pct\":20.0}}";
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true)
+                .decisionMode("agent").decisionModeSince(LocalDate.now())
+                .build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(paperTradeRepository.save(any(PaperTrade.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(memoryService.currentSessionKey(1L)).thenReturn("1:2026-09-18");
+        when(paperEquitySnapshotRepository.findByStrategyIdOrderByTradeDateAsc(10L)).thenReturn(List.of());
+        when(paperEquitySnapshotRepository.findByStrategyIdAndTradeDate(eq(10L), any(LocalDate.class)))
+                .thenReturn(Optional.empty());
+
+        // 模型要 50%，配置只允许 20% → 预算 2000 元 ÷ 10 元 = 200 股
+        JsonNode result = mapper.readTree(
+                "{\"valid\":true,\"decision\":\"buy\",\"signal\":\"buy\",\"size_fraction\":0.5,"
+                        + "\"price\":10.0,\"matched_conditions\":[],"
+                        + "\"fingerprint\":{\"fill_basis\":\"close\",\"adjust_mode\":\"qfq\","
+                        + "\"money_policy_version\":1,\"engine_version\":\"abc123\",\"decision_mode\":\"agent\"},"
+                        + "\"committee\":{\"llm_calls\":8,\"total_tokens\":21457}}");
+        when(strategyClient.agentDecide(eq(configJson), eq("600519"), anyString(), isNull(), any()))
+                .thenReturn(result);
+
+        paperTradingService.evaluateDaily();
+
+        ArgumentCaptor<PaperTrade> captor = ArgumentCaptor.forClass(PaperTrade.class);
+        verify(paperTradeRepository, times(1)).save(captor.capture());
+        assertEquals(200, captor.getValue().getShares().intValue(),
+                "配置的仓位上限必须夹住模型的 size_fraction");
+    }
+
+    /**
+     * 规则那条路**不许**被 size_fraction 影响：指纹写着 rule 时，仓位口径一点都不能变。
+     *
+     * <p>反过来说，一个非 agent 响应里出现 size_fraction（旧版服务、被改过的中间层）
+     * 也必须当没看见 —— 否则规则的仓位口径会在别人手里悄悄变掉。
+     */
+    @Test
+    void ruleModeIgnoresAStraySizeFraction() throws Exception {
+        String configJson = "{\"initial_capital\":10000.0,"
+                + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0},"
+                + "\"position\":{\"type\":\"full\",\"size_pct\":100.0}}";
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true)
+                .build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(paperTradeRepository.save(any(PaperTrade.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(paperEquitySnapshotRepository.findByStrategyIdOrderByTradeDateAsc(10L)).thenReturn(List.of());
+        when(paperEquitySnapshotRepository.findByStrategyIdAndTradeDate(eq(10L), any(LocalDate.class)))
+                .thenReturn(Optional.empty());
+
+        JsonNode result = mapper.readTree(
+                "{\"signal\":\"buy\",\"price\":10.0,\"size_fraction\":0.3,\"matched_conditions\":[],"
+                        + "\"fingerprint\":{\"fill_basis\":\"close\",\"adjust_mode\":\"qfq\","
+                        + "\"money_policy_version\":1,\"engine_version\":\"abc123\",\"decision_mode\":\"rule\"}}");
+        when(strategyClient.evaluateBar(eq(configJson), eq("600519"), anyString(), isNull()))
+                .thenReturn(result);
+
+        paperTradingService.evaluateDaily();
+
+        ArgumentCaptor<PaperTrade> captor = ArgumentCaptor.forClass(PaperTrade.class);
+        verify(paperTradeRepository, times(1)).save(captor.capture());
+        assertEquals(1000, captor.getValue().getShares().intValue(),
+                "rule 模式只认配置：full → 全部现金 10000 ÷ 10 元 = 1000 股");
     }
 
     /**

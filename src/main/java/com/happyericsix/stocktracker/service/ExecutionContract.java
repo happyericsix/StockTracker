@@ -83,6 +83,13 @@ public final class ExecutionContract {
     public static final String SKIP_AGENT_BUDGET_EXCEEDED = "agent_budget_exceeded";
     /** agent 依赖的模型服务不可用 —— 我们这边的故障，不是市场的结论。 */
     public static final String SKIP_AGENT_LLM_UNAVAILABLE = "agent_llm_unavailable";
+    /**
+     * 没有值得开会的触发理由，所以**根本没开会**（事件驱动的召集门控）。
+     *
+     * <p>与 {@link #SKIP_RULE_NOT_MET}（模型看过后决定不动）必须分开：
+     * 混在一起，"agent 到底多久没真正看过行情了"就永远查不出来。
+     */
+    public static final String SKIP_AGENT_NO_NEW_INFORMATION = "agent_no_new_information";
 
     // ---------- 归一与版本 ----------
     public static final String UNKNOWN_PREFIX = "unknown_";
@@ -129,7 +136,8 @@ public final class ExecutionContract {
             SKIP_WARMUP, SKIP_LIMIT_BLOCKED, SKIP_T1_BLOCKED, SKIP_EX_DIVIDEND_DAY,
             SKIP_INSUFFICIENT_CASH_FOR_ONE_LOT, SKIP_INSUFFICIENT_CASH,
             SKIP_INVALID_PRICE, SKIP_RULE_NOT_MET, SKIP_STATE_MISMATCH,
-            SKIP_AGENT_UNPARSABLE, SKIP_AGENT_BUDGET_EXCEEDED, SKIP_AGENT_LLM_UNAVAILABLE);
+            SKIP_AGENT_UNPARSABLE, SKIP_AGENT_BUDGET_EXCEEDED, SKIP_AGENT_LLM_UNAVAILABLE,
+            SKIP_AGENT_NO_NEW_INFORMATION);
 
     /** 结算类型 → 成交价口径。**唯一的映射处**（Python 侧同名映射）。 */
     public static final Map<String, String> FILL_BASIS_BY_SETTLEMENT = Map.of(

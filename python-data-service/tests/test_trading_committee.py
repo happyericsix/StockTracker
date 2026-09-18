@@ -350,6 +350,168 @@ def test_every_branch_returns_the_closed_enum_and_a_reason():
             assert result["skip_reason"] in ec.SKIP_REASONS, result["skip_reason"]
 
 
+# ==================== 6. 召集门控（事件驱动） ====================
+
+def crossing_config():
+    """一个会在最后一根上"上穿 20 日均线"的规则 —— 用来测 rule_signal 触发。"""
+    return {"schema_version": "1.0", "name": "上穿20日线", "symbol": "600519",
+            "entry": {"logic": "all", "conditions": [
+                {"type": "price_cross_ma", "window": 20, "direction": "above"}]},
+            "exit": {"logic": "any", "conditions": [
+                {"type": "price_cross_ma", "window": 20, "direction": "below"}]}}
+
+
+def quiet_bars(n=60, price=100.0):
+    """一根几乎不动的序列：没有规则信号、没有波动异常。"""
+    return [{"date": f"2026-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}",
+             "open": price, "high": price + 0.05, "low": price - 0.05,
+             "close": price, "volume": 1000} for i in range(n)]
+
+
+def test_nothing_happening_means_no_briefing_at_all():
+    """没有触发理由 → **一次调用都不花**，并留下一个真实原因。
+
+    "没看"与"看过之后决定不动"必须分得开：前者说明今天没有值得开会的理由，
+    后者说明委员们看了。混在一起，"agent 多久没真正看过行情"就永远查不出来。
+    """
+    bars = quiet_bars(60)
+    llm = FakeLLM()
+
+    result = tc.decide("600519", bars[-1]["date"], bars, completion=llm,
+                       last_decision_at=bars[-2]["date"])   # 昨天刚开过会
+
+    assert llm.calls == [], "没有触发理由就不该发起任何调用"
+    assert result["decision"] == ec.DECISION_SKIP
+    assert result["skip_reason"] == ec.SKIP_AGENT_NO_NEW_INFORMATION
+    assert result["committee"]["llm_calls"] == 0
+    assert result["committee"]["gate"]["convened"] is False
+    assert result["committee"]["gate"]["reasons"] == []
+
+
+def test_the_skip_for_not_convening_still_leaves_evidence():
+    """没开会也要留那天的 bar 与指标：否则"没开会"与"没跑"长得一样。"""
+    bars = quiet_bars(60)
+    result = tc.decide("600519", bars[-1]["date"], bars, completion=FakeLLM(),
+                       last_decision_at=bars[-2]["date"])
+
+    snapshot = result["snapshot"]
+    assert snapshot is not None
+    assert snapshot["bar"]["date"] == bars[-1]["date"]
+    assert snapshot["indicators"]["ma_20"] is not None
+    assert snapshot["extra"]["gate"]["convened"] is False
+    assert result["price"] == round(bars[-1]["close"], 4), "价格照旧回传（结算要用）"
+
+
+def test_a_rule_signal_convenes_the_committee():
+    """规则给出买/卖 = 值得开会 —— 这一条**复用规则引擎本身**，不另写判断。
+
+    涨幅刻意压到 1%（低于 3% 的绝对波动下限）：这样触发理由**只有** rule_signal，
+    测的才是"规则信号"这一条，而不是顺手把波动异常也测了。
+    """
+    records = quiet_bars(40) + [{"date": "2026-02-14", "open": 100.5, "high": 101.2,
+                                 "low": 100.4, "close": 101.0, "volume": 1000}]
+    llm = FakeLLM()
+
+    result = tc.decide("600519", records[-1]["date"], records, completion=llm,
+                       config=crossing_config(), last_decision_at=records[-2]["date"])
+
+    assert result["committee"]["gate"]["reasons"] == [tc.TRIGGER_RULE_SIGNAL]
+    assert result["committee"]["gate"]["rule_signal"] == "buy"
+    assert len(llm.calls) == len(tc.ROLES)
+
+
+def test_a_volatility_spike_convenes_the_committee():
+    """异常波动/量能也要开会：那正是"行情变了"的信号。"""
+    bars = quiet_bars(40)
+    bars.append({"date": "2026-02-14", "open": 130.0, "high": 131.0, "low": 129.0,
+                 "close": 130.0, "volume": 1000})     # 平盘之后一天涨 30%
+    llm = FakeLLM()
+
+    result = tc.decide("600519", bars[-1]["date"], bars, completion=llm,
+                       last_decision_at=bars[-2]["date"])
+
+    assert tc.TRIGGER_VOLATILITY_SPIKE in result["committee"]["gate"]["reasons"]
+    assert len(llm.calls) == len(tc.ROLES)
+
+
+def test_a_spike_on_a_perfectly_flat_base_still_counts():
+    """**写测试时发现的真问题**：极静市场里近 20 日平均波动可能是 0，
+    而"2×0 仍然是 0" —— 于是"一片平静之后突然一跳"这种最该开会的日子反而不开会。
+    所以除了相对倍数，还要有一条**绝对**下限。"""
+    bars = quiet_bars(40)                       # 完全不动 → 平均波动 = 0
+    bars.append({"date": "2026-02-14", "open": 105.0, "high": 105.5, "low": 104.5,
+                 "close": 105.0, "volume": 1000})   # 涨 5%，平均波动仍是 0
+
+    reasons, gate = tc.convene_reasons(bars, bars[-1]["date"],
+                                       last_decision_at=bars[-2]["date"])
+
+    assert tc.TRIGGER_VOLATILITY_SPIKE in reasons
+    assert gate["average_move_pct"] == 0.0
+    assert gate["spike_basis"] in ("absolute", "both")
+
+
+def test_a_volume_spike_alone_is_enough():
+    bars = quiet_bars(40)
+    bars.append({"date": "2026-02-14", "open": 100.0, "high": 100.1, "low": 99.9,
+                 "close": 100.0, "volume": 9000})     # 量能 9 倍，价格没动
+    result = tc.decide("600519", bars[-1]["date"], bars, completion=FakeLLM(),
+                       last_decision_at=bars[-2]["date"])
+    assert tc.TRIGGER_VOLATILITY_SPIKE in result["committee"]["gate"]["reasons"]
+
+
+def test_holding_gets_a_tighter_clock_than_being_flat():
+    """持仓时风险敞口是真实的，所以盯得更紧。"""
+    bars = quiet_bars(60)
+    as_of = bars[-1]["date"]
+    four_days_ago = "2026-02-24"      # 与 as_of 相差 4 天
+
+    flat = tc.decide("600519", as_of, bars, completion=FakeLLM(), last_decision_at=four_days_ago)
+    holding = tc.decide("600519", as_of, bars, {"shares": 100, "entry_price": 99.0},
+                        completion=FakeLLM(), last_decision_at=four_days_ago)
+
+    assert flat["committee"]["gate"]["reasons"] == [], "空仓 4 天还不算久（上限 10 天）"
+    assert holding["committee"]["gate"]["reasons"] == [tc.TRIGGER_STALE], \
+        "持仓 4 天就该看了（上限 3 天）"
+    assert holding["committee"]["gate"]["stale_limit_days"] == tc.MAX_DAYS_HOLDING
+
+
+def test_never_briefed_before_convenes_instead_of_staying_silent():
+    """**fail-open**：传参缺失时宁可多花钱，也不要因为一个字段没传就永远沉默。"""
+    bars = quiet_bars(30)
+    result = tc.decide("600519", bars[-1]["date"], bars, completion=FakeLLM())
+
+    assert result["committee"]["gate"]["reasons"] == [tc.TRIGGER_FIRST_DECISION]
+    assert result["committee"]["llm_calls"] == len(tc.ROLES)
+
+
+def test_the_gate_detail_is_recorded_for_traceability():
+    """门控的判定细节要能被事后复查（为什么开/为什么不开）。"""
+    bars = quiet_bars(60)
+    result = tc.decide("600519", bars[-1]["date"], bars, completion=FakeLLM(),
+                       last_decision_at=bars[-2]["date"])
+    gate = result["committee"]["gate"]
+
+    assert gate["as_of"] == bars[-1]["date"]
+    assert gate["last_decision_at"] == bars[-2]["date"]
+    assert gate["days_since_last_decision"] == 1
+    assert gate["volume_ratio"] == 1.0
+    assert "today_move_pct" in gate
+
+
+def test_every_trigger_reason_is_in_the_closed_set():
+    for reason in tc.CONVENE_TRIGGERS:
+        assert isinstance(reason, str) and reason and reason.islower()
+    assert ec.SKIP_AGENT_NO_NEW_INFORMATION in ec.SKIP_REASONS
+    assert ec.SKIP_AGENT_NO_NEW_INFORMATION not in tc.CONVENE_TRIGGERS
+
+
+def test_describe_exposes_the_gate_so_it_can_be_seen():
+    described = tc.describe()
+    assert described["convene_triggers"] == list(tc.CONVENE_TRIGGERS)
+    assert described["stale_limits"]["holding_days"] < described["stale_limits"]["flat_days"]
+    assert described["skip_when_not_convened"] == ec.SKIP_AGENT_NO_NEW_INFORMATION
+
+
 def test_describe_exposes_roles_and_budgets_for_health():
     described = tc.describe()
     assert len(described["roles"]) == len(tc.ROLES)

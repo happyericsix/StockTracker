@@ -299,7 +299,7 @@ public class PaperTradingService {
         String decisionMode = ExecutionContract.normalizeDecisionMode(strategy.getDecisionMode());
         JsonNode result = ExecutionContract.DECISION_MODE_AGENT.equals(decisionMode)
                 ? strategyClient.agentDecide(strategy.getConfigJson(), strategy.getSymbol(),
-                        today.toString(), position)
+                        today.toString(), position, lastBriefingDate(strategy.getId()))
                 : strategyClient.evaluateBar(strategy.getConfigJson(), strategy.getSymbol(),
                         today.toString(), position);
         if (result == null) {
@@ -505,6 +505,16 @@ public class PaperTradingService {
                 ExecutionContract.SETTLEMENT_REALTIME, trigger);
     }
 
+    /** 最近一次真的开了会的日子（给门控用）。读不到返回 null（Python 侧按"从没开过"处理）。 */
+    private String lastBriefingDate(Long strategyId) {
+        try {
+            return paperTraceService == null ? null : paperTraceService.lastBriefingDate(strategyId);
+        } catch (Exception e) {
+            log.debug("读取上次开会日期失败 strategyId={}: {}", strategyId, e.getMessage());
+            return null;
+        }
+    }
+
     /**
      * 只写痕迹、不改账户（用于"这一轮什么都没做"的路径）。
      *
@@ -541,6 +551,26 @@ public class PaperTradingService {
         JsonNode positionConfig = config.get("position");
         String positionType = textOr(field(positionConfig, "type"), DEFAULT_POSITION_TYPE);
         BigDecimal sizePct = rate(field(positionConfig, "size_pct"), DEFAULT_SIZE_PCT);
+
+        // agent 模式下"动多大"由模型给（size_fraction ∈ (0,1]），但**上限归调用方**——
+        // trading_decision.py 的契约原话就是"上限由调用方（结算侧）裁决，不在这里放大"。
+        // 所以这里把模型的比例当作 percent 语义的 size_pct 用，再被策略配置的上限夹一次：
+        // 用户设的仓位约束永远压在模型之上，模型只能在它之内决定大小。
+        //
+        // 不认"非 agent 响应里的 size_fraction"：只有响应自己的指纹声明了 agent 才算数
+        // （口径以 Python 为准，读不到才退回策略声明的模式），否则规则那条路的语义一点不变。
+        BigDecimal agentSize = agentSizeFraction(strategy, result);
+        if (agentSize != null && agentSize.signum() > 0) {
+            BigDecimal cap = "percent".equals(positionType) ? sizePct : BigDecimal.ONE;  // full → 上限 100%
+            if (agentSize.compareTo(cap) > 0) {
+                // 夹住了就说话：否则"配置一直是绑定约束"这件事只会表现为
+                // "模型的仓位判断好像从来不起作用"，而这正是最容易被误读成模型无能的情形。
+                log.warn("Agent asked for size_fraction={} but strategy id={} caps it at {}; "
+                        + "using the cap", agentSize, strategy.getId(), cap);
+            }
+            sizePct = agentSize.min(cap);
+            positionType = "percent";
+        }
 
         String signal = textOr(result.get("signal"), "").toLowerCase(Locale.ROOT);
         BigDecimal price = Money.price(priceOf(result));
@@ -908,6 +938,27 @@ public class PaperTradingService {
     /** 配置里的费率/比例：百分数 → 小数（0.1 → 0.001）。缺省值走同一个入口，不两处各写一遍。 */
     private static BigDecimal rate(JsonNode node, double defaultPct) {
         return Money.ratePct(numberOr(node, defaultPct)).movePointLeft(2);
+    }
+
+    /**
+     * agent 决策里的仓位比例（{@code size_fraction}，本来就是小数，**不再除以 100**）。
+     *
+     * <p>两条不认账的规矩，都是为了"宁可不动，也不要按错的仓位动"：
+     * 只有响应自己的指纹声明 {@code decision_mode=agent} 才认（读不到指纹才退回策略声明的模式），
+     * 且值必须是 (0,1] 的数字 —— 读不懂就返回 {@code null}，让配置的仓位口径原样生效。
+     */
+    private static BigDecimal agentSizeFraction(Strategy strategy, JsonNode result) {
+        if (result == null || !result.isObject()) {
+            return null;
+        }
+        String mode = ExecutionContract.normalizeDecisionMode(textOrStatic(
+                result.path("fingerprint").path("decision_mode"),
+                strategy == null ? null : strategy.getDecisionMode()));
+        if (!ExecutionContract.DECISION_MODE_AGENT.equals(mode)) {
+            return null;
+        }
+        BigDecimal size = Money.ratePct(numberOr(result.get("size_fraction"), null));
+        return size != null && size.signum() > 0 && size.compareTo(BigDecimal.ONE) <= 0 ? size : null;
     }
 
     /** 数字字段：不是数字就用缺省值（JSON 里可能是 null / "N/A" / 字符串）。 */
