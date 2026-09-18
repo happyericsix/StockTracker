@@ -199,6 +199,7 @@ def test_same_fingerprint_is_comparable():
     ("adjust_mode", ec.ADJUST_QFQ),
     ("money_policy_version", 99),
     ("engine_version", "ffffffffffff"),
+    ("decision_mode", ec.DECISION_MODE_AGENT),
 ])
 def test_any_differing_field_blocks_comparison(field, value):
     """**核心规则**：口径不同就不可比 —— 宁可说"不可比"，也不硬凑一个差额。
@@ -206,6 +207,29 @@ def test_any_differing_field_blocks_comparison(field, value):
     allowed, reason = ec.compare_allowed(_fingerprint(), _fingerprint(**{field: value}))
     assert not allowed
     assert field in reason and "不可比" in reason
+
+
+def test_rule_and_agent_results_are_structurally_incomparable():
+    """这条是"把决策来源换掉"这件事的安全网。
+
+    换了决策方式之后，净值曲线在**同一个账户上**会分成两段：规则段与 agent 段。
+    把 decision_mode 放进指纹之后，这两段永远不会被当成同一条曲线来比较 ——
+    否则报告会拿"规则跑的 3 个月"去对"agent 跑的 3 个月"，而读者看不出它们不是一回事。
+    """
+    rule = ec.fingerprint_for(ec.SETTLEMENT_DAILY, decision_mode=ec.DECISION_MODE_RULE)
+    agent = ec.fingerprint_for(ec.SETTLEMENT_DAILY, decision_mode=ec.DECISION_MODE_AGENT)
+
+    allowed, reason = ec.compare_allowed(rule, agent)
+    assert not allowed
+    assert "decision_mode" in reason
+    assert rule.decision_mode == ec.DECISION_MODE_RULE, "默认必须是规则 —— 存量数据不会因为这次改动换口径"
+    assert agent.as_dict()["decision_mode"] == ec.DECISION_MODE_AGENT
+
+
+def test_an_unknown_decision_mode_is_normalised_not_guessed():
+    """认不出的决策来源**不许**默认成 rule：那会让一份来路不明的结果看起来像规则跑的。"""
+    fingerprint = ec.fingerprint_for(ec.SETTLEMENT_DAILY, decision_mode="half-human")
+    assert fingerprint.decision_mode.startswith(ec.UNKNOWN_PREFIX)
 
 
 def test_difference_lists_only_the_differing_fields():

@@ -52,6 +52,15 @@ public final class ExecutionContract {
     public static final String ADJUST_NONE = "none";
     public static final String ADJUST_QFQ = "qfq";
 
+    // ---------- 决策来源 ----------
+    // 为什么"谁做的决定"是口径的一部分：一条净值曲线在中间换了决策方式，它就是**两条曲线**。
+    // 放进指纹之后，"规则段"与"agent 段"会被 compareBlockReason 自动判成不可比 ——
+    // 而不是混成一条看不出问题的线。
+    /** 策略 DSL 的确定性规则。 */
+    public static final String DECISION_MODE_RULE = "rule";
+    /** 多角色 agent 辩论后给出的决策。 */
+    public static final String DECISION_MODE_AGENT = "agent";
+
     // ---------- 跳过原因（封闭集） ----------
     public static final String SKIP_MARKET_CLOSED = "market_closed";
     public static final String SKIP_SUSPENDED = "suspended";
@@ -68,6 +77,8 @@ public final class ExecutionContract {
     public static final String SKIP_RULE_NOT_MET = "rule_not_met";
     /** 信号与账户状态对不上（已持仓却收到买入信号 / 空仓却收到卖出信号）。 */
     public static final String SKIP_STATE_MISMATCH = "state_mismatch";
+    /** agent 的输出读不懂。真实原因，不是 unknown_* 兜底：频次高说明提示词或模型有问题。 */
+    public static final String SKIP_AGENT_UNPARSABLE = "agent_unparsable";
 
     // ---------- 归一与版本 ----------
     public static final String UNKNOWN_PREFIX = "unknown_";
@@ -106,11 +117,15 @@ public final class ExecutionContract {
     public static final List<String> ADJUST_MODES =
             List.of(ADJUST_NONE, ADJUST_QFQ);
 
+    public static final List<String> DECISION_MODES =
+            List.of(DECISION_MODE_RULE, DECISION_MODE_AGENT);
+
     public static final List<String> SKIP_REASONS = List.of(
             SKIP_MARKET_CLOSED, SKIP_SUSPENDED, SKIP_NO_BAR, SKIP_DATA_UNAVAILABLE,
             SKIP_WARMUP, SKIP_LIMIT_BLOCKED, SKIP_T1_BLOCKED, SKIP_EX_DIVIDEND_DAY,
             SKIP_INSUFFICIENT_CASH_FOR_ONE_LOT, SKIP_INSUFFICIENT_CASH,
-            SKIP_INVALID_PRICE, SKIP_RULE_NOT_MET, SKIP_STATE_MISMATCH);
+            SKIP_INVALID_PRICE, SKIP_RULE_NOT_MET, SKIP_STATE_MISMATCH,
+            SKIP_AGENT_UNPARSABLE);
 
     /** 结算类型 → 成交价口径。**唯一的映射处**（Python 侧同名映射）。 */
     public static final Map<String, String> FILL_BASIS_BY_SETTLEMENT = Map.of(
@@ -150,14 +165,16 @@ public final class ExecutionContract {
      * 人工维护版本号这件事一定会忘。
      */
     public record ExecutionFingerprint(String fillBasis, String adjustMode,
-                                       int moneyPolicyVersion, String engineVersion) {
+                                       int moneyPolicyVersion, String engineVersion,
+                                       String decisionMode) {
 
         public Map<String, Object> asMap() {
             return Map.of(
                     "fill_basis", fillBasis,
                     "adjust_mode", adjustMode,
                     "money_policy_version", moneyPolicyVersion,
-                    "engine_version", engineVersion);
+                    "engine_version", engineVersion,
+                    "decision_mode", decisionMode);
         }
 
         public boolean matches(ExecutionFingerprint other) {

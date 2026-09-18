@@ -47,7 +47,8 @@ def _java_ints():
 
 def _python_values():
     return (list(ec.DECISIONS) + list(ec.SETTLEMENT_KINDS) + list(ec.FILL_BASES)
-            + list(ec.ADJUST_MODES) + list(ec.SKIP_REASONS) + [ec.UNKNOWN_PREFIX])
+            + list(ec.ADJUST_MODES) + list(ec.SKIP_REASONS) + list(ec.DECISION_MODES)
+            + [ec.UNKNOWN_PREFIX])
 
 
 # ==================== 1. 值集合必须完全一致 ====================

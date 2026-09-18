@@ -90,6 +90,10 @@ SKIP_INSUFFICIENT_CASH = "insufficient_cash"
 SKIP_INVALID_PRICE = "invalid_price"
 SKIP_RULE_NOT_MET = "rule_not_met"                          # 规则未命中（只出现在聚合行）
 SKIP_STATE_MISMATCH = "state_mismatch"                      # 信号与账户状态对不上（已持仓却要买 / 空仓却要卖）
+# agent 的输出读不懂。**它必须是一个真实的原因，而不是 `unknown_*` 的兜底**：
+# "模型没说清楚"与"我们没实现这条路"是两件事 —— 前者要能被统计（频次高说明提示词或模型有问题），
+# 后者说明代码有缺口。混在一起就永远分不清该修哪边。
+SKIP_AGENT_UNPARSABLE = "agent_unparsable"
 
 SKIP_REASONS = (
     SKIP_MARKET_CLOSED,
@@ -105,6 +109,7 @@ SKIP_REASONS = (
     SKIP_INVALID_PRICE,
     SKIP_RULE_NOT_MET,
     SKIP_STATE_MISMATCH,
+    SKIP_AGENT_UNPARSABLE,
 )
 
 UNKNOWN_PREFIX = "unknown_"
@@ -234,6 +239,22 @@ def equity_identity_holds(cash: Any, shares: Any, price: Any, equity: Any) -> bo
     return computed == MONEY.equity(equity)
 
 
+# ==================== 决策来源（封闭集） ====================
+# <h3>为什么"谁做的决定"是口径的一部分</h3>
+# 一条净值曲线如果在中间换了决策方式，它就是**两条曲线**。
+# 把决策来源放进指纹，{@code compare_allowed} 会自动判它们不可比 ——
+# 而不是让"规则段"和"agent 段"混成一条看不出问题的线
+# （混起来最省事，代价是那条线的历史含义永远说不清）。
+
+DECISION_MODE_RULE = "rule"     # 策略 DSL 的确定性规则
+DECISION_MODE_AGENT = "agent"   # 多角色 agent 辩论后给出的决策
+DECISION_MODES = (DECISION_MODE_RULE, DECISION_MODE_AGENT)
+
+
+def normalize_decision_mode(raw: Any) -> str:
+    return normalize_enum(raw, DECISION_MODES, field="decision_mode")
+
+
 # ==================== 执行指纹 ====================
 
 @dataclass(frozen=True)
@@ -248,6 +269,7 @@ class ExecutionFingerprint:
     adjust_mode: str
     money_policy_version: int
     engine_version: str
+    decision_mode: str = DECISION_MODE_RULE
 
     def as_dict(self) -> dict:
         return {
@@ -255,6 +277,7 @@ class ExecutionFingerprint:
             "adjust_mode": self.adjust_mode,
             "money_policy_version": self.money_policy_version,
             "engine_version": self.engine_version,
+            "decision_mode": self.decision_mode,
         }
 
     def matches(self, other: "ExecutionFingerprint") -> bool:
@@ -309,13 +332,20 @@ def reset_engine_version_cache() -> None:
 
 
 def fingerprint_for(settlement_kind: Any, *, adjust_mode: Any = ADJUST_NONE,
-                    engine: Optional[str] = None) -> ExecutionFingerprint:
-    """按结算类型构造指纹。`adjust_mode` 由调用方声明（模拟盘默认不复权）。"""
+                    engine: Optional[str] = None,
+                    decision_mode: Any = DECISION_MODE_RULE) -> ExecutionFingerprint:
+    """按结算类型构造指纹。
+
+    `adjust_mode` / `decision_mode` 都由调用方**声明**（它才知道这批数字是怎么来的）：
+    模拟盘默认不复权；决策来源默认 rule，agent 袖套必须显式声明成 agent ——
+    否则两段曲线会被判成可比。
+    """
     return ExecutionFingerprint(
         fill_basis=fill_basis_for(settlement_kind),
         adjust_mode=normalize_adjust_mode(adjust_mode),
         money_policy_version=MONEY.version,
         engine_version=engine or engine_version(),
+        decision_mode=normalize_decision_mode(decision_mode),
     )
 
 
@@ -369,13 +399,15 @@ def build_snapshot(*, bar: dict, indicators: dict, params: dict,
     }
 
 
-def no_bar_facts(settlement_kind: Any, adjust_mode: Any = None) -> dict:
+def no_bar_facts(settlement_kind: Any, adjust_mode: Any = None,
+                 decision_mode: Any = DECISION_MODE_RULE) -> dict:
     """没有 bar 时的执行事实：快照为 `None`，但**口径仍要写清楚**。
 
     为什么错误分支也要带它：调用方（Java 结算）拿到一个没有口径的错误响应时，
     只能猜"这条记录属于哪个口径"，或者干脆不记 —— 两者都会让"为什么今天没动"变回无解。
     """
-    fingerprint = fingerprint_for(settlement_kind or "", adjust_mode=adjust_mode or "")
+    fingerprint = fingerprint_for(settlement_kind or "", adjust_mode=adjust_mode or "",
+                                  decision_mode=decision_mode)
     return {
         "fill_basis": fingerprint.fill_basis,
         "fills": {"close": None, "next_open": None},
@@ -392,6 +424,7 @@ def describe() -> dict:
         "fill_bases": list(FILL_BASES),
         "fill_basis_by_settlement": dict(FILL_BASIS_BY_SETTLEMENT),
         "adjust_modes": list(ADJUST_MODES),
+        "decision_modes": list(DECISION_MODES),
         "skip_reasons": list(SKIP_REASONS),
         "unknown_prefix": UNKNOWN_PREFIX,
         "snapshot_schema_version": SNAPSHOT_SCHEMA_VERSION,
