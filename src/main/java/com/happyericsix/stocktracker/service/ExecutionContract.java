@@ -74,6 +74,9 @@ public final class ExecutionContract {
     /** 枚举值的长度上限（与 Python 侧一致）。 */
     public static final int MAX_ENUM_CHARS = 32;
 
+    /** 请求体里声明结算类型的字段名（Python 侧 `app.py` 读同名键）。 */
+    public static final String SETTLEMENT_KIND_FIELD = "settlement_kind";
+
     public static final List<String> DECISIONS =
             List.of(DECISION_BUY, DECISION_SELL, DECISION_SKIP);
 

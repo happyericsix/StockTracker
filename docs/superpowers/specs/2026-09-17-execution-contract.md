@@ -1,6 +1,7 @@
 # 执行契约（冻结）· 2026-09-17
 
-> **状态**：已实现常量与测试，**尚未被结算路径使用**（第一步是冻结契约，第二步才接实现）。
+> **状态**：常量、指纹与**第一个消费者**（`evaluate-bar` 回传口径与快照）已实现；
+> Java 结算仍按 `close` 成交（与声明的口径一致），**成交行为未改变**。
 > **代码位置**：`python-data-service/agent/execution_contract.py`（Python 侧真相源）、
 > `src/main/java/com/happyericsix/stocktracker/service/ExecutionContract.java`（Java 侧对称）。
 > **测试**：`tests/test_execution_contract.py`、`tests/test_execution_contract_java.py`、`tests/test_money_policy.py`（46 个用例）。
@@ -87,14 +88,33 @@ snapshot = { schema_version, bar{...}, indicators{...}, params{...}, fingerprint
 - ❌ **不做双轨代码**（两套结算路径）：口径是数据属性（指纹），不是分支。
 - ❌ 本模块不做计算：指标求值仍在 `strategy_engine`（单一职责）。
 
-## 7. 下一步（按顺序）
+## 7. 进展与下一步
 
-1. **接第一个消费者**：`evaluate-bar` 回传快照（同时回当根收盘与下一根开盘，由结算层按声明选），
-   并配契约测试 —— 只有这样，"痕迹带口径"才不是空话；
-2. Java 侧结算改用 `BigDecimal` + 列改 `DECIMAL`（含迁移脚本与老数据四舍五入）；
-3. `paper_trade_trace` 落库（`decision`/`skip_reason`/`fingerprint`/`snapshot`）；
-4. 参考数据两项：**交易日历** 与 **ST 5% 涨跌停**；除权除息数据（P0 只做"跳过+标注"）；
-5. `PaperTradingService` 8 处静默 `return account` 逐处改为带 `skip_reason` 的痕迹。
+**已完成（第一步：接上第一个消费者）**
 
-> 说明：本步只冻结契约与常量，**尚未改动任何结算行为** —— diff 里没有一行影响现有成交逻辑，
-> 所以不需要回归跑批验证；等第 1 步接上消费者时，才开始需要真机对账。
+1. ✅ **`evaluate-bar` 回传口径与证据**（`strategy_engine.evaluate_bar` + `app.py` 端点）：
+   - `fill_basis` / `fingerprint`（含 `adjust_mode` 与推导出的 `engine_version`）出现在**每一条返回分支**上
+     —— 包括 `bar_date_missing`、数据不足（`idx < 20`）、无数据与异常分支；
+   - `fills = {close, next_open}`：两个价格都给（末根无下一根时显式为 `None`），
+     将来把日线切到"次日开盘"只需改映射与取价处，**不必再改契约**；
+   - `snapshot`：当根 bar 的 OHLC + 当时算出的指标值（**恰好是策略用到的那几个**，
+     由 `indicator_keys_for` 推导）+ `extra.matched_detail`（逐条件的类型/参数/是否命中）。
+     缺失的指标是 `None` 而不是 0 —— 0 会被误读成"指标值就是 0"；
+   - 复权口径的唯一真相源是 `akshare_client.ADJUST_MODE`（取数处），随结果一起回报。
+2. ✅ **Java 侧消费方接上**：`StrategyClient` 在两种结算路径上分别声明
+   `settlement_kind = daily / realtime`（口径映射仍只在契约里一处）。
+3. ✅ **顺手修掉一个真实 bug**：`PaperTradingService.applyBarResult` 原先在没有可用价格时
+   会带着 `price = 0` 一路走到 `updateEquityAndHighWatermark`，把"净值 = 现金 + 股数 × 0 = 现金"
+   写进账户 —— 一次瞬时取数失败就抹掉持仓市值，而净值现在还会写进客观事实通道**被长期记住**。
+   现在改为**跳过结算**（什么都不改）并按契约词表记 `skip_reason`
+   （`data_unavailable` / `invalid_price`）。有回归测试 `missingPriceSkipsSettlementInsteadOfZeroingEquity`。
+
+**测试**：契约 46 个 + 快照 11 个 + 端点 3 个（共 60 个相关用例）；Python 全量 569 passed；
+Java 全量 `BUILD SUCCESS`。
+
+**下一步**
+
+4. Java 侧结算改用 `BigDecimal` + 列改 `DECIMAL`（含迁移脚本与老数据四舍五入）；
+5. `paper_trade_trace` 落库（`decision` / `skip_reason` / `fingerprint` / `snapshot`）；
+6. 参考数据两项：**交易日历** 与 **ST 5% 涨跌停**；除权除息数据（P0 只做"跳过+标注"）；
+7. `PaperTradingService` 其余 7 处静默 `return account` 逐处改为带 `skip_reason` 的痕迹。

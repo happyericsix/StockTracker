@@ -1,5 +1,6 @@
 from __future__ import annotations
 import numpy as np
+from agent import execution_contract as ec
 from agent.strategy_schema import StrategyConfig
 
 def _sma(a, w):
@@ -270,8 +271,114 @@ def _annualized_return_pct(total_return, bars):
     return ((1 + total_return) ** (1 / years) - 1) * 100
 
 
-def evaluate_bar(config: dict, records: list[dict], date: str, position: dict | None) -> dict:
+def _indicator_values(ind, idx, config) -> dict:
+    """快照里要存的指标值：**恰好是这份策略用到的那几个**（由契约推导，不写死）。
+
+    没算出来的（数据不够长）一律 `None`，而不是 0 —— 0 会被当成"指标值就是 0"，
+    在回看窗口不足的场景里正是最危险的那种误读。
+    """
+    values = {}
+    if idx is None:
+        return {key: None for key in ec.indicator_keys_for(config)}
+    for key in ec.indicator_keys_for(config):
+        try:
+            if key == "close":
+                value = ind["closes"][idx]
+            elif key.startswith("ma_"):
+                value = _ma_for(ind, int(key[3:]))[idx]
+            elif key in ("macd_dif", "macd_dea", "rsi"):
+                value = ind[key][idx]
+            else:  # 契约里登记了、但这里没有对应取值方式 → 显式 None，不猜
+                values[key] = None
+                continue
+        except (KeyError, IndexError, ValueError):
+            values[key] = None
+            continue
+        values[key] = None if value is None or np.isnan(value) else float(ec.MONEY.price(value))
+    return values
+
+
+def _matched_detail(rule, ind, idx, position) -> list[dict]:
+    """逐条件的命中明细（类型 + 参数 + 是否命中）。
+
+    为什么要有它：`matched_conditions` 只有条件类型名，看不出"当时那根 bar 上这条到底成不成立"。
+    而"为什么这一刻成交"要能答到**每个条件**，否则只能写一段"大概是均线交叉"。
+    """
+    if idx is None:
+        return []
+    detail = []
+    for condition in rule.conditions:
+        params = {key: value for key, value in
+                  condition.model_dump(exclude_none=True).items() if key != "type"}
+        detail.append({"type": condition.type, "params": params,
+                       "hit": bool(_cond_met(condition, ind, idx, position))})
+    return detail
+
+
+def _execution_facts(cfg_dict, ind, records, idx, settlement_kind, adjust_mode) -> dict:
+    """把"这次结算按什么口径、用的哪根 bar、当时的指标是多少"一起回传（契约：口径随结果走）。
+
+    刻意在**每一条返回分支**上都带这份事实（包括 `bar_date_missing` 与数据不足）：
+    缺了它，调用方就只能猜"这条记录属于哪个口径"，而那正是本契约要消灭的问题。
+    """
+    fingerprint = ec.fingerprint_for(settlement_kind or "", adjust_mode=adjust_mode or "")
+    if idx is None:
+        # 没有 bar 时快照为空，但口径仍要写清楚（与 app.py 错误分支共用同一形状）
+        return ec.no_bar_facts(settlement_kind, adjust_mode)
+    fills = {"close": None, "next_open": None}
+    bar = dict(records[idx])
+    close = float(ind["closes"][idx])
+    fills["close"] = float(ec.MONEY.price(close))
+    if idx + 1 < len(records):
+        fills["next_open"] = float(ec.MONEY.price(records[idx + 1].get("open")))
+    snapshot = ec.build_snapshot(
+        bar=_snapshot_bar(bar),
+        indicators=_indicator_values(ind, idx, cfg_dict),
+        params=cfg_dict,
+        fingerprint=fingerprint,
+    )
+    return {
+        "fill_basis": fingerprint.fill_basis,
+        "fills": fills,
+        "fingerprint": fingerprint.as_dict(),
+        "snapshot": snapshot,
+    }
+
+
+def _snapshot_bar(record: dict) -> dict:
+    """快照里的那根 bar：数值字段一律转成数字。
+
+    为什么要转：真实数据源（腾讯接口）把 OHLC 和成交量给成**字符串**（`"1277.270"`）。
+    原样落库的话，读痕迹的人和模型看到的是一串带引号的数字 —— 既不能直接比大小，
+    也会让"7.2 与 7.20 是不是同一个"这种问题在渲染层重新出现。
+    转不了的（缺字段、非数字）保持原样，不猜。
+    """
+    bar = {}
+    for key in ("date", "open", "high", "low", "close", "volume"):
+        value = record.get(key)
+        if key == "date":
+            bar[key] = value
+            continue
+        try:
+            bar[key] = float(ec.MONEY.price(value))
+        except (TypeError, ValueError, ArithmeticError):
+            # ArithmeticError 不能漏：非数字字符串会让 Decimal 抛 InvalidOperation
+            # （它继承自 ArithmeticError 而不是 ValueError）—— 而"停牌日给一个 '—'"是真实数据里会出现的
+            bar[key] = value
+    return bar
+
+
+def evaluate_bar(config: dict, records: list[dict], date: str, position: dict | None,
+                 settlement_kind: str | None = None,
+                 adjust_mode: str | None = None) -> dict:
+    """评估某一天的信号，并回传"这次结算的执行口径 + 证据快照"。
+
+    `settlement_kind` / `adjust_mode` 由**调用方声明**（它才知道这是日线结算还是实时结算、
+    以及行情是按哪种复权口径取的）。缺省时不会去猜：契约会把它们归一成 `unknown_*`，
+    让"口径不明"这条记录自己显形，而不是悄悄按某个默认值成交。
+    """
     cfg = StrategyConfig.model_validate(config)
+    cfg_dict = cfg.model_dump(exclude_none=True)
     ind = compute_indicators(records)
     idx = next((i for i, d in enumerate(ind["dates"]) if d == date), None)
     if idx is None:
@@ -281,17 +388,23 @@ def evaluate_bar(config: dict, records: list[dict], date: str, position: dict | 
             idx = len(records) - 1
         else:
             return {"signal": "hold", "matched_conditions": [], "date": date,
-                    "bar_date_missing": True, "price": None}
+                    "bar_date_missing": True, "price": None,
+                    **_execution_facts(cfg_dict, ind, records, None, settlement_kind, adjust_mode)}
     if idx < 20:
         return {"signal": "hold", "matched_conditions": [], "date": date,
-                "price": float(ind["closes"][idx])}
+                "price": float(ind["closes"][idx]),
+                **_execution_facts(cfg_dict, ind, records, idx, settlement_kind, adjust_mode)}
     if position and position.get("shares", 0) > 0:
         ok, reasons = evaluate_rule(cfg.exit, ind, idx, position)
+        facts = _execution_facts(cfg_dict, ind, records, idx, settlement_kind, adjust_mode)
+        facts["snapshot"]["extra"]["matched_detail"] = _matched_detail(cfg.exit, ind, idx, position)
         return {"signal": "sell" if ok else "hold", "matched_conditions": reasons,
-                "date": date, "price": float(ind["closes"][idx])}
+                "date": date, "price": float(ind["closes"][idx]), **facts}
     ok, reasons = evaluate_rule(cfg.entry, ind, idx, None)
+    facts = _execution_facts(cfg_dict, ind, records, idx, settlement_kind, adjust_mode)
+    facts["snapshot"]["extra"]["matched_detail"] = _matched_detail(cfg.entry, ind, idx, None)
     return {"signal": "buy" if ok else "hold", "matched_conditions": reasons,
-            "date": date, "price": float(ind["closes"][idx])}
+            "date": date, "price": float(ind["closes"][idx]), **facts}
 
 
 # ==================== 真实化执行引擎（A 股近似规则） ====================

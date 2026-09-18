@@ -299,6 +299,19 @@ public class PaperTradingService {
 
         String signal = textOr(result.get("signal"), "").toLowerCase(Locale.ROOT);
         double price = doubleOr(result.get("price"), 0.0);
+        // 没有可用价格就**不结算**（原样返回，什么都不改）。
+        //
+        // 这里以前会带着 price=0 继续走到底部的 updateEquityAndHighWatermark，
+        // 于是"净值 = 现金 + 股数 × 0" = 现金 —— 一次瞬时取数失败就把持仓市值抹掉，
+        // 而净值现在还会写进客观事实通道被长期记住。跳过才是正确行为：
+        // 宁可不结算（并留下 skip 原因），也不要写一个错的净值。
+        if (price <= 0.0) {
+            log.warn("Skipping paper settlement for strategy id={} on {}: no usable price "
+                            + "(skip_reason={})", strategy.getId(), tradeDate,
+                    result.has("error") ? ExecutionContract.SKIP_DATA_UNAVAILABLE
+                            : ExecutionContract.SKIP_INVALID_PRICE);
+            return account;
+        }
         String reason = joinMatchedConditions(result.get("matched_conditions"));
         double cash = account.getCash() == null ? 0.0 : account.getCash();
 

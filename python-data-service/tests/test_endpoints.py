@@ -202,6 +202,67 @@ def test_health_reports_strategy_review():
     assert described["blocking"] is False
 
 
+# ==================== evaluate-bar 的执行口径（契约的消费者） ====================
+
+def test_evaluate_bar_endpoint_returns_basis_and_snapshot(monkeypatch):
+    """端到端：HTTP 层必须把**口径与证据快照**带回来，而不是只回一个裸的 price。
+
+    只有引擎层带快照是不够的 —— Java 是通过这个端点拿数据的，
+    少了这一步，"这条成交属于哪个口径"仍然无从记录。
+    """
+    from agent import execution_contract as ec
+
+    bars = make_bars(n=80)
+    monkeypatch.setattr(akshare_client, "get_history", lambda symbol, *a, **k: bars)
+
+    c = TestClient(main.app)
+    r = c.post("/api/v1/strategies/evaluate-bar", headers=HEADERS,
+               json={"strategy_json": VALID_STRATEGY, "settlement_kind": "daily",
+                     "date": bars[-1]["date"]})
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["fill_basis"] == ec.FILL_CLOSE
+    assert body["fills"]["close"] == bars[-1]["close"]
+    assert body["snapshot"]["schema_version"] == ec.SNAPSHOT_SCHEMA_VERSION
+    assert body["snapshot"]["bar"]["date"] == bars[-1]["date"]
+    assert sorted(body["snapshot"]["indicators"]) == ec.indicator_keys_for(VALID_STRATEGY)
+    # 复权口径来自取数处（akshare_client.ADJUST_MODE），随结果一起回来
+    assert body["fingerprint"]["adjust_mode"] == akshare_client.ADJUST_MODE
+
+
+def test_evaluate_bar_endpoint_honours_the_declared_settlement_kind(monkeypatch):
+    from agent import execution_contract as ec
+
+    bars = make_bars(n=80)
+    monkeypatch.setattr(akshare_client, "get_history", lambda symbol, *a, **k: bars)
+
+    c = TestClient(main.app)
+    r = c.post("/api/v1/strategies/evaluate-bar", headers=HEADERS,
+               json={"strategy_json": VALID_STRATEGY, "settlement_kind": "realtime",
+                     "date": bars[-1]["date"]})
+
+    assert r.json()["fill_basis"] == ec.FILL_REALTIME_LAST
+
+
+def test_evaluate_bar_endpoint_without_data_still_reports_the_basis(monkeypatch):
+    """没有数据时快照为空，但**口径仍要写清楚**：否则这条记录只能靠猜。"""
+    from agent import execution_contract as ec
+
+    monkeypatch.setattr(akshare_client, "get_history", lambda symbol, *a, **k: None)
+
+    c = TestClient(main.app)
+    r = c.post("/api/v1/strategies/evaluate-bar", headers=HEADERS,
+               json={"strategy_json": VALID_STRATEGY, "settlement_kind": "daily"})
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["error"] == "insufficient history data"
+    assert body["snapshot"] is None
+    assert body["fill_basis"] == ec.FILL_CLOSE
+    assert body["fingerprint"]["fill_basis"] == ec.FILL_CLOSE
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

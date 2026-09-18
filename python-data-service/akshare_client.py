@@ -281,6 +281,12 @@ def get_quotes(symbols) -> dict:
     return result
 
 
+# 行情复权口径（**唯一真相源**）：既是取数时的参数，也是执行契约里报告的 `adjust_mode`。
+# 为什么做成常量而不是散在 f-string 里：痕迹要记录"这条记录用的是哪种复权口径"，
+# 而口径一旦改变（除权后前复权价会被重算），历史数据的解释依据就变了。
+ADJUST_MODE = "qfq"
+
+
 def get_history(symbol: str, start_date: str = "", end_date: str = "", period: str = "day") -> Optional[list[dict]]:
     """获取 K 线历史（腾讯 ifzq API），带 1 小时缓存。
 
@@ -310,7 +316,7 @@ def get_history(symbol: str, start_date: str = "", end_date: str = "", period: s
             return None
         code = normalize_symbol(resolved)
         url = "http://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-        params = {"param": f"{code},{period},,,500,qfq"}
+        params = {"param": f"{code},{period},,,500,{ADJUST_MODE}"}
         r = requests.get(url, params=params, headers=HEADERS, timeout=15)
         data = r.json()
 

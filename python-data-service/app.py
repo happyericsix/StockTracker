@@ -727,12 +727,21 @@ async def backtest_strategy_endpoint(req: Request):
 
 @app.post("/api/v1/strategies/evaluate-bar")
 async def evaluate_bar_endpoint(req: Request):
+    """评估某一天的信号。响应里带**执行口径**（fill_basis / fingerprint）与证据快照。
+
+    `settlement_kind` 由调用方声明（"daily" 或 "realtime"）——它决定成交价口径，
+    而口径必须随结果一起落库。缺省时不猜：契约会归一成 `unknown_*`，
+    让"口径不明"这条记录自己显形（`agent/execution_contract.py`）。
+    """
+    from agent import execution_contract as ec
     from agent.strategy_schema import validate_strategy_config
     from agent.strategy_engine import evaluate_bar
-    from akshare_client import get_history
+    from akshare_client import ADJUST_MODE, get_history
     from akshare_client import get_minute_kline
+    settlement_kind = None
     try:
         data = await req.json()
+        settlement_kind = str(data.get("settlement_kind") or "").strip() or None
         cfg, err = validate_strategy_config(data.get("strategy_json", {}))
         if err:
             return {"valid": False, "error": err}
@@ -743,20 +752,24 @@ async def evaluate_bar_endpoint(req: Request):
         else:
             records = await asyncio.to_thread(get_history, symbol)
         if not records:
-            return {"error": "insufficient history data", "signal": "hold", "matched_conditions": []}
+            # 无数据也要带口径：否则调用方只能猜这条记录属于哪个口径，或者干脆不记
+            return {"error": "insufficient history data", "signal": "hold", "matched_conditions": [],
+                    **ec.no_bar_facts(settlement_kind, ADJUST_MODE)}
         bar_time = str(records[-1].get("date", ""))
         position = data.get("position")
         if isinstance(position, dict) and "quantity" in position and "shares" not in position:
             position = dict(position)
             position["shares"] = position["quantity"]
         result = await asyncio.to_thread(
-            evaluate_bar, cfg.model_dump(), records, data.get("date", "") or bar_time, position
+            evaluate_bar, cfg.model_dump(), records, data.get("date", "") or bar_time, position,
+            settlement_kind, ADJUST_MODE
         )
         result["bar_time"] = bar_time
         return result
     except Exception as e:
         logger.error(f"strategy evaluate-bar error: {e}", exc_info=True)
-        return {"error": "行情评估失败，请稍后重试", "signal": "hold", "matched_conditions": []}
+        return {"error": "行情评估失败，请稍后重试", "signal": "hold", "matched_conditions": [],
+                **ec.no_bar_facts(settlement_kind, ADJUST_MODE)}
 
 
 # ==================== 同花顺扫码登录 ====================

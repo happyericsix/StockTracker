@@ -365,6 +365,21 @@ def build_snapshot(*, bar: dict, indicators: dict, params: dict,
     }
 
 
+def no_bar_facts(settlement_kind: Any, adjust_mode: Any = None) -> dict:
+    """没有 bar 时的执行事实：快照为 `None`，但**口径仍要写清楚**。
+
+    为什么错误分支也要带它：调用方（Java 结算）拿到一个没有口径的错误响应时，
+    只能猜"这条记录属于哪个口径"，或者干脆不记 —— 两者都会让"为什么今天没动"变回无解。
+    """
+    fingerprint = fingerprint_for(settlement_kind or "", adjust_mode=adjust_mode or "")
+    return {
+        "fill_basis": fingerprint.fill_basis,
+        "fills": {"close": None, "next_open": None},
+        "fingerprint": fingerprint.as_dict(),
+        "snapshot": None,
+    }
+
+
 def describe() -> dict:
     """给 `/health` 与调试用：**当前生效**的口径与常量（不做运行时可变的配置）。"""
     return {

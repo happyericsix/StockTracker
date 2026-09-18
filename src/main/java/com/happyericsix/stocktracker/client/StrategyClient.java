@@ -1,5 +1,6 @@
 package com.happyericsix.stocktracker.client;
 
+import com.happyericsix.stocktracker.service.ExecutionContract;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -47,6 +48,8 @@ public class StrategyClient {
         body.put("strategy_json", raw(configJson));
         body.put("symbol", symbol);
         body.put("date", date);
+        // 声明结算类型：它决定成交价口径（daily → close），而口径必须随结果一起落库。
+        body.put(ExecutionContract.SETTLEMENT_KIND_FIELD, ExecutionContract.SETTLEMENT_DAILY);
         if (position != null) body.put("position", position);
         return post("/api/v1/strategies/evaluate-bar", body);
     }
@@ -56,6 +59,9 @@ public class StrategyClient {
         body.put("strategy_json", raw(configJson));
         body.put("symbol", symbol);
         body.put("period", "5");
+        // 实时结算用盘中最新价成交（realtime_last）：它与回测口径**不同**，
+        // 所以更要显式声明，否则两条路径的记录会混在一起且无法区分。
+        body.put(ExecutionContract.SETTLEMENT_KIND_FIELD, ExecutionContract.SETTLEMENT_REALTIME);
         if (position != null) body.put("position", position);
         return post("/api/v1/strategies/evaluate-bar", body);
     }

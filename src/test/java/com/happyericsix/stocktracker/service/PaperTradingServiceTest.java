@@ -20,6 +20,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.transaction.PlatformTransactionManager;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 import java.time.LocalDate;
 import java.util.List;
@@ -28,6 +29,7 @@ import java.util.Optional;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -302,5 +304,48 @@ class PaperTradingServiceTest {
         // 收益率口径在服务里算，不让调用方各算一遍：买满仓后净值等于本金
         assertEquals("0", sent.get(ObjectiveFactKeys.PAPER_RETURN_PCT).getObject());
         assertTrue(sent.containsKey(ObjectiveFactKeys.PAPER_LAST_EVAL_AT));
+    }
+
+    /**
+     * 取数失败时**跳过结算**，绝不能把净值砸到现金。
+     *
+     * <p>以前会带着 {@code price=0} 一路走到 {@code updateEquityAndHighWatermark}，
+     * 于是"净值 = 现金 + 股数 × 0 = 现金" —— 一次瞬时取数失败就抹掉持仓市值，
+     * 而净值现在还会写进客观事实通道被**长期记住**（假装那天的净值就是现金）。
+     */
+    @Test
+    void missingPriceSkipsSettlementInsteadOfZeroingEquity() {
+        String configJson = "{\"initial_capital\":10000.0,"
+                + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0},"
+                + "\"position\":{\"type\":\"full\",\"size_pct\":100.0}}";
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("MACD cross").symbol("AAPL")
+                .configJson(configJson).user(user).paperEnabled(true).build();
+        PaperAccount account = PaperAccount.builder()
+                .id(5L).user(user).strategy(strategy)
+                .initialCapital(10000.0).cash(0.0).shares(1000.0).avgCost(10.0)
+                .equity(12345.0).highWatermark(12.0).build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.of(account));
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        ObjectNode result = mapper.createObjectNode();
+        result.put("signal", "hold");
+        result.putNull("price");
+        result.put("error", "insufficient history data");
+        when(strategyClient.evaluateBar(eq(configJson), eq("AAPL"), anyString(), isNull()))
+                .thenReturn(result);
+
+        paperTradingService.evaluateDaily();
+
+        assertEquals(12345.0, account.getEquity(), 1e-9, "取数失败时净值不能被砸到 0");
+        assertEquals(1000.0, account.getShares(), 1e-9);
+        assertEquals(0.0, account.getCash(), 1e-9);
+        assertNull(account.getLastEvalAt(), "跳过结算就不该写 lastEvalAt");
     }
 }
