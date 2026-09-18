@@ -52,6 +52,17 @@ public class Message {
     @Column(name = "is_read", nullable = false)
     private Boolean read = false;//是否已读
 
+    /**
+     * 幂等键：**同一条消息只应存在一条**（报告重跑、任务重试都靠它）。
+     *
+     * <p>为什么放在消息表上而不是另建一张投递表：报告也是一种消息，
+     * "用户会看到的东西"只该有一个真相源。聊天消息不设键（NULL）——
+     * MySQL 的唯一索引允许多个 NULL，所以"人可以反复说同一句话"不受影响。
+     * 键的形状由各自的发送方定义（见 {@code PaperReviewReportService.dailyDedupeKey}）。
+     */
+    @Column(name = "dedupe_key", length = 190, unique = true)
+    private String dedupeKey;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
 

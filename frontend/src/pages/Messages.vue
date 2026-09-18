@@ -28,6 +28,7 @@ const timeRange = ref('all')         // '7d' / '30d' / '90d' / 'all'
 
 const tabs = [
   { key: 'all', label: '全部' },
+  { key: 'report', label: '复盘' },
   { key: 'alert', label: '预警' },
   { key: 'chat', label: '聊天' }
 ]
@@ -45,6 +46,8 @@ const typeMeta = (type) => {
     case 'ALERT': return { icon: '🔔', label: '预警提醒' }
     case 'CHAT_BOT': return { icon: '🤖', label: '智能助手' }
     case 'CHAT_USER': return { icon: '💬', label: '我' }
+    // 盘后复盘：内容由代码确定性拼装（痕迹 + 账户 + 样本外验证结论），不是模型写的
+    case 'PAPER_REPORT': return { icon: '📊', label: '模拟盘复盘' }
     default: return { icon: '📌', label: '系统通知' }
   }
 }
@@ -98,6 +101,9 @@ const filtered = computed(() => {
   if (activeTab.value === 'alert') {
     return messages.value.filter((m) => m.type === 'ALERT')
   }
+  if (activeTab.value === 'report') {
+    return messages.value.filter((m) => m.type === 'PAPER_REPORT')
+  }
   if (activeTab.value === 'chat') {
     return messages.value.filter((m) => m.type === 'CHAT_BOT' || m.type === 'CHAT_USER')
   }
@@ -141,6 +147,8 @@ const loadPage = async () => {
   try {
     const params = { page: page.value, size }
     if (activeTab.value === 'alert') params.type = 'ALERT'
+    // 复盘：单一 type，服务端过滤能正确分页（客户端过滤会让"加载更多"漏掉被过滤掉的条数）
+    if (activeTab.value === 'report') params.type = 'PAPER_REPORT'
     if (activeTab.value === 'chat') params.type = 'CHAT_USER,CHAT_BOT'  // 暂不支持 IN
     // 简化为：tab=chat 传 null 让后端全量返回，客户端过滤
     if (activeTab.value === 'chat') delete params.type

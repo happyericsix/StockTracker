@@ -23,11 +23,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <h3>为什么必须有这一层</h3>
  * 单测用的是 Mockito 替身，它不会告诉你：{@code DECIMAL} 列会不会被截断、
- * {@code LONGTEXT} 里的中文快照会不会变问号、190 字符的唯一键在 utf8mb4 下建不建得起来、
+ * {@code LONGTEXT} 里的中文快照会不会变问号、190 字符的唯一键建不建得起来、
  * 唯一约束冲突时到底是抛异常还是静默插入第二行。
  * 这些恰恰是痕迹这种东西最容易悄悄坏掉的地方 —— 而它坏掉时看起来一切正常。
  *
- * <p>用 {@code @Transactional} 包住：写完回滚，不往开发库里留测试数据。
+ * <p><b>跑在哪个库上</b>：测试数据源是 H2 内存库（{@code src/test/resources/application.properties}），
+ * 生产是 MySQL。这里证明的是 JPA 映射与约束语义；MySQL 侧的建表由启动时的
+ * {@code ddl-auto=update} 负责。两层各自负责自己那一部分，不要互相冒充。
+ *
+ * <p>用 {@code @Transactional} 包住：写完回滚，不往库里留测试数据。
  */
 @SpringBootTest
 @Transactional

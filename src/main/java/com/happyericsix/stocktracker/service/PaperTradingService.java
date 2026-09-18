@@ -55,9 +55,19 @@ public class PaperTradingService {
     /** 客观事实写入（W1）。允许为 null：单测没有替身，且"记不进记忆"不该影响结算。 */
     private final MemoryFactService memoryFactService;
     private final MemoryService memoryService;
+    /** 盘后复盘报告。允许为 null（单测），失败只是少一条消息。 */
+    private final PaperReviewReportService paperReviewReportService;
+    /** 样本外验证（周频）。允许为 null：单测里没有这个替身，周任务本身也不该被单测触发。 */
+    private final StrategyService strategyService;
     private final ObjectMapper mapper = new ObjectMapper();
     private final TransactionTemplate transactionTemplate;
 
+    /**
+     * 单一构造函数：**不要为了"测试方便"再加几个重载**。
+     * Spring 遇到多个构造函数且没有 {@code @Autowired} 时会去找无参构造，直接起不来
+     * （实测踩过：三个重载 → {@code NoSuchMethodException: <init>()} → 整个应用上下文挂掉）。
+     * 可选依赖（报告、验证）允许为 null，用 null 判断兜住，而不是靠另一个构造函数。
+     */
     public PaperTradingService(StrategyRepository strategyRepository,
                                PaperAccountRepository paperAccountRepository,
                                PaperTradeRepository paperTradeRepository,
@@ -66,7 +76,9 @@ public class PaperTradingService {
                                UserRepository userRepository,
                                PlatformTransactionManager transactionManager,
                                MemoryFactService memoryFactService,
-                               MemoryService memoryService) {
+                               MemoryService memoryService,
+                               PaperReviewReportService paperReviewReportService,
+                               StrategyService strategyService) {
         this.strategyRepository = strategyRepository;
         this.paperAccountRepository = paperAccountRepository;
         this.paperTradeRepository = paperTradeRepository;
@@ -75,6 +87,8 @@ public class PaperTradingService {
         this.userRepository = userRepository;
         this.memoryFactService = memoryFactService;
         this.memoryService = memoryService;
+        this.paperReviewReportService = paperReviewReportService;
+        this.strategyService = strategyService;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
@@ -119,10 +133,17 @@ public class PaperTradingService {
         for (Strategy strategy : strategies) {
             try {
                 Long strategyId = strategy.getId();
-                transactionTemplate.execute(status -> {
-                    evaluateStrategy(strategyId, today);
-                    return null;
-                });
+                PaperAccount settled = transactionTemplate.execute(status -> evaluateStrategy(strategyId, today));
+                // 盘后复盘放在结算事务**提交之后**：报告读的是已落库的痕迹与账户，
+                // 而报告这一步再怎么出问题，都不可能回滚掉当天的真实成交
+                // （发消息用的是自己的独立事务，见 MessageService.saveReport）。
+                if (settled != null && paperReviewReportService != null) {
+                    transactionTemplate.execute(status -> {
+                        Strategy fresh = strategyRepository.findById(strategyId).orElse(null);
+                        paperReviewReportService.composeDailyReport(fresh, settled, today);
+                        return null;
+                    });
+                }
             } catch (Exception e) {
                 log.error("Paper settlement failed for strategy id={}", strategy.getId(), e);
             }
@@ -140,6 +161,38 @@ public class PaperTradingService {
                 });
             } catch (Exception e) {
                 log.error("Realtime paper settlement failed for strategy id={}", strategy.getId(), e);
+            }
+        }
+    }
+
+    /**
+     * 每周复盘：先重跑一次**样本外验证**，再发空转期摘要。
+     *
+     * <h3>为什么验证是每周而不是每天</h3>
+     * ① 换票换段的结论不会因为今天多了一根 K 线就变，每天重跑是纯浪费（每次 9 只票的取数）；
+     * ② 更重要的是**别让报告变成每天都换一个数字的东西** —— 那样用户学到的教训是
+     * "这些数字不用认真看"。周频 + 明确的"上次验证是哪天"，比日频的噪声更有信息量。
+     *
+     * <p>两步都各自 try/catch：验证失败不该挡掉报告（报告里正会写"这次验证没有可用样本"）。
+     */
+    public void runWeeklyReview() {
+        LocalDate today = LocalDate.now();
+        for (Strategy strategy : strategyRepository.findByPaperEnabledTrue()) {
+            try {
+                if (strategyService != null) {
+                    strategyService.verifyMatrix(strategy.getUser(), strategy);
+                }
+            } catch (Exception e) {
+                log.error("Weekly verification failed for strategy id={}", strategy.getId(), e);
+            }
+            try {
+                if (paperReviewReportService != null) {
+                    PaperAccount account = paperAccountRepository.findByStrategyId(strategy.getId())
+                            .orElse(null);
+                    paperReviewReportService.composeIdleWeeklyReport(strategy, account, today);
+                }
+            } catch (Exception e) {
+                log.error("Weekly idle report failed for strategy id={}", strategy.getId(), e);
             }
         }
     }

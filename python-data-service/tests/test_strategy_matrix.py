@@ -210,12 +210,17 @@ def test_matrix_covers_every_symbol_and_survives_missing_data():
 
 
 def test_matrix_exposes_the_contract_basis_for_the_report():
-    """报告必须能说明"这些数字是哪个复权口径、切了几段、" —— 否则表本身不可解释。"""
+    """报告必须能说明"这些数字是哪个复权口径、哪个引擎、切了几段" —— 否则表本身不可解释。
+
+    这一条是有来历的：验证结论会写进客观事实、被盘后复盘引用，
+    而一份不说口径的结论没法跟后来的数字对比（"是变好了还是换了个算法"）。
+    """
     matrix = evaluate_strategy_matrix(CONFIG, {"AAA": make_bars(180)}, segments=3,
                                       adjust_mode="qfq", start_date="", end_date="")
     assert matrix["adjust_mode"] == "qfq"
     assert matrix["segments_requested"] == 3
     assert matrix["summary"]["segments_valid"] == 3
+    assert len(matrix["engine_version"]) == 12, matrix["engine_version"]
 
 
 # ==================== 6. 预热期：0 笔成交的两种不同意思 ====================

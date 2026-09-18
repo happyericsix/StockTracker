@@ -297,6 +297,49 @@ public class MemoryFactService {
         return out;
     }
 
+    /**
+     * 某个 subject 下若干谓词的**当前有效值**（一次查询拿一组，供服务侧拼装用）。
+     *
+     * <h3>为什么是"当前有效"而不是"最新一行"</h3>
+     * 这两件事只有在"没人取代过"时才相同。事实通道的设计是"改口 = 追加 + 指向旧的"，
+     * 所以"最新一行"可能是已经作废的那条 —— 按它渲染出来的报告会引用一个**曾经**的结论。
+     * 判断当前有效只有一处口径：{@code findActiveByKey}（没有任何行指向它）。
+     *
+     * <p>返回值里没有的键 = 没有这条事实。**刻意不返回 null 占位**：
+     * "没有记录"和"记录为空"是两件事，调用方必须分开处理（报告里一个说"未验证"，
+     * 另一个说"验证过，值是空"）。
+     */
+    public Map<String, String> activeFactValues(Long userId, String subject, List<String> predicates) {
+        Map<String, String> values = new LinkedHashMap<>();
+        if (userId == null || isBlank(subject) || predicates == null || predicates.isEmpty()) {
+            return values;
+        }
+        for (String predicate : predicates) {
+            if (isBlank(predicate)) {
+                continue;
+            }
+            List<MemoryFact> active = factRepo.findActiveByKey(userId, subject.trim(), predicate.trim());
+            if (active.isEmpty()) {
+                continue;
+            }
+            // 正常状态最多一条；真出现多条时取 recordedAt 最新的那条（并留下痕迹，不静默）
+            MemoryFact latest = active.get(0);
+            for (MemoryFact candidate : active) {
+                LocalDateTime a = candidate.getRecordedAt();
+                LocalDateTime b = latest.getRecordedAt();
+                if (a != null && (b == null || a.isAfter(b))) {
+                    latest = candidate;
+                }
+            }
+            if (active.size() > 1) {
+                log.warn("事实键上有多条当前有效记录 subject={} predicate={} count={}",
+                        subject, predicate, active.size());
+            }
+            values.put(predicate.trim(), latest.getFactValue());
+        }
+        return values;
+    }
+
     private boolean matchesSymbol(MemoryFact fact, String symbol) {
         String target = symbol.trim().toLowerCase(Locale.ROOT);
         String subject = fact.getSubject() == null ? "" : fact.getSubject().toLowerCase(Locale.ROOT);

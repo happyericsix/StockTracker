@@ -447,6 +447,8 @@ def _compact_matrix(matrix: dict) -> dict:
         "valid": True,
         "symbols": matrix.get("symbols"),
         "adjust_mode": matrix.get("adjust_mode"),
+        # 口径随结论走：模型在报告里引用这些数字时要能说明"是哪个引擎算的"
+        "engine_version": matrix.get("engine_version"),
         "start_date": matrix.get("start_date"),
         "end_date": matrix.get("end_date"),
         "segments_requested": matrix.get("segments_requested"),

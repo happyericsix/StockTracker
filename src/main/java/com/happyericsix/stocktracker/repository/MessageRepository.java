@@ -53,6 +53,9 @@ public interface MessageRepository extends JpaRepository<Message, Long> {
 
     Optional<Message> findByIdAndUserId(Long id, Long userId);
 
+    /** 幂等键查重：报告重跑、任务重试都先问它。 */
+    Optional<Message> findByDedupeKey(String dedupeKey);
+
     /** 全部已读；用原生 SQL 避免 read 列名歧义 */
     @Modifying
     @Query(value = "UPDATE messages SET is_read = true WHERE user_id = :userId AND is_read = false", nativeQuery = true)

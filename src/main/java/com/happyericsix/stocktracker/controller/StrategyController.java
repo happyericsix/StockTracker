@@ -120,4 +120,17 @@ public class StrategyController {
         return Result.success(
                 paperTradingService.getTracesForDay(authentication.getName(), id, date));
     }
+
+    /**
+     * 手动跑一次样本外验证（多标的 × 多时段 + 成本归因）。
+     *
+     * <p>与周频自动验证**同一个入口**：结论一致，且都会覆盖客观事实里的那一组键 ——
+     * 两条路径各写一份数字，迟早会出现"报告引用的结论和手动跑的对不上"。
+     */
+    @PostMapping("/{id}/verify")
+    public Result<JsonNode> verifyStrategy(
+            @PathVariable Long id,
+            Authentication authentication) {
+        return Result.success(strategyService.verifyMatrix(authentication.getName(), id));
+    }
 }

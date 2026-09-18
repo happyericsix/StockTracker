@@ -70,6 +70,22 @@ public final class ObjectiveFactKeys {
     public static final String PAPER_RETURN_PCT = "paper_return_pct";
     /** 模拟盘：最近一次结算时间 */
     public static final String PAPER_LAST_EVAL_AT = "paper_last_eval_at";
+    // —— 样本外验证（多标的 × 多时段）：**"这条规则到底行不行"的可复算回答** ——
+    // 为什么它必须进客观事实：盘后复盘要引用它，P2 的讨论协议要拿它当裁决依据，
+    // 而"引用"的前提是有一份**带时间戳、可被替代、可查历史**的记录。
+    // 写在对话里的话做不到这件事（下一轮就找不到了）。
+    /** 验证：这次验证是何时跑的 */
+    public static final String VERIFY_AT = "verify_at";
+    /** 验证：有效格子数（标的 × 时段，扣掉预热/买不起一手的格子）＝**样本量** */
+    public static final String VERIFY_VALID_CELLS_COUNT = "verify_valid_cells_count";
+    /** 验证：跑赢买入持有的格子数 */
+    public static final String VERIFY_BEAT_BUY_AND_HOLD_COUNT = "verify_beat_buy_and_hold_count";
+    /** 验证：平均超额收益（%） */
+    public static final String VERIFY_AVG_EXCESS_PCT = "verify_avg_excess_pct";
+    /** 验证：摩擦平均占本金的比例（%）—— 亏损里有多少是换手磨掉的 */
+    public static final String VERIFY_FEE_DRAG_PCT = "verify_fee_drag_pct";
+    /** 验证：引擎版本（口径之一；与回测/模拟盘不同则数字不可比） */
+    public static final String VERIFY_ENGINE_VERSION = "verify_engine_version";
     // <<< OBJECTIVE_PREDICATES
 
     /**

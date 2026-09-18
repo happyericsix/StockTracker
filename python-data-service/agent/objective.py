@@ -87,6 +87,15 @@ PREDICATES = (
     "paper_shares",
     "paper_return_pct",
     "paper_last_eval_at",
+    # —— 样本外验证（多标的 × 多时段）：由 Java 侧跑完矩阵后写入 ——
+    # "这条规则到底行不行"的可复算回答。放进客观事实通道是为了能被**引用**：
+    # 盘后复盘引用它，讨论协议拿它当裁决依据 —— 而写在对话里的话下一轮就找不到了。
+    "verify_at",
+    "verify_valid_cells_count",
+    "verify_beat_buy_and_hold_count",
+    "verify_avg_excess_pct",
+    "verify_fee_drag_pct",
+    "verify_engine_version",
 )
 PREDICATE_SET = frozenset(PREDICATES)
 
@@ -94,6 +103,9 @@ PREDICATE_SET = frozenset(PREDICATES)
 #   paper_flat_days / paper_max_drawdown_pct
 #      —— 需要"每日净值序列"才能算（PaperAccount 只存当前值），
 #         等 paper_equity_snapshot 落地后再加。
+#   verify_* 的逐标的明细（每个标的/时段一行）
+#      —— 客观事实是标量。明细留在 backtest-matrix 的响应与痕迹里，
+#         事实通道只留**汇总的样本量与结论**，否则取代链会被几十个键撑爆。
 #   advice_last_outcome / advice_prediction_hit
 #      —— 属于建议闭环（采纳/拒绝、预测是否命中），等教练角色落地后再加。
 # 先占位的键是最糟的选择：它会让"这条通道写入了什么"变得不可回答。

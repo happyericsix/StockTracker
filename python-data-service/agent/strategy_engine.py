@@ -945,6 +945,9 @@ def evaluate_strategy_matrix(config: dict, records_by_symbol: dict, *, segments:
         "start_date": start_date or None,
         "end_date": end_date or None,
         "adjust_mode": adjust_mode,
+        # 口径随结果走：验证结论会被写进客观事实并在盘后复盘里被引用，
+        # 而"这条结论是哪个引擎算的、哪种复权"不写下来，它就没法跟后来的数字对比。
+        "engine_version": ec.engine_version(),
         "per_symbol": per_symbol,
         "cells_total": len(cells),
         # 有效格子的定义只有一处（summarize_segments），这里直接引用 ——

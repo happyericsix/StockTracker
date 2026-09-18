@@ -185,6 +185,50 @@ public class MessageService {
     }
 
     /**
+     * 发一条**幂等**的系统消息（报告类）。
+     *
+     * <h3>为什么报告需要幂等键</h3>
+     * 报告由定时任务产生，而定时任务会被重跑：应用重启、手工补跑、同一份数据被两个入口各处理一次。
+     * 没有键的后果不是"多一条消息"，而是<b>用户开始忽略这类消息</b>——
+     * 一份每天可能出现两三次的复盘，第三周就没人看了（这正是 P1 用已读率验收的原因）。
+     *
+     * <p>已存在同一个键的消息时：**什么都不做**并返回那条已有消息。
+     * 刻意不更新内容：报告是"当时那一刻的结论"，被后来的重跑悄悄改写，
+     * 就等于把历史记录改掉了（真正变化的内容应该是"新的结论"，
+     * 它有自己的键——比如新的一天）。
+     *
+     * <p><b>为什么是独立事务（REQUIRES_NEW）</b>：报告的调用方是结算任务。
+     * 加入调用方事务的话，一次报告写入失败（唯一键冲突、DB 抖动）会把整个事务标记成
+     * rollback-only，于是**为了发一条消息而丢掉当天的真实成交**。
+     * 报告是增强件，必须自己承担失败的后果。
+     */
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)
+    public Message saveReport(User user, String type, String dedupeKey, String relatedSymbol,
+                              String content) {
+        if (user == null || dedupeKey == null || dedupeKey.isBlank()) {
+            log.warn("报告缺少幂等键，已丢弃（无键的报告会在重跑时变成重复消息）");
+            return null;
+        }
+        var existing = messageRepo.findByDedupeKey(dedupeKey);
+        if (existing.isPresent()) {
+            log.debug("报告已存在，跳过推送 key={}", dedupeKey);
+            return existing.get();
+        }
+        Message message = Message.builder()
+                .user(user)
+                .type(type)
+                .content(content)
+                .relatedSymbol(relatedSymbol)
+                .dedupeKey(dedupeKey)
+                .read(false)
+                .build();
+        message = messageRepo.save(message);
+        sseService.push(user.getId(), withSymbolName(message));
+        log.info("Pushed report {} to user {}: key={}", type, user.getUsername(), dedupeKey);
+        return message;
+    }
+
+    /**
      * 预警触发便捷方法：写一条 type=ALERT 的消息（含 alertId + JSON 元数据），并 SSE 推送
      *
      * @param user          预警所属用户
