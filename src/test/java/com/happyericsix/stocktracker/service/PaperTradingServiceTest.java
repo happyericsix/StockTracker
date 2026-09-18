@@ -36,6 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -753,6 +754,113 @@ class PaperTradingServiceTest {
         // 快照必须自洽（净值 = 现金 + 股数 × 价格），否则曲线从第一天起就是错的
         assertTrue(Money.equityIdentityHolds(snapshot.getCash(), snapshot.getShares(),
                 snapshot.getClosePrice(), snapshot.getEquity()));
+    }
+
+    // ==================== agent 决策：换的是谁做决定，不是执行与留痕 ====================
+
+    /**
+     * agent 模式下**必须走同一条路**：同一个结算函数、同一套痕迹/快照/客观事实。
+     *
+     * <p>这是这次"把决策源换成 agent"时最容易出事的地方：新写一条结算分支，
+     * 于是净值的记账、痕迹、报告悄悄变成第二套 —— 而两套的差别不会报错，
+     * 只会在几个月后表现为"两段曲线对不上账"。
+     * 这条用例把"只换了决策源"钉成可执行的约束。
+     */
+    @Test
+    void agentModeStillGoesThroughTheSameSettlementAndRecords() throws Exception {
+        String configJson = "{\"initial_capital\":10000.0,"
+                + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0},"
+                + "\"position\":{\"type\":\"full\",\"size_pct\":100.0}}";
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true)
+                .decisionMode("agent").decisionModeSince(LocalDate.now())
+                .build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(paperTradeRepository.save(any(PaperTrade.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(memoryService.currentSessionKey(1L)).thenReturn("1:2026-09-18");
+        when(paperEquitySnapshotRepository.findByStrategyIdOrderByTradeDateAsc(10L)).thenReturn(List.of());
+        when(paperEquitySnapshotRepository.findByStrategyIdAndTradeDate(eq(10L), any(LocalDate.class)))
+                .thenReturn(Optional.empty());
+
+        // agent 端点回的载荷：买 30% 仓位，带委员会成本。
+        // 形状与真实响应一致：committee 在**顶层**（Java 从这里读成本），
+        // 同一份记录也在 snapshot.extra 里（痕迹读它拿角色过程）。
+        JsonNode result = mapper.readTree(
+                "{\"valid\":true,\"decision\":\"buy\",\"signal\":\"buy\",\"size_fraction\":0.3,"
+                        + "\"price\":10.0,\"matched_conditions\":[],\"fill_basis\":\"close\","
+                        + "\"fingerprint\":{\"fill_basis\":\"close\",\"adjust_mode\":\"qfq\","
+                        + "\"money_policy_version\":1,\"engine_version\":\"abc123\",\"decision_mode\":\"agent\"},"
+                        + "\"committee\":{\"llm_calls\":8,\"total_tokens\":33449,\"as_of\":\"2026-09-18\","
+                        + "\"roles\":[{\"role\":\"bull\",\"label\":\"多头研究员\"}]},"
+                        + "\"snapshot\":{\"schema_version\":1,\"bar\":{\"date\":\"2026-09-18\",\"close\":10.0},"
+                        + "\"indicators\":{\"ma_20\":9.8},"
+                        + "\"extra\":{\"committee\":{\"llm_calls\":8,\"total_tokens\":33449}}}}");
+        when(strategyClient.agentDecide(eq(configJson), eq("600519"), anyString(), isNull()))
+                .thenReturn(result);
+
+        paperTradingService.evaluateDaily();
+
+        // ① 走的是 agent 端点，而且**没有**去调规则端点
+        verify(strategyClient, times(1)).agentDecide(eq(configJson), eq("600519"), anyString(), isNull());
+        verify(strategyClient, never()).evaluateBar(anyString(), anyString(), anyString(), any());
+
+        // ② 决策被执行（成交 + 账户变化）
+        ArgumentCaptor<PaperTrade> tradeCaptor = ArgumentCaptor.forClass(PaperTrade.class);
+        verify(paperTradeRepository, times(1)).save(tradeCaptor.capture());
+        assertEquals("BUY", tradeCaptor.getValue().getSide());
+
+        // ③ 痕迹照旧写，并且**标明是 agent 做的**、成本可查
+        ArgumentCaptor<PaperTradeTrace> traceCaptor = ArgumentCaptor.forClass(PaperTradeTrace.class);
+        verify(paperTraceService, times(1)).record(traceCaptor.capture());
+        PaperTradeTrace trace = traceCaptor.getValue();
+        assertEquals(ExecutionContract.DECISION_MODE_AGENT, trace.getDecisionMode());
+        assertEquals(8, trace.getAgentLlmCalls());
+        assertEquals(33449, trace.getAgentTokens());
+        assertTrue(trace.getSnapshotJson().contains("committee"), "角色过程必须留在证据快照里");
+
+        // ④ 净值快照与客观事实照旧写（"原有机制一条都不能丢"的落点）
+        verify(paperEquitySnapshotRepository, times(1)).save(any(PaperEquitySnapshot.class));
+        verify(memoryFactService, times(1)).recordObjective(eq(1L), anyString(), anyList());
+    }
+
+    @Test
+    void ruleModeStillUsesTheRuleEndpoint() throws Exception {
+        String configJson = "{\"initial_capital\":10000.0}";
+        User user = User.builder()
+                .id(1L).username("alice").password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("均线上穿").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true)   // decisionMode 未设 = 存量数据
+                .build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(paperEquitySnapshotRepository.findByStrategyIdOrderByTradeDateAsc(10L)).thenReturn(List.of());
+
+        JsonNode result = mapper.readTree("{\"signal\":\"hold\",\"price\":10.0,\"matched_conditions\":[]}");
+        when(strategyClient.evaluateBar(eq(configJson), eq("600519"), anyString(), isNull()))
+                .thenReturn(result);
+
+        paperTradingService.evaluateDaily();
+
+        verify(strategyClient, times(1)).evaluateBar(eq(configJson), eq("600519"), anyString(), isNull());
+        verify(strategyClient, never()).agentDecide(anyString(), anyString(), anyString(), any());
+        ArgumentCaptor<PaperTradeTrace> captor = ArgumentCaptor.forClass(PaperTradeTrace.class);
+        verify(paperTraceService, times(1)).record(captor.capture());
+        assertEquals(ExecutionContract.DECISION_MODE_RULE, captor.getValue().getDecisionMode(),
+                "存量策略（decisionMode 为 null）必须按 rule 处理");
     }
 
     /**

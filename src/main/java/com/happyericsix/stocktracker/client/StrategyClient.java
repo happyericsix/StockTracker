@@ -90,6 +90,26 @@ public class StrategyClient {
         return post("/api/v1/strategies/evaluate-bar", body);
     }
 
+    /**
+     * **agent 决策**：多角色委员会辩论后给出决策（响应形状与 {@code evaluate-bar} 一致）。
+     *
+     * <p>为什么复用同一个响应形状：结算侧只需要换一个调用地址，**执行路径一行不改** ——
+     * 整手取整、5 元佣金下限、印花税、T+1、涨跌停挡单、DECIMAL 记账全部照旧。
+     * 模型决定**要不要动**，代码决定**怎么动**。
+     *
+     * <p>agent 走日线结算：委员会是每日一次的节奏（一次约 8 次 LLM 调用），
+     * 不像实时路径那样每 5 分钟触发。
+     */
+    public JsonNode agentDecide(String configJson, String symbol, String date, JsonNode position) {
+        var body = new HashMap<String, Object>();
+        body.put("strategy_json", raw(configJson));
+        body.put("symbol", symbol);
+        body.put("date", date);
+        body.put(ExecutionContract.SETTLEMENT_KIND_FIELD, ExecutionContract.SETTLEMENT_DAILY);
+        if (position != null) body.put("position", position);
+        return post("/api/v1/agent/decide", body);
+    }
+
     private JsonNode raw(String json) {
         try { return mapper.readTree(json); }
         catch (Exception e) { return mapper.createObjectNode(); }

@@ -122,6 +122,8 @@ public class PaperTradeTraceResponse {
         map.put(ExecutionContract.SKIP_INVALID_PRICE, "价格无效，无法成交");
         map.put(ExecutionContract.SKIP_STATE_MISMATCH, "信号与账户状态不一致（已持仓收到买入信号 / 空仓收到卖出信号），本轮没动作");
         map.put(ExecutionContract.SKIP_AGENT_UNPARSABLE, "agent 的输出读不懂（没有规范结论行或结构不完整），按不动处理");
+        map.put(ExecutionContract.SKIP_AGENT_BUDGET_EXCEEDED, "agent 这一轮的调用/token 预算用完了，没做出决策");
+        map.put(ExecutionContract.SKIP_AGENT_LLM_UNAVAILABLE, "agent 依赖的模型服务不可用，本轮没做出决策");
         return map;
     }
 

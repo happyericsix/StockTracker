@@ -15,6 +15,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.JsonNode;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
@@ -175,6 +176,37 @@ public class StrategyService {
             log.warn("回测客观事实入账失败 strategyId={}: {}",
                     strategy == null ? null : strategy.getId(), e.getMessage());
         }
+    }
+
+    /**
+     * 切换**决策来源**（rule ⇄ agent），并记下生效日。
+     *
+     * <h3>为什么要专门做一条路径，而不是让调用方直接改字段</h3>
+     * 换决策方式是**改历史解释依据**的事：曲线从这一天起分成两段。
+     * 所以这里做三件必须一起发生的事：
+     * <ol>
+     *   <li>归一（认不出的模式一律 {@code unknown_*}，**不默认成 rule**）；</li>
+     *   <li>记生效日 —— 报告要写"自 X 起由 agent 决策"，否则用户会把两段看成一条线；</li>
+     *   <li>**没变化就不改**：重复设成同一个模式不该刷新生效日，
+     *       否则分界点会往后漂，每一次"确认一下"都变成一次"重新分段"。</li>
+     * </ol>
+     */
+    @Transactional
+    public StrategyResponse switchDecisionMode(String username, Long id, String decisionMode) {
+        User user = getUser(username);
+        Strategy strategy = strategyRepository.findByIdAndUserId(id, user.getId())
+                .orElseThrow(() -> new IllegalArgumentException("策略不存在"));
+
+        String normalized = ExecutionContract.normalizeDecisionMode(decisionMode);
+        String current = ExecutionContract.normalizeDecisionMode(strategy.getDecisionMode());
+        if (!normalized.equals(current)) {
+            strategy.setDecisionMode(normalized);
+            strategy.setDecisionModeSince(LocalDate.now(ZoneId.of("Asia/Shanghai")));
+            strategyRepository.save(strategy);
+            log.info("User {} switched strategy id={} decision mode {} -> {}",
+                    username, id, current, normalized);
+        }
+        return StrategyResponse.from(strategy);
     }
 
     /** 只记**确实是数字**的字段：非数字（null、"N/A"、字符串）一律跳过。 */

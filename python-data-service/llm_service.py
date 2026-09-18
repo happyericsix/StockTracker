@@ -373,7 +373,14 @@ def chat_completion(messages, tools=None, temperature=0.2, max_tokens=1200):
         _record_llm_usage(ok=False, latency_ms=int((time.time() - started) * 1000))
         raise
     _record_llm_usage(ok=True, latency_ms=int((time.time() - started) * 1000), body=body)
-    return body["choices"][0]
+    choice = body["choices"][0]
+    # 把 usage **挂回 choice**：调用方拿到的是 choices[0]，而 usage 在响应体顶层。
+    # 少了这一步，任何按"返回值的 usage"统计成本的调用方都会记成 0 ——
+    # 实测踩过：多角色委员会的 token 预算因此**从未生效**（与 TradingAgents 在非价目表模型上
+    # 报 cost=0 是同一类错：成本记成 0 比没有数字更糟，因为它看起来像"很便宜"）。
+    if isinstance(choice, dict) and isinstance(body.get("usage"), dict):
+        choice.setdefault("usage", body["usage"])
+    return choice
 
 
 def _record_llm_usage(*, ok, latency_ms, body=None):

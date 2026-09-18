@@ -181,6 +181,7 @@ public class PaperReviewReportService {
         }
 
         text.append('\n').append(accountLine(account)).append('\n');
+        text.append(decisionModeLine(strategy)).append('\n');
 
         long evaluated = all.stream().filter(t -> ExecutionContract.SETTLEMENT_REALTIME
                 .equals(t.getSettlementKind())).count();
@@ -356,7 +357,32 @@ public class PaperReviewReportService {
         return line.toString();
     }
 
-    private String formatPct(Double value) {
+    /**
+     * 决策来源那一行：**只在真的是 agent 时出现**，并写明生效日。
+     *
+     * <h3>为什么这行必须有</h3>
+     * 换了决策方式之后，曲线在同一个账户上分成两段。报告是用户唯一会读的地方 ——
+     * 不写明分界点，他会把"规则跑的两个月"和"agent 跑的三个月"看成一条连续的线，
+     * 然后据此判断"这套东西有没有变好"。那是一个**由我们的沉默制造出来的错误结论**。
+     */
+    private String decisionModeLine(Strategy strategy) {
+        if (strategy == null) {
+            return "";
+        }
+        String mode = ExecutionContract.normalizeDecisionMode(strategy.getDecisionMode());
+        if (!ExecutionContract.DECISION_MODE_AGENT.equals(mode)) {
+            return "决策来源：策略规则（确定性，同输入同输出）。";
+        }
+        StringBuilder line = new StringBuilder("决策来源：**agent 多角色委员会**");
+        if (strategy.getDecisionModeSince() != null) {
+            line.append("（自 ").append(strategy.getDecisionModeSince()).append(" 起）");
+            line.append("\n  该日之前的净值由规则决策产生，与当前段**口径不同、数字不可比** ——"
+                    + "想比较请看两段各自的区间表现，不要看一整条线。");
+        }
+        return line.toString();
+    }
+
+    private static String formatPct(Double value) {
         // 展示层统一 2 位小数：报告是给人读的，4 位小数只增加噪声（口径的精度在事实里）
         java.math.BigDecimal shown = java.math.BigDecimal.valueOf(value)
                 .setScale(2, RoundingMode.HALF_UP);

@@ -136,6 +136,21 @@ public class StrategyController {
     }
 
     /**
+     * 切换决策来源：{@code rule}（策略 DSL）或 {@code agent}（多角色委员会）。
+     *
+     * <p>这是一次**会改变历史解释依据**的操作（曲线从生效日起分成两段），
+     * 所以它是一条显式路径，并且记录生效日 —— 而不是让调用方直接改字段。
+     */
+    @PostMapping("/{id}/decision-mode")
+    public Result<StrategyResponse> switchDecisionMode(
+            @PathVariable Long id,
+            @RequestParam String mode,
+            Authentication authentication) {
+        return Result.success(
+                strategyService.switchDecisionMode(authentication.getName(), id, mode));
+    }
+
+    /**
      * 净值曲线：点 + 由同一份点算出的汇总（回撤、空仓比例、相对买入持有的超额）。
      *
      * <p>汇总里的 {@code excessVsBuyAndHoldPct} 就是"不动"的代价 —— 空仓那些天，

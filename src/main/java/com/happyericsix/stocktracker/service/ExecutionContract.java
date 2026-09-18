@@ -79,6 +79,10 @@ public final class ExecutionContract {
     public static final String SKIP_STATE_MISMATCH = "state_mismatch";
     /** agent 的输出读不懂。真实原因，不是 unknown_* 兜底：频次高说明提示词或模型有问题。 */
     public static final String SKIP_AGENT_UNPARSABLE = "agent_unparsable";
+    /** agent 这一轮的硬预算（调用次数 / token）用完了。与"模型说 HOLD"必须分开统计。 */
+    public static final String SKIP_AGENT_BUDGET_EXCEEDED = "agent_budget_exceeded";
+    /** agent 依赖的模型服务不可用 —— 我们这边的故障，不是市场的结论。 */
+    public static final String SKIP_AGENT_LLM_UNAVAILABLE = "agent_llm_unavailable";
 
     // ---------- 归一与版本 ----------
     public static final String UNKNOWN_PREFIX = "unknown_";
@@ -125,7 +129,7 @@ public final class ExecutionContract {
             SKIP_WARMUP, SKIP_LIMIT_BLOCKED, SKIP_T1_BLOCKED, SKIP_EX_DIVIDEND_DAY,
             SKIP_INSUFFICIENT_CASH_FOR_ONE_LOT, SKIP_INSUFFICIENT_CASH,
             SKIP_INVALID_PRICE, SKIP_RULE_NOT_MET, SKIP_STATE_MISMATCH,
-            SKIP_AGENT_UNPARSABLE);
+            SKIP_AGENT_UNPARSABLE, SKIP_AGENT_BUDGET_EXCEEDED, SKIP_AGENT_LLM_UNAVAILABLE);
 
     /** 结算类型 → 成交价口径。**唯一的映射处**（Python 侧同名映射）。 */
     public static final Map<String, String> FILL_BASIS_BY_SETTLEMENT = Map.of(
@@ -149,6 +153,20 @@ public final class ExecutionContract {
 
     public static String normalizeSkipReason(String raw) {
         return normalize(raw, SKIP_REASONS);
+    }
+
+    /**
+     * 归一决策来源；**认不出的一律归成 {@code unknown_*}，绝不默认成 rule**。
+     *
+     * <p>默认成 rule 会让"来路不明的结果看起来像规则跑的" —— 那正是"两段曲线不可比"
+     * 这条保护被绕过的方式。存量数据（null / 空）则**是** rule：没切换过就是事实。
+     */
+    public static String normalizeDecisionMode(String raw) {
+        String text = raw == null ? "" : raw.trim();
+        if (text.isEmpty()) {
+            return DECISION_MODE_RULE;
+        }
+        return normalize(text, DECISION_MODES);
     }
 
     /** 结算类型对应的成交价口径；未登记的类型不猜、不默认取 close。 */

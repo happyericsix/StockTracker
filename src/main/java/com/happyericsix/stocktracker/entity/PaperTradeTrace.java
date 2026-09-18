@@ -73,6 +73,22 @@ public class PaperTradeTrace {
     @Column(name = "settlement_kind", nullable = false, length = 32)
     private String settlementKind;
 
+    /**
+     * 这一条决策是**谁做的**：{@code rule}（策略 DSL）或 {@code agent}（多角色委员会）。
+     *
+     * <p>做成独立列而不是只放在快照 JSON 里：报告与统计要能按它**分组查询**
+     * （"agent 段和规则段各自表现如何"），而 JSON 里的字段查不动。
+     */
+    @Column(name = "decision_mode", length = 16)
+    private String decisionMode;
+
+    /** agent 这一轮的 LLM 调用次数与 token 总量（规则路径为空）。成本必须可查，不能只存在日志里。 */
+    @Column(name = "agent_llm_calls")
+    private Integer agentLlmCalls;
+
+    @Column(name = "agent_tokens")
+    private Integer agentTokens;
+
     /** cron | event | manual：这一行是谁触发的（运营口径，不参与"能不能对比"的判定）。 */
     @Column(nullable = false, length = 32)
     private String trigger;

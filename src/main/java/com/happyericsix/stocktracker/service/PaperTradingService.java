@@ -281,11 +281,20 @@ public class PaperTradingService {
         }
 
         JsonNode position = buildPosition(account);
-        JsonNode result = strategyClient.evaluateBar(
-                strategy.getConfigJson(), strategy.getSymbol(), today.toString(), position);
+        // 决策源在这里分岔，**执行路径一行不改**（下面还是同一个 applyBarResult）：
+        //   rule  → 策略 DSL 出信号
+        //   agent → 多角色委员会出决策
+        // 两条路都落进同一套封闭枚举与同一个结算管线；区别写在 fingerprint.decision_mode 里，
+        // 于是两段曲线永远不会被当成可比（见 ExecutionContract.compareBlockReason）。
+        String decisionMode = ExecutionContract.normalizeDecisionMode(strategy.getDecisionMode());
+        JsonNode result = ExecutionContract.DECISION_MODE_AGENT.equals(decisionMode)
+                ? strategyClient.agentDecide(strategy.getConfigJson(), strategy.getSymbol(),
+                        today.toString(), position)
+                : strategyClient.evaluateBar(strategy.getConfigJson(), strategy.getSymbol(),
+                        today.toString(), position);
         if (result == null) {
             // 之前这里只打一行日志：那天为什么没结算，除了翻日志没有别的办法查。
-            log.warn("Strategy evaluateBar returned null for strategy id={}", strategy.getId());
+            log.warn("{} decision returned null for strategy id={}", decisionMode, strategy.getId());
             return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_DAILY,
                     ExecutionContract.TRIGGER_CRON, today, null, null,
                     ExecutionContract.SKIP_DATA_UNAVAILABLE);
@@ -723,6 +732,16 @@ public class PaperTradingService {
         trace.setSnapshotJson(snapshot == null || snapshot.isNull() ? null : snapshot.toString());
         trace.setSnapshotSchemaVersion(snapshot == null || snapshot.isNull() ? null
                 : intOr(snapshot.get("schema_version"), null));
+        // 决策来源与 agent 成本：从**响应**里读（Python 是口径的唯一真相源），
+        // 读不到才退回策略上声明的模式 —— 但绝不"默认成 rule"（见 normalizeDecisionMode）。
+        trace.setDecisionMode(ExecutionContract.normalizeDecisionMode(
+                textOrStatic(fingerprint == null ? null : fingerprint.get("decision_mode"),
+                        strategy.getDecisionMode())));
+        JsonNode committee = result == null ? null : result.get("committee");
+        if (committee != null && committee.isObject()) {
+            trace.setAgentLlmCalls(intOr(committee.get("llm_calls"), null));
+            trace.setAgentTokens(intOr(committee.get("total_tokens"), null));
+        }
         fillAccountBefore(trace, account);
         return trace;
     }

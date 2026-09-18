@@ -94,6 +94,12 @@ SKIP_STATE_MISMATCH = "state_mismatch"                      # 信号与账户状
 # "模型没说清楚"与"我们没实现这条路"是两件事 —— 前者要能被统计（频次高说明提示词或模型有问题），
 # 后者说明代码有缺口。混在一起就永远分不清该修哪边。
 SKIP_AGENT_UNPARSABLE = "agent_unparsable"
+# agent 这一轮的**硬预算**用完了（调用次数或 token 上限）。为什么它必须是一个独立原因：
+# "花光了预算所以没决策"与"模型说 HOLD"在结果上都是不动，但一个是我们该调参、一个是模型的选择。
+# 混在一起，预算设得太小这件事就永远发现不了。
+SKIP_AGENT_BUDGET_EXCEEDED = "agent_budget_exceeded"
+# agent 依赖的模型服务不可用。同样必须与"HOLD"分开：这是我们这边的故障，不是市场的结论。
+SKIP_AGENT_LLM_UNAVAILABLE = "agent_llm_unavailable"
 
 SKIP_REASONS = (
     SKIP_MARKET_CLOSED,
@@ -110,6 +116,8 @@ SKIP_REASONS = (
     SKIP_RULE_NOT_MET,
     SKIP_STATE_MISMATCH,
     SKIP_AGENT_UNPARSABLE,
+    SKIP_AGENT_BUDGET_EXCEEDED,
+    SKIP_AGENT_LLM_UNAVAILABLE,
 )
 
 UNKNOWN_PREFIX = "unknown_"

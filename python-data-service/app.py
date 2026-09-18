@@ -141,6 +141,8 @@ def health():
         "audit": _audit_health(),
         "review": _review_health(),
         "strategy_review": _strategy_review_health(),
+        "trading_committee": _committee_health(),
+        "execution_contract": _contract_health(),
     }
 
 
@@ -157,6 +159,33 @@ def _strategy_review_health():
     except Exception as e:  # noqa: BLE001
         logger.warning(f"strategy review health probe failed: {e}")
         return {"error": "strategy review unavailable"}
+
+
+def _committee_health():
+    """多角色委员会的自检：**角色、预算、as-of 守卫**这三件事必须能被看见。
+
+    为什么值得放进 /health：这三条正是"把决策交给模型"之后最容易悄悄失效的东西 ——
+    预算设小了、as-of 守卫被绕过、角色少了两个，运行起来都不会报错，
+    只会让决策变得不可解释。
+    """
+    try:
+        from agent import trading_committee
+
+        return trading_committee.describe()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"trading committee health probe failed: {e}")
+        return {"error": "trading committee unavailable"}
+
+
+def _contract_health():
+    """执行契约的自检：**当前生效**的封闭集与口径（含 decision_mode）。"""
+    try:
+        from agent import execution_contract as ec
+
+        return ec.describe()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"execution contract health probe failed: {e}")
+        return {"error": "execution contract unavailable"}
 
 
 def _review_health():
@@ -824,6 +853,71 @@ async def evaluate_bar_endpoint(req: Request):
         return {"error": "行情评估失败，请稍后重试", "signal": "hold", "matched_conditions": [],
                 "decision": ec.DECISION_SKIP, "skip_reason": ec.SKIP_DATA_UNAVAILABLE,
                 **ec.no_bar_facts(settlement_kind, ADJUST_MODE)}
+
+
+@app.post("/api/v1/agent/decide")
+async def agent_decide_endpoint(req: Request):
+    """**agent 决策**：多角色委员会辩论后给出决策（与 `evaluate-bar` 同形状）。
+
+    <h3>为什么响应形状与 evaluate-bar 完全一致</h3>
+    结算侧（Java）只需要换一个调用地址，**执行路径一行不改**：
+    整手取整、5 元佣金下限、印花税、T+1、涨跌停挡单、DECIMAL 记账全部照旧。
+    **模型决定要不要动，代码决定怎么动** —— 这是这次引入 agent 时唯一不能让步的一条。
+
+    <h3>取数也是按 as-of 截断的</h3>
+    取历史时就带上 `end_date = date`（而不是取回全部再在内存里裁）：
+    两道防线比一道强，而且**源头就不给未来的数据**，比"拿到了再丢掉"更难出错。
+
+    请求体：
+        {"strategy_json": {...} | "symbol": "600519", "date": "2026-03-10",
+         "settlement_kind": "daily", "position": {...}}
+
+    <h3>它不受策略 DSL 约束</h3>
+    `strategy_json` 里只有 `symbol`（以及可选的初始资金）会被用到 —— 委员会不看 entry/exit 条件。
+    这是"把决策源从规则换成 agent"的落点：同一张策略记录，换的是**谁做决定**，
+    而 `fingerprint.decision_mode` 会把这个区别写进每一条痕迹。
+    """
+    from agent import execution_contract as ec
+    from agent import trading_committee
+    from agent.strategy_schema import validate_strategy_config
+    from akshare_client import ADJUST_MODE, get_history
+
+    settlement_kind = None
+    try:
+        data = await req.json()
+        settlement_kind = str(data.get("settlement_kind") or "").strip() or None
+        strategy_json = data.get("strategy_json") or {}
+        cfg, err = validate_strategy_config(strategy_json)
+        symbol = str(data.get("symbol") or (cfg.symbol if cfg else "") or "").strip()
+        if err and not symbol:
+            return {"valid": False, "error": err}
+        if not symbol:
+            return {"valid": False, "error": "symbol 不能为空"}
+        date = str(data.get("date") or "").strip()
+        if not date:
+            return {"valid": False, "error": "date 不能为空（agent 决策必须有决策日）"}
+
+        # as-of 第一道防线：源头就不取决策日之后的数据
+        records = await asyncio.to_thread(get_history, symbol, "", date, "day")
+        position = data.get("position")
+        if isinstance(position, dict) and "quantity" in position and "shares" not in position:
+            position = dict(position)
+            position["shares"] = position["quantity"]
+
+        result = await asyncio.to_thread(
+            trading_committee.decide, symbol, date, records or [], position,
+            settlement_kind=settlement_kind or ec.SETTLEMENT_DAILY, adjust_mode=ADJUST_MODE
+        )
+        result["valid"] = True
+        return result
+    except Exception as e:
+        logger.error(f"agent decide error: {e}", exc_info=True)
+        from agent import execution_contract as ec
+        from akshare_client import ADJUST_MODE
+        return {"valid": False, "error": "agent 决策失败，请稍后重试",
+                "decision": ec.DECISION_SKIP, "skip_reason": ec.SKIP_DATA_UNAVAILABLE,
+                "signal": None,
+                **ec.no_bar_facts(settlement_kind, ADJUST_MODE, ec.DECISION_MODE_AGENT)}
 
 
 # ==================== 同花顺扫码登录 ====================
