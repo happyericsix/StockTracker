@@ -79,4 +79,13 @@ public interface NewsEventRepository extends JpaRepository<NewsEvent, Long> {
      */
     @Query("SELECT MAX(e.publishedAt) FROM NewsEvent e WHERE e.symbol IN :symbols")
     LocalDateTime latestPublishedAt(@Param("symbols") Collection<String> symbols);
+
+    /**
+     * 微调语料导出（内部接口用）：窗口内**已解读**的条目，按发布时间倒序。
+     *
+     * <p>只取 plainSummary 非空的行——蒸馏的监督信号来自通过 schema 规整的
+     * 分析结论，降级行（"信息不足，不判断方向"）当标签只会教会模型敷衍。
+     */
+    List<NewsEvent> findByPlainSummaryNotNullAndPublishedAtGreaterThanEqualOrderByPublishedAtDesc(
+            LocalDateTime since, Pageable pageable);
 }
