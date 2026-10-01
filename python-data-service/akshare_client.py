@@ -187,28 +187,28 @@ def get_quote(symbol: str) -> Optional[dict]:
             # 过期了删掉
             del _quote_cache[symbol]
 
-    # 2. 请求行情
+    # 2. 请求行情（腾讯主源；A 股失败时新浪兜底，见 _fetch_quotes_sina 的说明）
+    resolved = resolve_symbol(symbol)
+    if not resolved:
+        logger.warning("无法识别股票代码/名称: %s", symbol)
+        return None
+    code = normalize_symbol(resolved)
     try:
-        resolved = resolve_symbol(symbol)
-        if not resolved:
-            logger.warning("无法识别股票代码/名称: %s", symbol)
-            return None
-        code = normalize_symbol(resolved)
-        r = requests.get(f"http://qt.gtimg.cn/q={code}", headers=HEADERS, timeout=10)
+        r = requests.get(f"https://qt.gtimg.cn/q={code}", headers=HEADERS, timeout=10)
         r.encoding = "gbk"
         result = _parse_quote_text(r.text.strip())
-        if result is None:
-            logger.warning("腾讯行情返回空或格式异常: %s (resolved=%s)", symbol, code)
-            return None
+        if result is not None:
+            with _quote_cache_lock:
+                _quote_cache[symbol] = (now, result)
+            return result
+        logger.warning("腾讯行情返回空或格式异常: %s (resolved=%s)", symbol, code)
+    except Exception as e:  # noqa: BLE001 - 降级链的一环
+        logger.error("腾讯行情请求异常: %s -> %s", symbol, e)
 
-        # 3. 写入缓存
-        with _quote_cache_lock:
-            _quote_cache[symbol] = (now, result)
-
-        return result
-    except Exception as e:
-        logger.error("get_quote 异常: %s -> %s", symbol, e)
-        return None
+    fallback: dict = {}
+    if _fill_from_sina([(symbol, code)], fallback, now):
+        return fallback[symbol]
+    return None
 
 
 def _code_key(value) -> str:
@@ -221,6 +221,113 @@ def _code_key(value) -> str:
     text = str(value or "").strip().upper()
     text = re.sub(r"^(SH|SZ|BJ|HK|US)", "", text)
     return text.split(".")[0]
+
+
+# ==================== 行情源降级：腾讯 → 新浪（仅 A 股）====================
+#
+# 为什么需要降级：qt.gtimg.cn 目前是全部实时行情的唯一出口，它一抖（限流/机房
+# 故障/接口改版），行情页、预警评估、模拟盘盘中结算一起瞎。调研（research/README
+# 主线 A）推荐的多级数据源降级在这里落第一级：A 股实时价走新浪兜底。
+#
+# 为什么只兜 A 股：新浪 hq 接口的港股/美股是另一套字段布局（hk00700 的数组含义
+# 与 A 股完全不同），照搬映射只会**静默给错数**——那比没有数据危险得多。
+# 其它市场维持诚实的 None。
+#
+# 刻意不做 K 线历史降级：本项目 K 线契约钉死前复权（ADJUST_MODE="qfq" 是唯一
+# 真相源，回测/模拟盘都按它解释），而新浪可用的日 K 接口是**不复权**的——
+# 用不同复权口径的数据兜底，等于让回测悄悄换了一套价格。宁可不兜，不可错兜。
+SINA_QUOTE_URL = "https://hq.sinajs.cn/list={codes}"
+# 2021 年起新浪强制校验 Referer，缺失直接 403 —— 无 Key 公开接口最常见的坑
+SINA_HEADERS = {"User-Agent": HEADERS["User-Agent"], "Referer": "https://finance.sina.com.cn"}
+
+
+def _is_a_share(code: str) -> bool:
+    """腾讯格式代码是否 A 股（sh/sz + 6 位数字）。北交所新浪不支持，不兜。"""
+    return len(code) == 8 and code[:2] in ("sh", "sz") and code[2:].isdigit()
+
+
+def _sina_quote_fields(code: str, parts: list) -> Optional[dict]:
+    """新浪 A 股行情行 → 与 _parse_quote_text **同键同义** 的 dict。
+
+    字段布局（逗号分隔）：0名称 1今开 2昨收 3最新 4最高 5最低 8成交量(股)
+    9成交额 … 30日期 31时间。涨跌额/涨跌幅由昨收推导；总市值/流通市值/市盈率
+    新浪 hq 不提供，填 "0"（与腾讯解析器对缺失字段的约定一致——契约键必须齐全）。
+    """
+    if len(parts) < 32 or not parts[3] or parts[3] in ("0.00", "0"):
+        return None
+    try:
+        close = float(parts[3])
+        prev = float(parts[2])
+    except ValueError:
+        return None
+    change = round(close - prev, 2)
+    pct = round(change / prev * 100, 2) if prev else 0.0
+    try:
+        volume_hands = round(float(parts[8]) / 100)  # 新浪给股，腾讯给手（1手=100股）
+    except (ValueError, IndexError):
+        volume_hands = 0
+    return {
+        "代码": code,
+        "名称": parts[0],
+        "最新价": parts[3],
+        "昨收": parts[2],
+        "今开": parts[1],
+        "最高": parts[4],
+        "最低": parts[5],
+        "成交量": str(volume_hands),
+        "成交额": parts[9] if len(parts) > 9 else "0",
+        "涨跌幅": f"{pct:.2f}",
+        "涨跌额": f"{change:.2f}",
+        "总市值": "0",
+        "流通市值": "0",
+        "市盈率-动态": "0",
+    }
+
+
+def _fetch_quotes_sina(codes: list) -> dict:
+    """新浪批量行情：一次请求多只，返回 {归一化代码: 行情dict}。失败返回空 dict。"""
+    if not codes:
+        return {}
+    try:
+        r = requests.get(SINA_QUOTE_URL.format(codes=",".join(codes)),
+                         headers=SINA_HEADERS, timeout=8)
+        r.encoding = "gbk"
+    except Exception as e:  # noqa: BLE001 - 降级链的一环，失败要静默成"没有兜底"
+        logger.warning("新浪行情兜底请求失败: %s", e)
+        return {}
+    out: dict = {}
+    for chunk in r.text.strip().splitlines():
+        if '="' not in chunk:
+            continue
+        head, _, payload = chunk.partition('="')
+        code = head.strip().split("hq_str_")[-1]
+        quote = _sina_quote_fields(code, payload.rstrip('";\r').split(","))
+        if quote:
+            out[_code_key(quote.get("代码"))] = quote
+    return out
+
+
+def _fill_from_sina(missing, result: dict, now: float) -> int:
+    """把腾讯没给到的 A 股条目用新浪兜底填上（写缓存），返回兜底成功数。
+
+    只处理 A 股子集并**合并成一次请求**：兜底是异常路径，别让它自己再变成
+    N 次单点请求。
+    """
+    candidates = [(symbol, code) for symbol, code in missing if _is_a_share(code)]
+    if not candidates:
+        return 0
+    by_code = _fetch_quotes_sina([code for _, code in candidates])
+    filled = 0
+    for symbol, code in candidates:
+        quote = by_code.get(_code_key(code))
+        if quote:
+            result[symbol] = quote
+            with _quote_cache_lock:
+                _quote_cache[symbol] = (now, quote)
+            filled += 1
+    if filled:
+        logger.info("行情兜底生效：新浪补回 %d/%d 只（腾讯缺失）", filled, len(candidates))
+    return filled
 
 
 def get_quotes(symbols) -> dict:
@@ -268,7 +375,7 @@ def get_quotes(symbols) -> dict:
 
     try:
         codes = ",".join(code for _, code in missing)
-        r = requests.get(f"http://qt.gtimg.cn/q={codes}", headers=HEADERS, timeout=15)
+        r = requests.get(f"https://qt.gtimg.cn/q={codes}", headers=HEADERS, timeout=15)
         r.encoding = "gbk"
         # 响应的顺序**不保证**与请求一致，所以按代码回填，而不是按位置；
         # 代码还要归一化（美股会带 .OQ/.N 之类的后缀）
@@ -278,14 +385,22 @@ def get_quotes(symbols) -> dict:
             if quote:
                 by_code[_code_key(quote.get("代码"))] = quote
 
+        still_missing = []
         with _quote_cache_lock:
             for symbol, code in missing:
                 quote = by_code.get(_code_key(code))
                 if quote:
                     result[symbol] = quote
                     _quote_cache[symbol] = (now, quote)
+                else:
+                    still_missing.append((symbol, code))
+        # 腾讯缺的 A 股合并成一次新浪请求兜底（非 A 股不兜，理由见 _fetch_quotes_sina）
+        if still_missing:
+            _fill_from_sina(still_missing, result, now)
     except Exception as e:
-        logger.error("get_quotes 异常: %s -> %s", unique, e)
+        logger.error("get_quotes 异常（尝试新浪兜底）: %s -> %s", unique, e)
+        # 整批腾讯请求挂了（超时/断网）也别整批返回 None：A 股部分还能救
+        _fill_from_sina(missing, result, now)
     return result
 
 
@@ -386,7 +501,7 @@ def _windows_for(start_date: str, end_date: str) -> list[tuple[str, str]]:
 def _fetch_page(code: str, period: str, start_date: str, end_date: str,
                 limit: int) -> list[dict]:
     """取一页 K 线（腾讯 ifzq）。接口给的原始行 → `{date, open, close, high, low, volume}`。"""
-    url = "http://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+    url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
     params = {"param": f"{code},{period},{start_date},{end_date},{limit},{ADJUST_MODE}"}
     r = requests.get(url, params=params, headers=HEADERS, timeout=15)
     payload = r.json()
