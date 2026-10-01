@@ -2,6 +2,7 @@
 FastAPI 入口 — 为 stock-tracker Java 后端提供实时行情接口。
 """
 
+import hmac
 import logging
 import asyncio
 import os
@@ -130,7 +131,8 @@ async def require_internal_token(request: Request, call_next):
             return JSONResponse(status_code=503,
                                 content={"detail": "internal token not configured; "
                                                    "this service rejects /api/v1 without it"})
-        if request.headers.get("x-internal-token", "") != INTERNAL_API_TOKEN:
+        # 常量时间比较：非常量时间的 == 在理论上可被计时侧信道逐字节猜 token
+        if not hmac.compare_digest(request.headers.get("x-internal-token", ""), INTERNAL_API_TOKEN):
             return JSONResponse(status_code=401, content={"detail": "unauthorized"})
     return await call_next(request)
 

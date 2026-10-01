@@ -158,6 +158,10 @@ docker run -d --name stock-redis -p 6379:6379 redis:7-alpine
 ### 2. 启动后端（Spring Boot）
 
 ```bash
+# 首次运行先生成 JWT 签名密钥（secrets/ 已 gitignore，绝不进仓库）：
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out secrets/app.key
+openssl pkey -in secrets/app.key -pubout -out secrets/app.pub
+
 # IDEA：直接运行 StocktrackerApplication
 # 或命令行：
 $env:INTERNAL_API_TOKEN="your-secret-token"
