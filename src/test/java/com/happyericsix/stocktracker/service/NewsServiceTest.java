@@ -398,6 +398,56 @@ class NewsServiceTest {
     }
 
     @Test
+    void analyzeAppliesCredibilityEvenWhenTheModelDegrades() {
+        // 模型降级（analyzed=false）不落**分析字段**——但可信度是信息本身的属性，
+        // "模型没配上"不该连带把"这条是传闻"的警示也藏起来。
+        NewsEvent event = NewsEvent.builder()
+                .id(7L).symbol("SH600519").title("据传甲公司或将重组").sourceLevel(2)
+                .publishedAt(LocalDateTime.now())
+                .build();
+        when(newsEventRepository.findAllById(List.of(7L))).thenReturn(List.of(event));
+        when(newsClient.analyze(anyList(), eq("deep"))).thenReturn(analyzeOk(withCredibility(
+                analysisRow(false, "其他", null, 0.0, "low", "信息不足，不判断方向",
+                        new String[0], new String[0], new String[]{"SH600519"}),
+                38, "较低", true, false, "含传闻类措辞（据传、或将）")));
+        when(newsEventRepository.save(any(NewsEvent.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        List<NewsEventResponse> result = newsService.analyze("alice", List.of(7L), false);
+
+        NewsEventResponse response = result.get(0);
+        assertFalse(response.isAnalyzed(), "降级行不能被标成已解读（幂等键会挡住以后的补解读）");
+        assertNull(response.getPlainSummary());
+        assertEquals(38, response.getCredibility());
+        assertEquals("较低", response.getCredibilityGrade());
+        assertTrue(response.isRumorFlag(), "传闻特征必须透传到响应，前端要显著警示");
+        verify(newsEventRepository).save(argThat(e -> e.getCredibility() == 38
+                && e.getPlainSummary() == null));
+    }
+
+    @Test
+    void analyzeStoresCredibilityDetailAlongsideTheAnalysis() {
+        NewsEvent event = NewsEvent.builder()
+                .id(8L).symbol("SH600519").title("甲公司控股股东增持计划").sourceLevel(1)
+                .publishedAt(LocalDateTime.now())
+                .build();
+        when(newsEventRepository.findAllById(List.of(8L))).thenReturn(List.of(event));
+        when(newsClient.analyze(anyList(), eq("deep"))).thenReturn(analyzeOk(withCredibility(
+                analysisRow(true, "增减持", "利好", 0.8, "medium", "控股股东增持，彰显信心",
+                        new String[0], new String[0], new String[]{"SH600519"}),
+                88, "高", false, true, "官方公告渠道", "另有信源讲述相似事件")));
+        when(newsEventRepository.save(any(NewsEvent.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        List<NewsEventResponse> result = newsService.analyze("alice", List.of(8L), false);
+
+        NewsEventResponse response = result.get(0);
+        assertTrue(response.isAnalyzed());
+        assertEquals(88, response.getCredibility());
+        assertTrue(response.isCorroborated());
+        assertTrue(response.getCredibilityReasons().contains("官方公告渠道"));
+        assertTrue(response.getCredibilityReasons().stream().anyMatch(r -> r.contains("另有信源")));
+    }
+
+    @Test
     void analyzeRejectsUnknownEventIds() {
         when(newsEventRepository.findAllById(List.of(99L))).thenReturn(List.of());
 
@@ -966,6 +1016,25 @@ class NewsServiceTest {
         for (String symbol : relatedSymbols) {
             relatedArray.add(symbol);
         }
+        return row;
+    }
+
+    /** 带可信度字段的行（模拟 news_credibility 规则引擎的输出契约）。 */
+    private ObjectNode withCredibility(ObjectNode row, int score, String grade,
+                                       boolean rumor, boolean corroborated, String... reasons) {
+        row.put("credibility", score);
+        row.put("credibility_grade", grade);
+        ObjectNode components = row.putObject("credibility_components");
+        components.put("source", score);
+        components.put("content", score);
+        components.put("corroboration", corroborated ? 80 : 50);
+        ArrayNode reasonArray = row.putArray("credibility_reasons");
+        for (String reason : reasons) {
+            reasonArray.add(reason);
+        }
+        row.put("rumor_flag", rumor);
+        row.put("sensational_flag", false);
+        row.put("corroborated", corroborated);
         return row;
     }
 }

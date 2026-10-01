@@ -289,6 +289,7 @@ const loadPaperStatus = async () => {
 }
 
 const goAssistant = () => router.push('/assistant')
+const goNews = () => router.push('/news')
 const goStrategies = () => router.push('/strategies')
 const goPaper = () => router.push('/paper')
 const goMemory = () => router.push('/memory')
@@ -359,6 +360,15 @@ onBeforeUnmount(() => {
           <span class="feature-copy">
             <strong>智能助手</strong>
             <span>自然语言查行情、生成交易策略、回测与模拟盘</span>
+          </span>
+          <span class="feature-arrow"><AppIcon name="chevron-right" :size="22" :stroke-width="2" /></span>
+        </button>
+
+        <button type="button" class="feature-card news-entry" @click="goNews">
+          <span class="feature-icon"><AppIcon name="search" :size="26" :stroke-width="2" /></span>
+          <span class="feature-copy">
+            <strong>资讯雷达</strong>
+            <span>搜全市场公告/媒体/研报，每条带可信度与时效标注</span>
           </span>
           <span class="feature-arrow"><AppIcon name="chevron-right" :size="22" :stroke-width="2" /></span>
         </button>

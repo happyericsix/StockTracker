@@ -34,6 +34,7 @@ const ICON_NAMES = [
   'trend-up', 'trend-down', 'chart', 'bot', 'book', 'database', 'smartphone',
   'bell', 'message', 'info', 'percent', 'sun', 'snow', 'sparkle',
   'arrow-down-right', 'chevron-right', 'chevron-left', 'close', 'check', 'wifi-off',
+  'search',
 ]
 
 if (import.meta.env.DEV && !ICON_NAMES.includes(props.name)) {
@@ -180,6 +181,12 @@ if (import.meta.env.DEV && !ICON_NAMES.includes(props.name)) {
 
     <template v-else-if="name === 'check'">
       <polyline points="4 12.5 9.5 18 20 6.5" />
+    </template>
+
+    <!-- 搜索（放大镜） -->
+    <template v-else-if="name === 'search'">
+      <circle cx="11" cy="11" r="7" />
+      <line x1="21" y1="21" x2="16.5" y2="16.5" />
     </template>
 
     <!-- 断线/离线 -->

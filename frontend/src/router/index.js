@@ -10,6 +10,7 @@ import Strategies from '../pages/Strategies.vue'
 import StrategyDetail from '../pages/StrategyDetail.vue'
 import Paper from '../pages/Paper.vue'
 import Memory from '../pages/Memory.vue'
+import NewsSearch from '../pages/NewsSearch.vue'
 
 const routes = [
   { path: '/', redirect: '/dashboard' },
@@ -26,6 +27,8 @@ const routes = [
   // 藏进"某条策略的详情页最下面"正是"用户不知道有这个功能"的原因。
   { path: '/paper', component: Paper, meta: { requiresAuth: true } },
   { path: '/memory', component: Memory, meta: { requiresAuth: true } },
+  // N4 资讯搜索页：后端 /news/search 早就就绪，这条路由把它接到用户面前
+  { path: '/news', component: NewsSearch, meta: { requiresAuth: true } },
   // 没有这条时访问未注册路径（手滑/旧链接）渲染一片空白页，没有任何反馈
   { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
 ]

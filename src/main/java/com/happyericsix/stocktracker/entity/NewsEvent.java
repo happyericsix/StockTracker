@@ -105,6 +105,27 @@ public class NewsEvent {
     private String relatedSymbols;
 
     /**
+     * 信息可信度 0-100（Python news_credibility 规则引擎产出；null = 未评估）。
+     *
+     * <p>判的是**传播链路可信度**（信源级别 + 措辞信号 + 交叉印证），
+     * 不是事实真伪——后者需要对照官方登记/裁判文书，超出资讯管道的能力边界。
+     */
+    @Column(name = "credibility")
+    private Integer credibility;
+
+    /** 高 / 较高 / 中 / 较低 / 低；与 credibility 同批写入 */
+    @Column(name = "credibility_grade", length = 8)
+    private String credibilityGrade;
+
+    /**
+     * 可信度明细 JSON：components{source,content,corroboration} + reasons[] +
+     * rumor_flag / sensational_flag / corroborated。
+     * 分数给快读，明细给"为什么"——用户必须能核对理由，而不是盲信一个数字。
+     */
+    @Column(name = "credibility_detail", columnDefinition = "TEXT")
+    private String credibilityDetail;
+
+    /**
      * 源站给出的发布时间。
      *
      * <p><b>允许为 null</b>：源站偶尔没有时间（Python 侧 {@code published_at} 为空串）。

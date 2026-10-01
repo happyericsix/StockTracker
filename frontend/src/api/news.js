@@ -54,3 +54,15 @@ export const prefetchStockNews = (symbol, days = 90) => {
     // 预取失败完全无所谓：真正进页面时会照常再拉一次
   })
 }
+
+/**
+ * 全市场资讯搜索（N4 搜索页）。
+ *
+ * 后端 `POST /api/v1/news/search`，body 形状见 `NewsSearchRequest`：
+ * {keyword?, symbol?, types?, days=7, scope?, page=0, size=20}。
+ * 返回 `Result<Page<NewsEventResponse>>` —— 拦截器剥掉 Result 后
+ * `res.data` 是 Spring Data 的 Page：`.content / .totalPages / .totalElements`。
+ * 响应里每条带 credibility/credibilityGrade/credibilityReasons（落库的静态评估）
+ * 与 freshnessLabel/freshHours（响应时实时计算的新鲜度）。
+ */
+export const searchNews = (payload) => request.post('/news/search', payload)

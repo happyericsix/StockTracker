@@ -538,6 +538,15 @@ const focusCaption = computed(() => {
   return `${event.title}　·　${source}　·　${date}　·　${directionLabel(event)}`
 })
 
+// 可信度徽章配色：沿用语义色板，不复用涨跌色（红=利好/绿=利空已有含义，
+// 可信度再叠上去同色会打架）。分档缺失（未评估）时不渲染徽章而不是显示灰色"未知"。
+const credibilityClass = (grade) => {
+  if (grade === '高') return 'cred-high'
+  if (grade === '较高') return 'cred-good'
+  if (grade === '中') return 'cred-mid'
+  return 'cred-low'
+}
+
 const directionClass = (direction) => {
   if (direction === '利好') return 'bull'
   if (direction === '利空') return 'bear'
@@ -1303,6 +1312,13 @@ const macdColor = (h) => h == null
                 {{ sourceMeta(event.sourceLevel).icon }} {{ event.sourceName || sourceMeta(event.sourceLevel).label }}
               </span>
               <span class="event-time num">{{ formatEventTime(event.publishedAt) }}</span>
+              <span v-if="event.freshnessLabel" class="event-fresh num">{{ event.freshnessLabel }}</span>
+              <span
+                v-if="event.credibilityGrade"
+                class="event-credibility"
+                :class="credibilityClass(event.credibilityGrade)"
+                :title="(event.credibilityReasons || []).join('；')"
+              >可信 {{ event.credibilityGrade }}</span>
               <span class="event-direction" :class="directionClass(event.direction)">
                 {{ directionLabel(event) }}
               </span>
@@ -1310,6 +1326,11 @@ const macdColor = (h) => h == null
             <p class="event-title">
               <a v-if="event.url" :href="event.url" target="_blank" rel="noopener noreferrer" @click.stop>{{ event.title }}</a>
               <template v-else>{{ event.title }}</template>
+            </p>
+            <!-- 传闻警示必须放在标题与解读之间：它改变的是"下面这段 AI 解读该带着多大怀疑看" -->
+            <p v-if="event.rumorFlag" class="event-rumor" role="alert">
+              ⚠️ 传闻特征明显，未经证实——请以官方公告为准
+              <span v-if="(event.credibilityReasons || []).length" class="rumor-why">{{ event.credibilityReasons[0] }}</span>
             </p>
             <p v-if="event.analyzed" class="event-summary">{{ event.plainSummary }}</p>
             <!-- ⚠️ 「还在解读」和「信息不足，不判断方向」是**两件事**，颜色和文案都必须分开：
@@ -1747,6 +1768,33 @@ main > .market-notice { grid-area: notice; }
   border-radius: var(--radius-pill);
   font-size: 11px;
 }
+/* 时效与可信度：轻量文本标签，不与"利好/利空"的方向徽章抢视觉权重 */
+.event-fresh {
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+.event-credibility {
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  border: 1px solid currentColor;
+  cursor: help;  /* title 里带可信度理由（信源/措辞/印证），hover 可核对"为什么" */
+}
+.event-credibility.cred-high { color: var(--color-accent); }
+.event-credibility.cred-good { color: var(--color-accent); }
+.event-credibility.cred-mid  { color: var(--color-text-muted); }
+.event-credibility.cred-low  { color: var(--color-warning); }
+/* 传闻警示条：整卡最需要被看见的一条，用警示底色而不是小字 */
+.event-rumor {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}
+.event-rumor .rumor-why { display: block; font-size: 11px; opacity: 0.85; }
 /* 与全站涨跌同色：红=利好、绿=利空。文字标签同时在场，颜色只是强化。 */
 .event-direction.bull { color: var(--color-gain); }
 .event-direction.bear { color: var(--color-loss); }

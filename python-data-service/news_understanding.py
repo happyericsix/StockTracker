@@ -30,6 +30,7 @@ import re
 import llm_service
 from akshare_client import normalize_symbol
 from news_client import is_about_the_stock
+from news_credibility import attach as attach_credibility
 
 logger = logging.getLogger(__name__)
 
@@ -415,20 +416,27 @@ def analyze_events(items: list[dict]) -> dict:
     for original_index, entry in degraded_entries(unanalyzed):
         entries[original_index] = entry
 
-    result["items"] = [entries[i] for i in sorted(entries)]
+    # 可信度（信源/内容/交叉印证）对**全部**条目生效，包括降级的：
+    # "模型没配"不该连带把"这条是传闻"的警示也藏起来。批内做交叉印证。
+    result["items"] = attach_credibility(
+        [entries[i] for i in sorted(entries)])
     result["errors"] = list(dict.fromkeys(result["errors"]))  # 多批失败时不要刷屏
     return result
 
 
-def analyze_one(item: dict, mode: str = "deep") -> dict:
+def analyze_one(item: dict, mode: str = "deep", peers: list[dict] | None = None) -> dict:
     """单条事件解读。`mode="deep"` 额外产出 `risks` / `opportunities`（红绿标注）。
 
     用户点开某一条才跑，所以这里给足输出预算。失败照样返回降级结构
     —— 页面上"信息不足"远好过一个空白面板或 500。
+
+    `peers`：同标的的**其它**条目。给了就在批内做交叉印证（可信度更准）；
+    不给则 corroboration 维度按"未检出"计——宁可少一次加成，不瞎猜印证。
     """
     base = dict(item or {})
     if not llm_service._is_available():
-        return dict(base, **_degraded(base), analyzed=False)
+        return attach_credibility(
+            [dict(base, **_degraded(base), analyzed=False)], peers=peers)[0]
 
     prompt_name = "news_deep_dive" if mode == "deep" else "news_analyst"
     try:
@@ -445,7 +453,8 @@ def analyze_one(item: dict, mode: str = "deep") -> dict:
         logger.warning("单条解读失败: %s", exc)
         return dict(base, **_degraded(base), analyzed=False)
 
-    return dict(base, **normalize_analysis(parsed, base), analyzed=True)
+    return attach_credibility(
+        [dict(base, **normalize_analysis(parsed, base), analyzed=True)], peers=peers)[0]
 
 
 def score(direction, confidence, impact_level, source_level) -> float:

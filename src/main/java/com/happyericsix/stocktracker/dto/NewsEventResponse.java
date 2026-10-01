@@ -44,6 +44,31 @@ public class NewsEventResponse {
     private List<String> opportunities;
     /** 是否已经有过解读（= plainSummary 有值）；未解读时前端显示"信息不足，不判断方向" */
     private boolean analyzed;
+
+    // ===== 可信度（Python news_credibility 规则引擎产出，静态属性，随分析落库）=====
+    /** 0-100；null = 未评估 */
+    private Integer credibility;
+    /** 高 / 较高 / 中 / 较低 / 低 */
+    private String credibilityGrade;
+    /** 人话理由（"官方公告渠道""含传闻类措辞""另有信源印证"…），给"为什么可信/存疑" */
+    private List<String> credibilityReasons;
+    /** ⚠️ 传闻特征明显（措辞命中且非公告渠道）——展示层必须显著警示 */
+    private boolean rumorFlag;
+    /** 标题情绪化用词 */
+    private boolean sensationalFlag;
+    /** 批内交叉印证：另有不同信源讲述相似事件 */
+    private boolean corroborated;
+
+    // ===== 时效性（相对"现在"的属性，不落库、每次响应实时计算）=====
+    /**
+     * 距发布多少小时（向下取整）；发布时间缺失时为 null。
+     * 新鲜度是相对量——冻结在分析时刻的"3 小时前"第二天就变成谎言，
+     * 所以这一族字段永远在响应时现算（CnTime 口径，东八区）。
+     */
+    private Long freshHours;
+    /** "3小时内" / "24小时内" / "3天前" / "3周前"；时间未知为 null */
+    private String freshnessLabel;
+
     private LocalDateTime publishedAt;
     private LocalDateTime createdAt;
 
@@ -70,9 +95,63 @@ public class NewsEventResponse {
         response.risks = readStringList(event.getRisks(), mapper);
         response.opportunities = readStringList(event.getOpportunities(), mapper);
         response.analyzed = event.getPlainSummary() != null && !event.getPlainSummary().isBlank();
+        response.credibility = event.getCredibility();
+        response.credibilityGrade = event.getCredibilityGrade();
+        readCredibilityDetail(event.getCredibilityDetail(), mapper, response);
+        response.freshHours = freshHours(event.getPublishedAt());
+        response.freshnessLabel = freshnessLabel(event.getPublishedAt());
         response.publishedAt = event.getPublishedAt();
         response.createdAt = event.getCreatedAt();
         return response;
+    }
+
+    /**
+     * 时效性分档。档位不追求精确（精确交给 freshHours），追求一眼可读：
+     * "24小时内"和"27小时前"对决策是同一件事，不必让用户做减法。
+     */
+    static String freshnessLabel(LocalDateTime publishedAt) {
+        if (publishedAt == null) {
+            return null;
+        }
+        long hours = freshHours(publishedAt);
+        if (hours < 1) return "1小时内";
+        if (hours < 3) return "3小时内";
+        if (hours < 6) return "6小时内";
+        if (hours < 24) return "24小时内";
+        long days = hours / 24;
+        if (days < 7) return days + "天前";
+        if (days < 30) return (days / 7) + "周前";
+        return "30天前";
+    }
+
+    /** 距发布几小时；负数（时钟偏差/未来时间）按 0 计，时间未知返回 null。 */
+    static Long freshHours(LocalDateTime publishedAt) {
+        if (publishedAt == null) {
+            return null;
+        }
+        return Math.max(0L, java.time.Duration.between(
+                publishedAt, com.happyericsix.stocktracker.util.CnTime.now()).toHours());
+    }
+
+    /** 解析 credibility_detail JSON；坏数据退化成空值，绝不让一条明细拖垮整个列表。 */
+    private static void readCredibilityDetail(String json, ObjectMapper mapper, NewsEventResponse response) {
+        if (json == null || json.isBlank()) {
+            return;
+        }
+        try {
+            var detail = mapper.readValue(json,
+                    new TypeReference<java.util.Map<String, Object>>() {});
+            Object reasons = detail.get("reasons");
+            if (reasons instanceof List<?> list) {
+                response.credibilityReasons = list.stream()
+                        .map(String::valueOf).filter(s -> !s.isBlank()).toList();
+            }
+            response.rumorFlag = Boolean.TRUE.equals(detail.get("rumor_flag"));
+            response.sensationalFlag = Boolean.TRUE.equals(detail.get("sensational_flag"));
+            response.corroborated = Boolean.TRUE.equals(detail.get("corroborated"));
+        } catch (Exception ignored) {
+            // 明细是增强件：解析失败只是少几个徽章，不该让响应 500
+        }
     }
 
     /** JSON 字符串数组 → List；坏数据不该让整个搜索接口 500，所以失败就退化成空列表。 */
@@ -124,6 +203,22 @@ public class NewsEventResponse {
     public void setOpportunities(List<String> opportunities) { this.opportunities = opportunities; }
     public boolean isAnalyzed() { return analyzed; }
     public void setAnalyzed(boolean analyzed) { this.analyzed = analyzed; }
+    public Integer getCredibility() { return credibility; }
+    public void setCredibility(Integer credibility) { this.credibility = credibility; }
+    public String getCredibilityGrade() { return credibilityGrade; }
+    public void setCredibilityGrade(String credibilityGrade) { this.credibilityGrade = credibilityGrade; }
+    public List<String> getCredibilityReasons() { return credibilityReasons; }
+    public void setCredibilityReasons(List<String> credibilityReasons) { this.credibilityReasons = credibilityReasons; }
+    public boolean isRumorFlag() { return rumorFlag; }
+    public void setRumorFlag(boolean rumorFlag) { this.rumorFlag = rumorFlag; }
+    public boolean isSensationalFlag() { return sensationalFlag; }
+    public void setSensationalFlag(boolean sensationalFlag) { this.sensationalFlag = sensationalFlag; }
+    public boolean isCorroborated() { return corroborated; }
+    public void setCorroborated(boolean corroborated) { this.corroborated = corroborated; }
+    public Long getFreshHours() { return freshHours; }
+    public void setFreshHours(Long freshHours) { this.freshHours = freshHours; }
+    public String getFreshnessLabel() { return freshnessLabel; }
+    public void setFreshnessLabel(String freshnessLabel) { this.freshnessLabel = freshnessLabel; }
     public LocalDateTime getPublishedAt() { return publishedAt; }
     public void setPublishedAt(LocalDateTime publishedAt) { this.publishedAt = publishedAt; }
     public LocalDateTime getCreatedAt() { return createdAt; }

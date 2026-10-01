@@ -894,14 +894,24 @@ public class NewsService {
                 if (row == null || !row.isObject()) {
                     continue;
                 }
+                NewsEvent event = pending.get(i);
+                // 可信度（信源/措辞/交叉印证）对**所有**条目生效，包括未解读的：
+                // "模型没配上"不该连带把"这条是传闻"的警示也藏起来。
+                // 只写可信度三列，不碰 plainSummary —— 补解读的幂等键判的是
+                // plainSummary 是否有值，所以这些行以后仍会被正常补解读。
+                if (row.path("credibility").isNumber()) {
+                    event.setCredibility(row.path("credibility").asInt());
+                    event.setCredibilityGrade(blankToNull(text(row, "credibility_grade")));
+                    event.setCredibilityDetail(credibilityDetail(row));
+                    newsEventRepository.save(event);
+                }
                 if (!row.path("analyzed").asBoolean(false)) {
-                    // 降级的条目（模型没配 / 该条没轮到 / 解析失败）**不落库**：
+                    // 降级的条目（模型没配 / 该条没轮到 / 解析失败）**不落分析字段**：
                     // 落库就等于把它标成"已解读"，幂等键会让它以后再也不重试；
                     // 而"信息不足，不判断方向"这句话前端在 direction 为空时本来就会显示，
                     // 所以不落库并不丢信息。已解读的内容也不会被降级结果覆盖。
                     continue;
                 }
-                NewsEvent event = pending.get(i);
                 event.setEventType(blankToNull(text(row, "event_type")));
                 event.setDirection(blankToNull(text(row, "direction")));
                 event.setConfidence(row.path("confidence").isNumber() ? row.path("confidence").asDouble() : null);
@@ -1294,6 +1304,31 @@ public class NewsService {
             return mapper.writeValueAsString(values);
         } catch (Exception e) {
             log.warn("资讯字段序列化失败，按空处理：{}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 从 Python 分析行里摘出可信度明细（分数之外的"为什么"），
+     * 序列化成 JSON 落库。只挑前端真正要展示的字段——
+     * components 给 hover 明细，reasons 给人话解释，三个 flag 给徽章。
+     */
+    private String credibilityDetail(JsonNode row) {
+        try {
+            java.util.Map<String, Object> detail = new java.util.LinkedHashMap<>();
+            JsonNode components = row.get("credibility_components");
+            if (components != null && components.isObject()) {
+                detail.put("components", mapper.readValue(
+                        components.toString(),
+                        new tools.jackson.core.type.TypeReference<java.util.Map<String, Object>>() {}));
+            }
+            detail.put("reasons", stringList(row.get("credibility_reasons")));
+            detail.put("rumor_flag", row.path("rumor_flag").asBoolean(false));
+            detail.put("sensational_flag", row.path("sensational_flag").asBoolean(false));
+            detail.put("corroborated", row.path("corroborated").asBoolean(false));
+            return mapper.writeValueAsString(detail);
+        } catch (Exception e) {
+            log.warn("可信度明细序列化失败，按空处理：{}", e.getMessage());
             return null;
         }
     }
