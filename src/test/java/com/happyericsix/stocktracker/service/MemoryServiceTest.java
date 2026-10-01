@@ -108,7 +108,7 @@ class MemoryServiceTest {
 
     @Test
     void contextAlwaysCarriesTodayEvenWithoutMemory() {
-        Map<String, Object> context = service.buildContext(null, null);
+        Map<String, Object> context = service.buildContext(null, null, null, null, MemoryService.FACT_LIMIT);
 
         // 关键：即使一条记忆都没有，"今天几号"也必须给模型（否则"去年""上周"无从换算）
         assertEquals(service.today(), context.get("today"));
@@ -126,7 +126,7 @@ class MemoryServiceTest {
         when(factService.searchFacts(1L, "把止损改成5%", "600519", null, MemoryService.FACT_LIMIT))
                 .thenReturn(List.of(Map.of("predicate", "stop_loss_pct", "object", "5")));
 
-        Map<String, Object> context = service.buildContext(1L, "1:2026-09-16", "把止损改成5%", "600519");
+        Map<String, Object> context = service.buildContext(1L, "1:2026-09-16", "把止损改成5%", "600519", MemoryService.FACT_LIMIT);
 
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> facts = (List<Map<String, Object>>) context.get("facts");
@@ -150,7 +150,7 @@ class MemoryServiceTest {
         when(eventRepo.findRecentOtherSessionKeys(eq(1L), anyString(), any(Pageable.class)))
                 .thenReturn(List.of());
 
-        Map<String, Object> context = service.buildContext(1L, "1:2026-09-16");
+        Map<String, Object> context = service.buildContext(1L, "1:2026-09-16", null, null, MemoryService.FACT_LIMIT);
 
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> recaps = (List<Map<String, Object>>) context.get("recaps");
@@ -191,7 +191,7 @@ class MemoryServiceTest {
                 MemoryEvent.builder().role("assistant").content("已生成策略「MA cross」（600519）")
                         .occurredAt(LocalDateTime.of(2026, 9, 15, 10, 1)).build()));
 
-        Map<String, Object> context = service.buildContext(1L, "1:2026-09-16");
+        Map<String, Object> context = service.buildContext(1L, "1:2026-09-16", null, null, MemoryService.FACT_LIMIT);
 
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> digest = (List<Map<String, Object>>) context.get("pendingDigest");

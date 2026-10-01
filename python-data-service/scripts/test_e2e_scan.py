@@ -15,6 +15,10 @@ test_e2e_scan.py — 第 5 步端到端验收：真实扫码全链路
 用法：
     .\\.venv\\Scripts\\python.exe test_e2e_scan.py
 """
+
+# 从 scripts/ 运行时把包根目录放进 sys.path（这些脚本 import 顶层模块如 ths_client）
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 import json
 import sys
 import time

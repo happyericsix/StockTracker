@@ -19,6 +19,10 @@ test_auth_only.py — 只验证「三步鉴权」这一件事
 用法：
     .\\.venv\\Scripts\\python.exe test_auth_only.py
 """
+
+# 从 scripts/ 运行时把包根目录放进 sys.path（这些脚本 import 顶层模块如 ths_client）
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 import sys
 import urllib.parse
 

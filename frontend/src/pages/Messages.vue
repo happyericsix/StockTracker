@@ -156,9 +156,7 @@ const loadPage = async () => {
     if (activeTab.value === 'alert') params.type = 'ALERT'
     // 复盘：单一 type，服务端过滤能正确分页（客户端过滤会让"加载更多"漏掉被过滤掉的条数）
     if (activeTab.value === 'report') params.type = 'PAPER_REPORT'
-    if (activeTab.value === 'chat') params.type = 'CHAT_USER,CHAT_BOT'  // 暂不支持 IN
-    // 简化为：tab=chat 传 null 让后端全量返回，客户端过滤
-    if (activeTab.value === 'chat') delete params.type
+    // tab=chat：不传 type 让后端全量返回，客户端过滤（服务端暂不支持 IN）
 
     // 时间范围
     const range = timeRanges.find((r) => r.key === timeRange.value)
@@ -228,9 +226,6 @@ const handleReadAll = async () => {
 // 切 tab / 切过滤器时重载
 const onTabChange = () => load()
 const onTimeRangeChange = () => load()
-const onSymbolFilterChange = () => {
-  // 仅客户端过滤，不重新请求
-}
 
 // 跳 K 线图
 const viewChart = (symbol) => {
@@ -246,7 +241,6 @@ const onReconnect = async () => {
 }
 
 // 滚动到底自动加载
-const mainRef = ref(null)
 const onScroll = async (e) => {
   const el = e.target
   if (!el) return
@@ -298,7 +292,6 @@ onUnmounted(() => {
       <div class="filter-row">
         <input
           v-model="symbolFilter"
-          @input="onSymbolFilterChange"
           aria-label="按股票代码过滤消息"
           placeholder="按股票代码过滤（如 AAPL）"
           list="known-symbols"
@@ -322,7 +315,7 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <main ref="mainRef" @scroll="onScroll">
+    <main @scroll="onScroll">
       <div v-if="loading" class="empty">加载中...</div>
       <!-- 加载失败必须说出来并给出恢复路径。
            原来 catch 为空，断网时列表为空 → 页面显示「暂无消息」，

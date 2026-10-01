@@ -17,13 +17,13 @@ from akshare_client import (get_quote, get_history, get_minute_kline, get_overvi
                             search_stocks, warm_stock_list)
 # news_client 是模块级导入而不是 lazy：它只依赖 akshare / akshare_client，
 # 两者本来就是这个进程的启动依赖，不存在"某个可选包缺失导致 app 起不来"的风险。
-# （与之对照：quant_model 用了 sklearn，所以它必须 lazy —— 见下面的注释。）
+# （与之对照：quant_model 导了 lightgbm/numpy 一票重依赖，所以它必须 lazy —— 见下面的注释。）
 import news_client
 import news_understanding
 # 交易日历：行情接口要回答"这个价是哪一天的"，前端要回答"今天休市、休到哪天"。
 # 它只依赖 akshare（本进程的启动依赖），所以可以模块级导入。
 import trading_calendar
-# 注意:quant_model(用了 sklearn) 改成 lazy import,
+# 注意:quant_model(带 lightgbm 等重依赖) 改成 lazy import,
 # 避免启动时因 sklearn 缺失导致整个 app 挂掉
 # 真正的 import 在用到 analyze_stock 的 endpoint 函数里
 from models import StockQuoteResponse, GlobalQuote, StockHistoryResponse, MetaData, DailyPrice, StockOverviewResponse
@@ -496,7 +496,7 @@ def stock_overview(symbol: str):
 def stock_indicators(symbol: str):
     """量化指标分析（默认不包含模型预测）"""
     try:
-        # lazy import:避免启动时因 sklearn 缺失导致整个 app 挂掉
+        # lazy import:避免启动时因重依赖(lightgbm/numpy)缺失导致整个 app 挂掉
         from quant_model import analyze_stock
         records = get_history(symbol)
         if records is None or len(records) < 20:

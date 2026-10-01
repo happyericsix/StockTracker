@@ -15,7 +15,12 @@ test_ths_endpoints.py — 用 HTTP 接口跑一遍扫码登录（教程第 3.4 �
     # 2) 再开一个终端跑本文件：
     .\\.venv\\Scripts\\python.exe test_ths_endpoints.py
 """
+
 from __future__ import annotations
+
+# 从 scripts/ 运行时把包根目录放进 sys.path（这些脚本 import 顶层模块如 ths_client）
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 import json
 import sys

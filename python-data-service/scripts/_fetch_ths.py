@@ -6,7 +6,7 @@ import tarfile
 import urllib.request
 
 DEST = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vendor"
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "vendor"
 )
 URL = "https://codeload.github.com/djj45/thspypc/tar.gz/refs/heads/main"
 

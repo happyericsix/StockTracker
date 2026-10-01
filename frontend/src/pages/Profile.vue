@@ -73,11 +73,8 @@ const fetchProfile = async () => {
       profile.value = payload
     }
   } catch (e) {
-    // 如果后端暂无接口，使用 localStorage 兜底
-    const stored = localStorage.getItem('user_profile')
-    if (stored) {
-      try { profile.value = JSON.parse(stored) } catch {}
-    }
+    // 后端不可达时保持空态：全站没有任何地方写入过 user_profile 这个 key，
+    // 旧的 localStorage 兜底分支永远走不到，已删。
   }
 }
 
@@ -112,7 +109,6 @@ const handleLogout = () => {
   // 先断开 SSE，避免旧账号连接在登出后继续推送/换账号后串台
   messageBus.disconnect()
   localStorage.removeItem('token')
-  localStorage.removeItem('user_profile')
   router.push('/login')
 }
 

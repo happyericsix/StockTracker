@@ -57,12 +57,14 @@ python-data:
 | 文件 | 作用 |
 |---|---|
 | **`ths_client.py`** | **正式模块**，唯一实现：扫码 + 鉴权 + 读自选股（对外 3 个方法） |
-| `test_ths_endpoints.py` | 走 HTTP 接口验证（和 Java 后端调用路径一致） |
-| `test_auth_only.py` | 只验三步鉴权（测的就是 `ths_client` 里的实现） |
-| `test_selfstock_only.py` | 只验自选股取数（并排对比几种取数方式） |
-| `ths_probe_v2.py` | 探针：扫码 → 鉴权 → 读自选，每步打印（初版验证用，保留作参考） |
-| `ths_probe_simple.py` | 纯 `requests` 裸写的最短版本（教学用） |
-| `_fetch_ths.py` / `_fetch_qrcode.py` | 重新拉取 vendor 依赖 |
+| `scripts/test_ths_endpoints.py` | 走 HTTP 接口验证（和 Java 后端调用路径一致） |
+| `scripts/test_auth_only.py` | 只验三步鉴权（测的就是 `ths_client` 里的实现） |
+| `scripts/test_selfstock_only.py` | 只验自选股取数（并排对比几种取数方式） |
+| `scripts/_fetch_ths.py` / `scripts/_fetch_qrcode.py` | 重新拉取 vendor 依赖 |
+
+> 2026-09-21 清理：初版探针（`ths_probe_v2.py` / `ths_probe_simple.py`）与
+> 一次性自检脚本已删除（实现早已搬进 `ths_client.py`，原版见 git 历史）；
+> 其余手工验证脚本归档进 `scripts/`，跑法如 `python scripts/test_auth_only.py`。
 
 > ⚠️ **不要出现第二份实现。** 三步鉴权曾经在 `ths_probe_v2.py` 和 `ths_client.py`
 > 里各写了一份，这会导致"探针能用、接口不能用"这种最难查的 bug。

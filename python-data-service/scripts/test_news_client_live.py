@@ -13,6 +13,10 @@
     $env:PYTHONIOENCODING="utf-8"
     .\.venv\Scripts\python.exe test_news_client_live.py
 """
+
+# 从 scripts/ 运行时把包根目录放进 sys.path（这些脚本 import 顶层模块如 ths_client）
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 import sys
 from datetime import date
 

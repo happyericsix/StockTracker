@@ -20,11 +20,6 @@ public class GlobalExceptionHandler {
         return ResponseEntity.badRequest().body(Result.error(400, ex.getMessage()));
     }
 
-    @ExceptionHandler(RateLimitException.class)
-    public ResponseEntity<Result<Void>> handleRateLimit(RateLimitException ex) {
-        return ResponseEntity.status(429).body(Result.error(429, ex.getMessage()));
-    }
-
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<Result<Void>> handleIllegalArgument(IllegalArgumentException ex) {
         return ResponseEntity.badRequest().body(Result.error(400, ex.getMessage()));

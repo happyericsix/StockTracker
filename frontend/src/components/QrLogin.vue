@@ -27,7 +27,7 @@ const emit = defineEmits(['success', 'error'])
 
 const canvasRef = ref(null)
 const qrUrl = ref('')
-const status = ref('idle')        // idle | loading | waiting | confirming | ok | expired | error
+const status = ref('idle')        // idle | loading | waiting | ok | expired | error
 const message = ref('')
 const countdown = ref(0)
 const qrSessionId = ref('')
@@ -136,7 +136,7 @@ defineExpose({ start, stop: stopTimers })
       <!-- canvas 没有 alt：它是功能性图形（扫一下就是登录/绑定），
            用 role="img" + aria-label 描述要做的动作。倒计时/状态另由下面的提示承担。 -->
       <canvas
-        v-show="status === 'waiting' || status === 'confirming'"
+        v-show="status === 'waiting'"
         ref="canvasRef"
         role="img"
         :aria-label="isBind

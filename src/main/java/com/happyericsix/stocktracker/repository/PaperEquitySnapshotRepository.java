@@ -21,5 +21,4 @@ public interface PaperEquitySnapshotRepository extends JpaRepository<PaperEquity
     /** 取最近 N 个交易日（倒序取，调用方自行反转）。 */
     List<PaperEquitySnapshot> findByStrategyIdOrderByTradeDateDesc(Long strategyId, Pageable pageable);
 
-    long countByStrategyId(Long strategyId);
 }

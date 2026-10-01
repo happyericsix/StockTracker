@@ -31,7 +31,6 @@ public class RedisCacheConfig {
         return Caffeine.newBuilder()
                 .expireAfterWrite(Duration.ofSeconds(25))
                 .maximumSize(500)
-                .recordStats()
                 .build();
     }
 

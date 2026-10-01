@@ -9,8 +9,6 @@ import logging
 from typing import Optional
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
 import lightgbm as lgb
 from deep_models import MiniTransformer, DQNAgent
 import pickle

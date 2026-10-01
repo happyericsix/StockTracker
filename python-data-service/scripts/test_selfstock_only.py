@@ -17,6 +17,10 @@ test_selfstock_only.py — 只验证「读取自选股」这一段
 用法：
     .\\.venv\\Scripts\\python.exe test_selfstock_only.py
 """
+
+# 从 scripts/ 运行时把包根目录放进 sys.path（这些脚本 import 顶层模块如 ths_client）
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 import json
 import sys
 import urllib.parse

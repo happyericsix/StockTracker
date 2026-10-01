@@ -77,13 +77,7 @@ public class PaperTradingService {
      * 单一构造函数：**不要为了"测试方便"再加几个重载**。
      * Spring 遇到多个构造函数且没有 {@code @Autowired} 时会去找无参构造，直接起不来
      * （实测踩过：三个重载 → {@code NoSuchMethodException: <init>()} → 整个应用上下文挂掉）。
-     * 可选依赖（报告、验证）允许为 null，用 null 判断兜住，而不是靠另一个构造函数。
-     */
-    /**
-     * 单一构造函数：**不要再为了"测试方便"加重载**。
-     * 多个构造函数而没有 {@code @Autowired} 时 Spring 会去找无参构造，直接起不来
-     * （实测踩过：整个应用上下文挂掉）。可选依赖（报告/验证/预期）允许为 null，
-     * 用 null 判断兜住，而不是靠另一个构造函数。
+     * 可选依赖（报告/验证/预期）允许为 null，用 null 判断兜住，而不是靠另一个构造函数。
      */
     public PaperTradingService(StrategyRepository strategyRepository,
                                PaperAccountRepository paperAccountRepository,

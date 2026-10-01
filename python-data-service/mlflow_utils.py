@@ -6,7 +6,6 @@ Set MLFLOW_ALLOW_FILE_STORE=true env var as fallback for older experiments.
 """
 
 import mlflow
-import mlflow.sklearn
 from pathlib import Path
 from contextlib import contextmanager
 import logging

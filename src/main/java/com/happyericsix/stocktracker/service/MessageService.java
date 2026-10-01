@@ -171,27 +171,6 @@ public class MessageService {
     }
 
     /**
-     * 通用出口：落库 + SSE 推送（type 由调用方给）。
-     *
-     * <p>各条生产路径现在都有自己的出口：预警走 {@link #recordAlertTrigger}、
-     * 报告走 {@link #saveReport}、聊天回复走 {@code ChatService.saveBotReply}。
-     * 这个方法保留给测试与后续复用（{@code MessageReportIdempotencyTest} 在调）。
-     */
-    @Transactional
-    public void saveAndPush(User user, String type, String content, String relatedSymbol) {
-        Message message = Message.builder()
-                .user(user)
-                .type(type)
-                .content(content)
-                .relatedSymbol(relatedSymbol)
-                .read(false)
-                .build();
-        message = messageRepo.save(message);
-        sseService.push(user.getId(), withSymbolName(message));
-        log.info("Pushed {} to user {}: {}", type, user.getUsername(), content);
-    }
-
-    /**
      * 发一条**幂等**的系统消息（报告类）。
      *
      * <h3>为什么报告需要幂等键</h3>

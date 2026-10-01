@@ -17,6 +17,10 @@ N2 的单测全部用桩，因此它们只能证明"代码按契约处理了模�
 （首次实测 6 条公告全部 direction=None）。补正文正是为了修这件事 ——
 这个脚本的"方向覆盖率"就是那条修复的成败判据。
 """
+
+# 从 scripts/ 运行时把包根目录放进 sys.path（这些脚本 import 顶层模块如 ths_client）
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 import sys
 from datetime import date
 

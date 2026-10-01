@@ -295,7 +295,6 @@ const calcIndicators = (data) => {
 // 不回落到 e?.message —— 那是 axios 的英文原文，会直接泄漏给用户。
 const errorMessage = (e, fallback) => e?.response?.data?.message || fallback
 
-const dayOf = (iso) => String(iso || '').slice(0, 10)
 
 const SOURCE_META = {
   1: { icon: '📢', label: '公告' },
@@ -505,14 +504,10 @@ const eventNumberOf = (event) => {
 }
 
 /** 事件颜色：按列表序号取模，保证同一条在图上和列表里是同一个颜色。 */
-const colorForEvent = (event) => {
-  const number = eventNumberOf(event)
-  return token(EVENT_COLOR_TOKENS[(Math.max(number, 1) - 1) % EVENT_COLOR_TOKENS.length],
-               '#003eb3')
-}
-
 const colorForNumber = (number) =>
   token(EVENT_COLOR_TOKENS[(Math.max(number, 1) - 1) % EVENT_COLOR_TOKENS.length], '#003eb3')
+
+const colorForEvent = (event) => colorForNumber(eventNumberOf(event))
 
 /** 方向 → 线型。颜色已经让给"身份"，方向就靠线型表达。 */
 const directionLineType = (direction) => {
@@ -997,7 +992,7 @@ const renderChart = (sym, data) => {
     xAxis: [
       { type: 'category', data: dates, scale: true, boundaryGap: false,
         axisLine: { onZero: false }, splitLine: { show: false },
-        axisLabel: { formatter: (v) => isMinute ? v.substring(5) : v.substring(5), fontSize: 11 },
+        axisLabel: { formatter: (v) => v.substring(5), fontSize: 11 },
         axisPointer: { z: 100 }
       },
       { type: 'category', gridIndex: 1, data: dates, scale: true, boundaryGap: false,
@@ -1544,7 +1539,7 @@ main > .market-notice { grid-area: notice; }
   line-height: 1.5;
   color: var(--color-text-primary);
 }
-.event-loading, .event-empty, .event-notice {
+.event-empty, .event-notice {
   margin: 8px 0 0;
   font-size: 13px;
   line-height: 1.6;

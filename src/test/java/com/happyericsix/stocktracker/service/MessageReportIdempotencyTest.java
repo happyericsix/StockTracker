@@ -78,12 +78,19 @@ class MessageReportIdempotencyTest {
     @Test
     void chatMessagesWithoutAKeyAreStillUnlimited() {
         // dedupe_key 可为 NULL，而 MySQL 的唯一索引允许多个 NULL —— 少了这件事，
-        // 第二条聊天消息就会因为"键相同（都是 NULL）"插不进去
+        // 第二条聊天消息就会因为"键相同（都是 NULL）"插不进去。
+        // 直接走 repository：这里验证的是约束语义，不需要经过某个 service 出口。
         User user = user();
         long before = messageRepository.count();
 
-        messageService.saveAndPush(user, "CHAT_BOT", "测试消息 A", null);
-        messageService.saveAndPush(user, "CHAT_BOT", "测试消息 B", null);
+        for (String content : new String[]{"测试消息 A", "测试消息 B"}) {
+            messageRepository.save(Message.builder()
+                    .user(user)
+                    .type("CHAT_BOT")
+                    .content(content)
+                    .read(false)
+                    .build());
+        }
 
         assertTrue(messageRepository.count() >= before + 2);
         // 清理这两条测试消息

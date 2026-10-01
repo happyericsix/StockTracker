@@ -3,13 +3,13 @@
 ths_client.py — 同花顺客户端（扫码登录 + 读取自选股）
 
 ⚠️ 本文档的「三步鉴权」和「自选股取数」实现，是从已实测通过的
-   `ths_probe_v2.py` 原样搬过来的（2026-09-12 实测：扫码 → userid/sessionid
+   早期探针脚本（已删，见 git 历史）原样搬过来的（2026-09-12 实测：扫码 → userid/sessionid
    → passport → signvalid → 8 个 cookie → 自选股 HTTP 200）。
-   所以这两块**不要随意改**，改之前先回 ths_probe_v2.py 确认。
+   所以这两块**不要随意改**；要对照原版探针，去 git 历史（原 ths_probe_v2.py）。
 
 协议来源：
     扫码登录 + 自选股解析   ← djj45/thspypc（源码在 stock-tracker/vendor/）
-    三步鉴权 + 自选股取数   ← 本项目实测（原 ths_probe_v2.py）
+    三步鉴权 + 自选股取数   ← 本项目实测（原探针已删，见 git 历史）
     RSA 加密                ← 本项目 _ths_crypto_shim（纯标准库，无第三方依赖）
 
 对外 3 个方法（app.py 和 Java 都靠这几个，改动必须保持兼容）：
@@ -61,7 +61,7 @@ def _bootstrap() -> None:
         raise RuntimeError(
             f"找不到 vendored thspypc：{_THSPYPC_SRC}\n"
             "请先在 python-data-service 目录运行：\n"
-            "    .\\.venv\\Scripts\\python.exe _fetch_ths.py"
+            "    scripts/_fetch_ths.py"
         )
 
     # qrcode：终端渲染二维码用（没有真 qrcode 才用 vendor 副本）
@@ -152,7 +152,7 @@ class ThsApiError(Exception):
         self.code = code
 
 
-# ==================== 4. 三步鉴权（搬自 ths_probe_v2，已实测） ====================
+# ==================== 4. 三步鉴权（搬自早期探针，已实测） ====================
 
 
 def _http_get(path: str, timeout: float = 30) -> bytes:
@@ -160,7 +160,7 @@ def _http_get(path: str, timeout: float = 30) -> bytes:
 
     为什么不用 requests：这个鉴权接口走的是 **80 端口明文 HTTP**，
     而且服务端对 UA 有要求（识别同花顺客户端）。
-    这段是 ths_probe_v2 里实测通过的写法，原样保留。
+    这段是早期探针里实测通过的写法，原样保留。
     """
     req = (
         f"GET {path} HTTP/1.1\r\nHost: {AUTH_HOST}\r\n"
@@ -292,7 +292,7 @@ def get_http_cookies(auth: dict) -> dict:
     return cookies
 
 
-# ==================== 5. 自选股解析（搬自 ths_probe_v2，已实测） ====================
+# ==================== 5. 自选股解析（搬自早期探针，已实测） ====================
 
 # 市场码映射。
 # 为什么不直接用 thspypc 的 market_abbr()：它表里没有 16/32（指数码），

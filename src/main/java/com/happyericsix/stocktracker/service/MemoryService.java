@@ -181,14 +181,6 @@ public class MemoryService {
      * 这一层只补 history 给不了的东西——之前几段对话的摘要、与本次话题相关的事实、
      * 以及"今天是几号"。
      */
-    public Map<String, Object> buildContext(Long userId, String sessionKey) {
-        return buildContext(userId, sessionKey, null, null, FACT_LIMIT);
-    }
-
-    public Map<String, Object> buildContext(Long userId, String sessionKey, String query, String symbol) {
-        return buildContext(userId, sessionKey, query, symbol, FACT_LIMIT);
-    }
-
     /**
      * @param query     用户当前这句话，用于挑出<b>相关</b>的事实与经验（M1/M2 是关键词+类型打分）
      * @param symbol    当前话题的标的，标的完全匹配的事实优先
