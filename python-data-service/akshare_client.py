@@ -243,18 +243,25 @@ def get_quotes(symbols) -> dict:
         return result
 
     now = time.time()
-    missing: list[tuple[str, str]] = []
+    # 锁内只做缓存判定。resolve_symbol 对中文名/未知输入会走网络（冷启动拉全 A 股名单
+    # 实测 6s+），放在锁里会让这 6 秒内所有 get_quote/get_quotes 全部排队 ——
+    # 一次没预热的中文查询等于把整个行情服务冻住。
+    misses: list[str] = []
     with _quote_cache_lock:
         for symbol in unique:
             entry = _quote_cache.get(symbol)
             if entry and now - entry[0] < QUOTE_CACHE_TTL:
                 result[symbol] = entry[1]
             else:
-                resolved = resolve_symbol(symbol)
-                if not resolved:
-                    logger.warning("无法识别股票代码/名称: %s", symbol)
-                    continue
-                missing.append((symbol, normalize_symbol(resolved)))
+                misses.append(symbol)
+
+    missing: list[tuple[str, str]] = []
+    for symbol in misses:
+        resolved = resolve_symbol(symbol)
+        if not resolved:
+            logger.warning("无法识别股票代码/名称: %s", symbol)
+            continue
+        missing.append((symbol, normalize_symbol(resolved)))
 
     if not missing:
         return result

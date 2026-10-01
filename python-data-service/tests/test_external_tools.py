@@ -195,6 +195,38 @@ def test_batch_quotes_share_one_cache_and_report_missing(ctx, monkeypatch):
     assert out["data"]["missing"] == ["查不到的名字"]
 
 
+def test_batch_quotes_never_resolve_symbols_under_the_cache_lock(ctx, monkeypatch):
+    """resolve_symbol 对中文名/未知输入会走网络（冷启动拉全 A 股名单实测 6s+）。
+
+    它若在 _quote_cache_lock 内被调用，这 6 秒里所有 get_quote/get_quotes 都在
+    排队等锁 —— 一次没预热的中文查询等于把整个行情服务冻住。本用例钉住
+    "resolve_symbol 只允许在锁外发生"。
+    """
+    ac._quote_cache.clear()
+    lock_held_during_resolve = []
+
+    def spy_resolve(symbol_or_keyword):
+        # threading.Lock 不可重入：acquire(False) 失败 ⇔ 此刻锁被持有（正是要禁止的）
+        acquired = ac._quote_cache_lock.acquire(blocking=False)
+        lock_held_during_resolve.append(not acquired)
+        if acquired:
+            ac._quote_cache_lock.release()
+        return "600519" if symbol_or_keyword == "600519" else None
+
+    class _Resp:
+        encoding = "utf-8"
+        text = 'v_sh600519="1~贵州茅台~600519~1259.59~1272.7~' + "~" * 36 + '";'
+
+    monkeypatch.setattr(ac, "resolve_symbol", spy_resolve)
+    monkeypatch.setattr(ac.requests, "get", lambda url, **kw: _Resp())
+
+    out = execute_tool("get_quotes", {"symbols": ["600519"]})
+
+    assert tc.is_ok(out)
+    assert lock_held_during_resolve, "resolve_symbol 必须真的被走到（缓存未命中路径）"
+    assert not any(lock_held_during_resolve), "resolve_symbol 发生在缓存锁内：行情服务会被一次慢解析冻住"
+
+
 def test_batch_quotes_refuses_to_silently_truncate(ctx):
     """静默截断会让模型以为它拿到了全部对比对象：宁可明确拒绝。"""
     out = execute_tool("get_quotes", {"symbols": [f"6005{i:02d}" for i in range(60)]})
