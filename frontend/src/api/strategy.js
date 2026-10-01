@@ -11,6 +11,13 @@ export const startPaper = (id) => request.post(`/strategies/${id}/paper/start`)
 export const stopPaper = (id) => request.post(`/strategies/${id}/paper/stop`)
 export const getPaperAccount = (id) => request.get(`/strategies/${id}/paper/account`)
 export const getPaperTrades = (id) => request.get(`/strategies/${id}/paper/trades`)
+
+/**
+ * 决策日志（trade journal）：每天"说了什么"×次日收盘"实际怎样"→ 对答案。
+ * 口径是方向命中（≠盈亏），详见后端 TradeJournalResponse 的诚实边界注释。
+ */
+export const getStrategyJournal = (id, days = 90) =>
+  request.get(`/strategies/${id}/journal`, { params: { days } })
 // 结算痕迹：每一行 = 一根 bar 上的一个结论，含"为什么没成交"（skip_reason → 一句人话）
 export const getPaperTraces = (id, limit = 50) =>
   request.get(`/strategies/${id}/paper/traces`, { params: { limit } })

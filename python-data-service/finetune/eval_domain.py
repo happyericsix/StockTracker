@@ -224,6 +224,15 @@ def main() -> int:
     if not cases:
         print("✗ cases.yaml 为空——先人工审出一批金标（README §5）", file=sys.stderr)
         return 2
+    # 拒收半成品草稿：draft_cases.py 的产物带空 expect_direction，
+    # 混进评估会把方向准确率悄悄拉成 0（每条都判错）——那比报错危险
+    unfilled = [c.get("id") for c in cases
+                if c.get("kind", "direction") == "direction"
+                and not str(c.get("expect_direction") or "").strip()]
+    if unfilled:
+        print(f"✗ 有 {len(unfilled)} 条方向型用例没填 expect_direction"
+              f"（如 {unfilled[:3]}）——金标没审完不许评估", file=sys.stderr)
+        return 2
     print(f"[*] 评估 {args.model} @ {args.base}，{len(cases)} 个金标用例")
 
     results = evaluate(args.base, args.model, args.token, cases)

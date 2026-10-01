@@ -16,7 +16,8 @@ import {
   switchDecisionMode,
   getExpectation,
   registerExpectation,
-  getPaperOverview
+  getPaperOverview,
+  getStrategyJournal
 } from '../api/strategy.js'
 
 const router = useRouter()
@@ -240,6 +241,30 @@ const renderBacktestChart = async () => {
   }, { notMerge: true })
 }
 
+const journal = ref(null)
+const journalError = ref('')
+
+/**
+ * 决策日志：每天"说了什么"×次日收盘"实际怎样"。
+ * 命中率由记录说话，不由自述说话——它是"模型可信度"唯一的公开账本。
+ */
+const decisionLabel = (decision) => {
+  if (decision === 'buy') return '买入'
+  if (decision === 'sell') return '卖出'
+  return '不动'
+}
+
+const loadJournal = async () => {
+  journalError.value = ''
+  try {
+    const res = await getStrategyJournal(strategy.value.id)
+    journal.value = res.data || null
+  } catch (e) {
+    journal.value = null
+    journalError.value = errorMessage(e, '决策日志加载失败')
+  }
+}
+
 const loadPaper = async () => {
   try {
     const res = await getPaperAccount(strategy.value.id)
@@ -256,6 +281,7 @@ const loadPaper = async () => {
   }
   await loadTraces()
   await loadEquity()
+  await loadJournal()
 }
 
 /**
@@ -893,6 +919,54 @@ onUnmounted(() => {
         </section>
 
         <section class="card">
+          <h3>决策日志 · 说了什么 vs 后来怎样</h3>
+          <p class="trace-hint">
+            每天的判定用<strong>次日收盘方向</strong>对答案：买对了涨 / 卖对了跌 = 命中。
+            它量的是<strong>方向对错，不是盈亏</strong>（真实成交按 T+1 次日开盘、有整手与税费）。
+            最近的决策要等下一根收盘才能判定；行情源缺数据的日子标"无法判定"，不算错。
+          </p>
+          <p v-if="journalError" class="error" role="alert">{{ journalError }}</p>
+          <div v-else-if="!journal || !journal.entries || journal.entries.length === 0" class="empty">
+            还没有可对照的决策记录（模拟盘跑起来之后，这里每天会多一行）
+          </div>
+          <template v-else>
+            <div class="metric-grid num" v-if="journal.evaluated > 0 || journal.pending > 0">
+              <div class="metric">
+                <span>方向命中率</span>
+                <strong>{{ journal.hitRate != null ? journal.hitRate + '%' : '暂无样本' }}</strong>
+              </div>
+              <div class="metric">
+                <span>命中 / 判错</span>
+                <strong>{{ journal.hits }} / {{ journal.misses }}</strong>
+              </div>
+              <div class="metric">
+                <span>待判定</span>
+                <strong>{{ journal.pending }}</strong>
+              </div>
+              <div class="metric">
+                <span>选择不动</span>
+                <strong>{{ journal.skips }} 天</strong>
+              </div>
+            </div>
+            <div class="journal-list num">
+              <div v-for="entry in journal.entries" :key="entry.tradeDate" class="journal-row">
+                <span class="journal-date">{{ entry.tradeDate }}</span>
+                <span class="journal-decision" :class="entry.decision">{{ decisionLabel(entry.decision) }}</span>
+                <span v-if="entry.decisionMode" class="journal-mode">{{ entry.decisionMode === 'agent' ? '委员会' : '规则' }}</span>
+                <span v-if="entry.verdict === 'hit'" class="journal-verdict hit">✓ 命中</span>
+                <span v-else-if="entry.verdict === 'miss'" class="journal-verdict miss">✗ 判错</span>
+                <span v-else-if="entry.verdict === 'pending'" class="journal-verdict pending">待判定</span>
+                <span v-else-if="entry.verdict === 'no_price'" class="journal-verdict pending">无法判定</span>
+                <span v-else class="journal-verdict skip">{{ entry.skipReason ? '不动 · ' + entry.skipReason : '不动' }}</span>
+                <span v-if="entry.nextChangePct != null" class="journal-change" :class="pnlClass(entry.nextChangePct)">
+                  次日 {{ formatPct(entry.nextChangePct) }}
+                </span>
+              </div>
+            </div>
+          </template>
+        </section>
+
+        <section class="card">
           <h3>净值曲线与机会成本</h3>
           <p class="trace-hint">
             空仓在账面上是 0，看起来没有代价。<strong>把同期的买入持有摆在旁边，代价就显形了</strong>：
@@ -1364,4 +1438,25 @@ main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }
   padding: 6px 12px;
   cursor: pointer;
 }
+
+/* 决策日志：一天一行的对答案表。命中/判错只用颜色+符号双通道（无障碍） */
+.journal-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.journal-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 7px 10px; border: 1px solid var(--color-border);
+  border-radius: var(--radius-md, 8px); background: var(--color-bg-surface);
+  font-size: 13px;
+}
+.journal-date { min-width: 86px; color: var(--color-text-secondary); }
+.journal-decision { font-weight: 600; }
+.journal-decision.buy { color: var(--color-gain); }
+.journal-decision.sell { color: var(--color-loss); }
+.journal-decision.skip { color: var(--color-text-muted); }
+.journal-mode { font-size: 11px; color: var(--color-text-muted); border: 1px solid var(--color-border-strong); border-radius: var(--radius-pill); padding: 0 6px; }
+.journal-verdict { margin-left: auto; font-size: 12px; }
+.journal-verdict.hit { color: var(--color-accent); }
+.journal-verdict.miss { color: var(--color-warning); }
+.journal-verdict.pending { color: var(--color-text-muted); }
+.journal-verdict.skip { color: var(--color-text-muted); }
+.journal-change { font-size: 12px; }
 </style>

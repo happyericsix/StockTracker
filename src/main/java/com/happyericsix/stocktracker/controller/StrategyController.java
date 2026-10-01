@@ -6,6 +6,7 @@ import com.happyericsix.stocktracker.dto.PaperEquityResponse;
 import com.happyericsix.stocktracker.dto.PaperTradeResponse;
 import com.happyericsix.stocktracker.dto.PaperTradeTraceResponse;
 import com.happyericsix.stocktracker.dto.ModelDiagnosticResponse;
+import com.happyericsix.stocktracker.dto.TradeJournalResponse;
 import com.happyericsix.stocktracker.dto.Result;
 import com.happyericsix.stocktracker.dto.StrategyRequest;
 import com.happyericsix.stocktracker.dto.StrategyResponse;
@@ -15,6 +16,7 @@ import com.happyericsix.stocktracker.service.ExpectationService;
 import com.happyericsix.stocktracker.service.PaperEquitySeries;
 import com.happyericsix.stocktracker.service.PaperTradingService;
 import com.happyericsix.stocktracker.service.StrategyService;
+import com.happyericsix.stocktracker.service.TradeJournalService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.format.annotation.DateTimeFormat;
@@ -33,6 +35,7 @@ public class StrategyController {
     private final StrategyService strategyService;
     private final PaperTradingService paperTradingService;
     private final ExpectationService expectationService;
+    private final TradeJournalService tradeJournalService;
     private final UserRepository userRepository;
 
     @GetMapping
@@ -75,6 +78,21 @@ public class StrategyController {
             @PathVariable Long id,
             Authentication authentication) {
         return Result.success(strategyService.getModelDiagnostic(authentication.getName(), id));
+    }
+
+    /**
+     * 决策日志（trade journal）：当时说了什么 × 后来实际发生了什么。
+     *
+     * <p>模型的命中率由记录说话，不由自述说话——这是"前向验证通过才可信"
+     * 的产品化出口。口径见 {@link TradeJournalResponse} 的诚实边界
+     * （方向对错 ≠ 盈亏；算不出就不判）。
+     */
+    @GetMapping("/{id}/journal")
+    public Result<TradeJournalResponse> getJournal(
+            @PathVariable Long id,
+            @RequestParam(required = false, defaultValue = "90") int days,
+            Authentication authentication) {
+        return Result.success(tradeJournalService.journal(authentication.getName(), id, days));
     }
 
     @PostMapping("/{id}/paper/start")
