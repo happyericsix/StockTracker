@@ -29,7 +29,11 @@ services:
     restart: unless-stopped
 
   python-data:
-    build: ./python-data-service
+    # 上下文必须是仓库根：镜像里要带上 vendor/（THS 扫码登录的逆向协议库），
+    # 只以 python-data-service/ 为上下文时 vendor 不在其中，容器内 THS 必断链
+    build:
+      context: .
+      dockerfile: python-data-service/Dockerfile
     container_name: stock-python-data
     # 不发布宿主端口：只允许 Java 后端经内部网络调用；
     # 服务间鉴权由 INTERNAL_API_TOKEN 保证

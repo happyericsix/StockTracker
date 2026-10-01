@@ -16,3 +16,16 @@ src/main/resources/app.key
 src/main/resources/app.pub
 secrets/
 python-data-service/.env
+
+# 上下文为仓库根时（python-data 镜像也要 vendor），嵌套重目录必须显式排除
+**/.venv/
+**/node_modules/
+**/__pycache__/
+**/*.pyc
+python-data-service/models/
+python-data-service/chroma_data/
+python-data-service/mlflow.db*
+python-data-service/.memory_index/
+python-data-service/.external_offload/
+python-data-service/market_calendar_cache.json
+frontend/dist/

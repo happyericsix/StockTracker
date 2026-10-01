@@ -1,5 +1,6 @@
 # 构建上下文排除：密钥、虚拟环境、模型与运行产物
-# （本目录作为 compose 的 build context，根目录 .dockerignore 不适用，必须单独配置）
+# （compose 已改为以仓库根为 build context，走根目录那份 .dockerignore；
+#  本文件保留给"以本目录为上下文直接 docker build"的场景）
 .env
 .env.*
 .venv/
