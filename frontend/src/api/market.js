@@ -12,3 +12,13 @@ import request from './request.js'
  * 把周五的收盘价当成今天的数据展示（这正是用户报的那个 bug）。
  */
 export const getMarketStatus = () => request.get('/market/status')
+
+/**
+ * 个股散户情绪：千股千评聚合指数（参与意愿/关注指数/评分）+ 对照验证结论。
+ *
+ * `res.data` 形状（Python sentiment_client 产出，Java 侧用快照历史补了
+ * desire 的验证）：{desire:{latest,avg5,change}, focus:{latest}, score:{latest},
+ * validation:{focus:{verdict}, score:{verdict}, desire:{verdict}}, disclaimer}。
+ * ⚠️ 展示层必须带上验证结论与 disclaimer——未验证的情绪不许裸奔成"看多/看空"。
+ */
+export const getSentiment = (symbol) => request.get('/market/sentiment', { params: { symbol } })

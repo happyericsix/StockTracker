@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted, nextTick, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getHistory, getMinuteKline, getStock } from '../api/stock.js'
 import { getStockEvents, getStockRead } from '../api/news.js'
+import { getSentiment } from '../api/market.js'
 import { anchorDateFor as anchorOnAxis } from '../utils/newsAnchor.js'
 import { useMarketStatus } from '../composables/useMarketStatus.js'
 import * as echarts from 'echarts'
@@ -762,6 +763,34 @@ const loadStockRead = async (sym) => {
 // 每次 loadData 自增序号，响应回来先确认自己仍是最新一次再动状态。
 let loadDataSeq = 0
 
+const sentiment = ref(null)
+
+// 散户情绪（旁路）：与 K 线并行拉、软失败、竞态防护与 loadData 同款。
+// 竞态序号共用 loadDataSeq——切股后旧情绪不得盖到新股票上。
+const loadSentiment = async (sym, seq) => {
+  try {
+    const res = await getSentiment(sym)
+    if (seq === loadDataSeq && res.data?.ok) {
+      sentiment.value = res.data.data || null
+    }
+  } catch {
+    if (seq === loadDataSeq) sentiment.value = null
+  }
+}
+
+// 验证结论的展示文案：三条指数的 verdict 里挑最有信息量的一条说；
+// 全是"样本不足"时如实说"还在攒数据"——这比藏起来好（用户会以为我们没做验证）
+const sentimentVerdict = computed(() => {
+  const v = sentiment.value?.validation
+  if (!v) return '情绪对照验证暂不可用'
+  const parts = []
+  if (v.focus?.verdict && v.focus.verdict !== '样本不足') parts.push(`关注指数：${v.focus.verdict}`)
+  if (v.score?.verdict && v.score.verdict !== '样本不足') parts.push(`评分：${v.score.verdict}`)
+  if (v.desire?.verdict && v.desire.verdict !== '样本不足') parts.push(`参与意愿：${v.desire.verdict}`)
+  if (parts.length) return parts[0]
+  return '对照验证样本收集中（约需 20 个交易日），暂不下结论'
+})
+
 const loadData = async (sym) => {
   const seq = ++loadDataSeq
   const isStale = () => seq !== loadDataSeq
@@ -773,6 +802,7 @@ const loadData = async (sym) => {
   disposeChart()
   // 资讯与 K 线并行拉：图表不必等它（实测个股事件在库里没有时要走"实时兜底"，会慢）
   loadEvents(sym)
+  loadSentiment(sym, seq)
 
   try {
     // 行情：分钟模式下用最近一个数据点的 close
@@ -1253,6 +1283,25 @@ const macdColor = (h) => h == null
         靠 areas 而不是嵌套 wrapper：wrapper 会让"手机端事件必须在指标之前"这条无法满足。
       -->
       <aside class="event-section" aria-labelledby="event-heading">
+        <!-- 散户情绪（股吧聚合指数）：先当被验证的假设展示——验证结论必须与数值同屏，
+             拿不到数据/验证时整卡隐藏（情绪是旁路，绝不占位空白卡） -->
+        <div v-if="sentiment" class="sentiment-card" aria-label="散户情绪">
+          <div class="sentiment-head">
+            <h3>散户情绪</h3>
+            <span class="sentiment-tag">未验证信号</span>
+          </div>
+          <div class="sentiment-metrics num">
+            <span v-if="sentiment.desire?.latest != null">
+              参与意愿 {{ sentiment.desire.latest.toFixed(0) }}<template v-if="sentiment.desire.change != null">（{{ sentiment.desire.change > 0 ? '+' : '' }}{{ sentiment.desire.change.toFixed(1) }}）</template>
+            </span>
+            <span v-if="sentiment.focus?.latest != null">关注 {{ sentiment.focus.latest.toFixed(0) }}</span>
+            <span v-if="sentiment.score?.latest != null">千股千评 {{ sentiment.score.latest.toFixed(0) }}</span>
+          </div>
+          <p class="sentiment-verdict">
+            {{ sentimentVerdict }}
+          </p>
+        </div>
+
         <div class="event-head">
           <h2 id="event-heading">事件与解读</h2>
           <p v-if="eventsError" class="event-error" role="alert">{{ eventsError }}</p>
@@ -1880,4 +1929,22 @@ main > .market-notice { grid-area: notice; }
     overflow-y: auto;
   }
 }
+
+/* 散户情绪卡：放在事件区顶部。验证结论与数值同屏是硬要求 */
+.sentiment-card {
+  margin: 10px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md, 8px);
+  background: var(--color-bg-subtle);
+}
+.sentiment-head { display: flex; align-items: center; justify-content: space-between; }
+.sentiment-head h3 { margin: 0; font-size: 13px; }
+.sentiment-tag {
+  font-size: 11px; color: var(--color-text-muted);
+  border: 1px solid var(--color-border-strong); border-radius: var(--radius-pill);
+  padding: 0 6px;
+}
+.sentiment-metrics { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 6px; font-size: 12px; color: var(--color-text-secondary); }
+.sentiment-verdict { margin: 6px 0 0; font-size: 11px; line-height: 1.5; color: var(--color-text-muted); }
 </style>

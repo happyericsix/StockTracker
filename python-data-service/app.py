@@ -21,6 +21,7 @@ from akshare_client import (get_quote, get_history, get_minute_kline, get_overvi
 # （与之对照：quant_model 导了 lightgbm/numpy 一票重依赖，所以它必须 lazy —— 见下面的注释。）
 import news_client
 import news_understanding
+import sentiment_client
 # 交易日历：行情接口要回答"这个价是哪一天的"，前端要回答"今天休市、休到哪天"。
 # 它只依赖 akshare（本进程的启动依赖），所以可以模块级导入。
 import trading_calendar
@@ -1240,14 +1241,43 @@ async def news_synthesize(req: Request):
                            status_code=400)
 
     quote = body.get("quote") if isinstance(body.get("quote"), dict) else None
+    # 散户情绪上下文（软失败）：综合解读时让模型知道"股吧在怎么议论"，
+    # 但必须连同"未验证"的定性一起给——不带定性的情绪数据会被模型当成
+    # 与公告同级的事实引用，那正是要防的。
+    symbol_for_sentiment = str(body.get("symbol") or "")
+    sentiment = None
+    if symbol_for_sentiment:
+        try:
+            sentiment = await asyncio.to_thread(sentiment_client.get_sentiment,
+                                                symbol_for_sentiment)
+        except Exception as exc:  # noqa: BLE001 - 情绪是旁路上下文，失败不挡综合解读
+            logger.warning("sentiment context unavailable for %s: %s",
+                           symbol_for_sentiment, exc)
     try:
         data = await asyncio.to_thread(
             news_understanding.synthesize_read,
-            items, str(body.get("symbol") or ""), str(body.get("name") or ""), quote)
+            items, str(body.get("symbol") or ""), str(body.get("name") or ""),
+            quote, sentiment)
     except Exception as e:
         logger.error(f"news synthesize error: {e}", exc_info=True)
         return _news_error("AI 综合解读暂时不可用，请稍后再试")
 
+    return {"ok": True, "data": data}
+
+
+# ==================== 散户情绪（千股千评聚合指数）====================
+
+
+@app.get("/api/v1/sentiment/{symbol}")
+def get_sentiment_endpoint(symbol: str):
+    """个股散户情绪：参与意愿/关注指数/千股千评评分 + 对照验证结论。
+
+    对照验证 = 情绪分桶 × 次日收盘方向（与 Java 侧决策日志同一判定哲学）。
+    未通过验证的情绪只展示不预测；验证结论随数据一起返回，前端必须展示。
+    """
+    data = sentiment_client.get_sentiment(symbol)
+    if data is None:
+        return {"ok": False, "error": "无法识别股票代码"}
     return {"ok": True, "data": data}
 
 

@@ -2,9 +2,12 @@ package com.happyericsix.stocktracker.controller;
 
 import com.happyericsix.stocktracker.dto.MarketStatusResponse;
 import com.happyericsix.stocktracker.dto.Result;
+import com.happyericsix.stocktracker.service.MarketSentimentService;
 import com.happyericsix.stocktracker.service.MarketStatusService;
+import tools.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -28,9 +31,22 @@ import org.springframework.web.bind.annotation.RestController;
 public class MarketController {
 
     private final MarketStatusService marketStatusService;
+    private final MarketSentimentService marketSentimentService;
 
     @GetMapping("/status")
     public Result<MarketStatusResponse> status() {
         return Result.success(marketStatusService.current());
+    }
+
+    /**
+     * 个股散户情绪（千股千评聚合指数 + 对照验证结论）。
+     *
+     * <p>挂在 /market 命名空间：它是市场数据（对所有人同一份），
+     * 不是用户态数据。Python 侧 30 分钟缓存 + Java 侧同步透传；
+     * 失败返回 {@code data=null}（前端软失败隐藏整卡），情绪是旁路。
+     */
+    @GetMapping("/sentiment")
+    public Result<JsonNode> sentiment(@RequestParam("symbol") String symbol) {
+        return Result.success(marketSentimentService.getSentiment(symbol));
     }
 }

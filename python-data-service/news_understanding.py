@@ -474,7 +474,45 @@ SYNTHESIS_MAX_TOKENS = 1200
 SYNTHESIS_MAX_EVENTS = 25
 
 
-def _synthesis_prompt(items: list[dict], symbol: str, name: str, quote: dict | None) -> str:
+def _sentiment_block(sentiment: dict | None) -> str:
+    """情绪上下文 → prompt 里的一个**带定性声明**的小节。
+
+    只给快照值与验证结论，不给原始序列：综合解读要的是"散户现在什么温度"，
+    不是让模型自己去做时序分析。验证结论必须原样带上——
+    "未见显著关系"时模型就不该把情绪当论据，这与"未验证不外放"同一条纪律。
+    """
+    if not sentiment:
+        return ""
+    desire = sentiment.get("desire") or {}
+    focus = sentiment.get("focus") or {}
+    score = sentiment.get("score") or {}
+    validation = sentiment.get("validation") or {}
+    parts = []
+    if desire.get("latest") is not None:
+        avg = desire.get("avg5")
+        parts.append(f"参与意愿 {desire['latest']:.0f}（5日均 {avg if avg is not None else '未知'}）")
+    if focus.get("latest") is not None:
+        parts.append(f"关注指数 {focus['latest']:.0f}")
+    if score.get("latest") is not None:
+        parts.append(f"千股千评 {score['latest']:.0f}")
+    if not parts:
+        return ""
+    verdicts = []
+    for key in ("desire", "focus", "score"):
+        item = validation.get(key) or {}
+        if item.get("verdict"):
+            verdicts.append(f"{key}:{item['verdict']}")
+    lines = [
+        "散户情绪（股吧聚合指数，**未验证信号**：引用必须注明验证结论，不得单独作为看多/看空依据）：",
+        "　" + "　".join(parts),
+    ]
+    if verdicts:
+        lines.append("　对照验证：" + "；".join(verdicts))
+    return "\n".join(lines) + "\n"
+
+
+def _synthesis_prompt(items: list[dict], symbol: str, name: str, quote: dict | None,
+                      sentiment: dict | None = None) -> str:
     """把已结构化的事件编成"给解读员看"的输入。
 
     只喂**结论字段**（方向/强度/一句话），不重贴标题与正文：模型已经逐条读过一次，
@@ -487,6 +525,9 @@ def _synthesis_prompt(items: list[dict], symbol: str, name: str, quote: dict | N
         change = quote.get("changePercent")
         change_text = f"{change}%" if change not in (None, "") else "未知"
         lines.append(f"最新价：{price}　当日涨跌：{change_text}")
+    sentiment_block = _sentiment_block(sentiment)
+    if sentiment_block:
+        lines.append(sentiment_block)
     lines.append(f"以下是最近 {len(items)} 条已结构化的事件（按时间倒序）：\n")
     for index, item in enumerate(items, 1):
         level = {1: "公告", 2: "媒体", 3: "研报", 4: "舆情"}.get(item.get("source_level"), "资讯")
@@ -504,7 +545,8 @@ def _synthesis_prompt(items: list[dict], symbol: str, name: str, quote: dict | N
 
 
 def synthesize_read(items: list[dict], symbol: str = "", name: str = "",
-                    quote: dict | None = None) -> dict:
+                    quote: dict | None = None,
+                    sentiment: dict | None = None) -> dict:
     """把一批事件读成一段连贯判断（**一次 LLM 调用**）。
 
     与 `analyze_events` 的分工：那个是**逐条分类**（每条一个方向标签），
@@ -528,7 +570,7 @@ def synthesize_read(items: list[dict], symbol: str = "", name: str = "",
 
     try:
         parsed, text = _chat_json(llm_service._load_prompt("news_synthesis"),
-                                  _synthesis_prompt(selected, symbol, name, quote),
+                                  _synthesis_prompt(selected, symbol, name, quote, sentiment),
                                   SYNTHESIS_MAX_TOKENS)
     except Exception as exc:  # noqa: BLE001 - 失败要退化成"不显示"，不是 500
         logger.warning("综合解读失败: %s", exc)
