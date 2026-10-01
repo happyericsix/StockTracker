@@ -1,6 +1,5 @@
 package com.happyericsix.stocktracker.service;
 
-import com.happyericsix.stocktracker.client.AkshareStockClient;
 import com.happyericsix.stocktracker.dto.*;
 import com.happyericsix.stocktracker.entity.FavoriteStock;
 import com.happyericsix.stocktracker.entity.User;
@@ -11,11 +10,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -25,10 +22,18 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
+/**
+ * 自选股与行情编排。
+ *
+ * <p>带缓存的行情/概况/指标读取在 {@link StockDataGateway} —— @Cacheable 必须经过
+ * Spring 代理才生效，而本类内部的 this 直调会绕过代理（这正是本类曾经
+ * "缓存全部失效、预警列表逐行打 Python"的根因）。这里的同名方法只是对外
+ * API 的委托，内部路径一律走 gateway。
+ */
 @Service
 public class StockService {
 
-    private final AkshareStockClient akshareStockClient;
+    private final StockDataGateway stockDataGateway;
     private final FavoriteStockRepository favoriteStockRepository;
     private final UserRepository userRepository;
     private final ExecutorService priceRefreshExecutor;
@@ -38,76 +43,38 @@ public class StockService {
     private static final long PER_STOCK_TIMEOUT_SECONDS = 10;
 
     @Autowired
-    public StockService(AkshareStockClient akshareStockClient,
+    public StockService(StockDataGateway stockDataGateway,
                         FavoriteStockRepository favoriteStockRepository,
                         UserRepository userRepository,
                         @Qualifier("priceRefreshExecutor") ExecutorService priceRefreshExecutor) {
-        this.akshareStockClient = akshareStockClient;
+        this.stockDataGateway = stockDataGateway;
         this.favoriteStockRepository = favoriteStockRepository;
         this.userRepository = userRepository;
         this.priceRefreshExecutor = priceRefreshExecutor;
     }
 
-    // ==================== 股票搜索 ====================
+    // ==================== 股票搜索（委托，缓存见 StockDataGateway）====================
 
-    /**
-     * 搜索股票代码/名称，永久缓存到 Redis。
-     * 空关键词也缓存空结果，防止缓存穿透。
-     */
-    @Cacheable(value = "stockSearch", key = "#keyword.trim().toUpperCase()", unless = "#result == null")
     public StockSearchResponse searchStocks(String keyword) {
-        if (keyword == null || keyword.trim().isEmpty()) {
-            return new StockSearchResponse("", 0, Collections.emptyList());
-        }
-        return akshareStockClient.searchStocks(keyword.trim());
+        return stockDataGateway.searchStocks(keyword);
     }
 
-    // ==================== 实时行情 ====================
+    // ==================== 实时行情（委托，缓存见 StockDataGateway）====================
 
-    @Cacheable(value = "stocks", key = "#stockSymbol")
     public StockResponse getStockForSymbol(final String stockSymbol) {
-        long startTime = System.currentTimeMillis();
-        log.info("Fetching stock quote for symbol: {} (cache miss)", stockSymbol);
-
-        StockQuoteResponse response = akshareStockClient.getStockQuote(stockSymbol);
-
-        if (response == null || response.globalQuote() == null) {
-            long duration = System.currentTimeMillis() - startTime;
-            log.warn("No quote data for symbol {} (empty response). Duration: {}ms", stockSymbol, duration);
-            return StockResponse.builder()
-                    .symbol(stockSymbol)
-                    .name(stockSymbol)
-                    .price(null)
-                    .lastUpdated(null)
-                    .build();
-        }
-
-        long duration = System.currentTimeMillis() - startTime;
-        log.info("Successfully fetched quote for {}. Duration: {}ms", stockSymbol, duration);
-        String quoteName = response.globalQuote().name();
-        return StockResponse.builder()
-                .symbol(response.globalQuote().symbol())
-                .name(quoteName == null || quoteName.isBlank() ? stockSymbol : quoteName)
-                .price(response.globalQuote().price())
-                .lastUpdated(response.globalQuote().lastTradingDay())
-                // 透传涨跌三项：Python 侧已解析，这里必须带上，否则前端拿不到方向
-                .previousClose(response.globalQuote().previousClose())
-                .change(response.globalQuote().change())
-                .changePercent(response.globalQuote().changePercent())
-                .build();
+        return stockDataGateway.getStockForSymbol(stockSymbol);
     }
 
-    @Cacheable(value = "stockOverviews", key = "#stockSymbol")
     public StockOverviewResponse getStockOverviewForSymbol(final String stockSymbol) {
-        return akshareStockClient.getStockOverview(stockSymbol);
+        return stockDataGateway.getStockOverviewForSymbol(stockSymbol);
     }
 
     /**
-     * 解析股票名称：走 stockOverviews Redis 缓存，失败回退为股票代码本身。
+     * 解析股票名称：走 gateway 的 stockOverviews 缓存，失败回退为股票代码本身。
      */
     public String resolveStockName(final String stockSymbol) {
         try {
-            StockOverviewResponse overview = getStockOverviewForSymbol(stockSymbol);
+            StockOverviewResponse overview = stockDataGateway.getStockOverviewForSymbol(stockSymbol);
             if (overview != null && overview.name() != null && !overview.name().isBlank()
                     && !overview.name().equals(stockSymbol)) {
                 return overview.name();
@@ -118,53 +85,10 @@ public class StockService {
         return stockSymbol;
     }
 
-    // ==================== 技术指标（RSI / MACD / 布林带）====================
+    // ==================== 技术指标（委托，缓存见 StockDataGateway）====================
 
-    /**
-     * 拿技术指标：调 Python 服务 /api/v1/indicators/{symbol}，5 分钟缓存
-     * 价格类预警不依赖此方法；RSI / MACD 类预警必须用
-     * 失败/数据不足时返回 null，evaluator 自行跳过
-     */
-    @Cacheable(value = "stockIndicators", key = "#stockSymbol")
     public IndicatorData getIndicators(final String stockSymbol) {
-        Map<String, Object> raw = akshareStockClient.getStockIndicators(stockSymbol);
-        if (raw == null || raw.containsKey("error")) {
-            log.debug("Indicators unavailable for {}: {}", stockSymbol, raw == null ? "null" : raw.get("error"));
-            return null;
-        }
-        return parseIndicators(raw);
-    }
-
-    @SuppressWarnings("unchecked")
-    private IndicatorData parseIndicators(Map<String, Object> raw) {
-        Object indicatorsObj = raw.get("indicators");
-        if (!(indicatorsObj instanceof Map)) {
-            return null;
-        }
-        Map<String, Object> ind = (Map<String, Object>) indicatorsObj;
-        IndicatorData data = new IndicatorData();
-        data.setRsi(asDouble(ind.get("rsi")));
-
-        // 只解析真正会读的两个字段。Python 侧同样只返回这两个（见 quant_model.analyze_stock），
-        // ma5/ma20/macd.dif/dea/bollinger 以前在这里解析、存进缓存，然后没有任何读取点 ——
-        // 已从两侧一起删除。新指标要两处同时加。
-        Object macdObj = ind.get("macd");
-        if (macdObj instanceof Map) {
-            Map<String, Object> macd = (Map<String, Object>) macdObj;
-            data.setMacdHist(asDouble(macd.get("hist")));
-        }
-
-        return data;
-    }
-
-    private Double asDouble(Object o) {
-        if (o == null) return null;
-        if (o instanceof Number n) return n.doubleValue();
-        try {
-            return Double.parseDouble(o.toString());
-        } catch (NumberFormatException e) {
-            return null;
-        }
+        return stockDataGateway.getIndicators(stockSymbol);
     }
 
     /**
@@ -183,7 +107,7 @@ public class StockService {
     }
 
     public PagedResponse<DailyStockResponse> getHistoryPaged(String symbol, int page, int size, String period) {
-        StockHistoryResponse response = akshareStockClient.getStockHistory(symbol, period);
+        StockHistoryResponse response = stockDataGateway.getStockHistory(symbol, period);
 
         List<DailyStockResponse> allData = response.timeSeries().entrySet().stream()
                 .map(entry -> new DailyStockResponse(
@@ -326,7 +250,7 @@ public class StockService {
 
         IndicatorData indicators = null;
         try {
-            indicators = getIndicators(fav.getStockSymbol());
+            indicators = stockDataGateway.getIndicators(fav.getStockSymbol());
         } catch (Exception e) {
             log.warn("Indicators fetch failed for {}: {}", fav.getStockSymbol(), e.getMessage());
         }
@@ -337,7 +261,7 @@ public class StockService {
     /** 解析价：失败 / 为 0 / 格式异常统一返回 null，让上游决定是否跳过 */
     private Double getCurrentPriceSafe(String symbol) {
         try {
-            StockResponse stock = getStockForSymbol(symbol);
+            StockResponse stock = stockDataGateway.getStockForSymbol(symbol);
             if (stock == null || stock.price() == null) return null;
             String p = stock.price().trim();
             if (p.isEmpty() || "0.0".equals(p) || "0".equals(p)) return null;
@@ -357,7 +281,7 @@ public class StockService {
 
         List<FavoriteStock> favoriteStocks = favoriteStockRepository.findByUserId(user.getId());
         return favoriteStocks.stream()
-                .map(fav -> getStockForSymbol(fav.getStockSymbol()))
+                .map(fav -> stockDataGateway.getStockForSymbol(fav.getStockSymbol()))
                 .collect(Collectors.toList());
     }
 
@@ -373,6 +297,6 @@ public class StockService {
             log.warn("Invalid minute period {}, fallback to 5", period);
             period = 5;
         }
-        return akshareStockClient.getStockMinuteHistory(symbol, period);
+        return stockDataGateway.getStockMinuteHistory(symbol, period);
     }
 }
