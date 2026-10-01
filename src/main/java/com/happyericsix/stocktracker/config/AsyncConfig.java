@@ -83,4 +83,28 @@ public class AsyncConfig {
                 },
                 new ThreadPoolExecutor.DiscardOldestPolicy());
     }
+
+    /**
+     * 价格刷新事件的下游结算池（预警评估 + 模拟盘盘中结算的 @Async 监听器用）。
+     *
+     * <p>为什么不用默认 taskExecutor：那是要给用户聊天回复用的（LLM 往返），
+     * 混进"逐策略 60s Python 结算"会把聊天排队挤爆；也不复用 priceRefreshExecutor
+     * —— 那个池正被"拉价"占着，结算和拉价同池就回到了"互相排队"的老问题。
+     *
+     * <p>为什么 2 线程 + CallerRuns：结算内部本来就是逐策略串行循环，并行度 2
+     * 足够消化；队列满时退回调度线程执行（即同步监听的原行为），保证不丢事件。
+     */
+    @Bean(name = "settlementExecutor", destroyMethod = "shutdown")
+    public ExecutorService settlementExecutor() {
+        AtomicInteger counter = new AtomicInteger();
+        return new ThreadPoolExecutor(
+                2, 2, 60L, TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(32),
+                r -> {
+                    Thread t = new Thread(r, "settle-" + counter.incrementAndGet());
+                    t.setDaemon(true);
+                    return t;
+                },
+                new ThreadPoolExecutor.CallerRunsPolicy());
+    }
 }

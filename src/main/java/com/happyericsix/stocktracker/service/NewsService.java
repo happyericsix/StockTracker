@@ -16,6 +16,7 @@ import com.happyericsix.stocktracker.repository.FavoriteStockRepository;
 import com.happyericsix.stocktracker.repository.NewsEventRepository;
 import com.happyericsix.stocktracker.repository.NewsStockRelRepository;
 import com.happyericsix.stocktracker.repository.UserRepository;
+import com.happyericsix.stocktracker.util.CnTime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -588,7 +589,7 @@ public class NewsService {
                 .max(Comparator.naturalOrder())
                 .orElse(null);
         // 全是"源站没给时间"的条目：无从判断新旧，不刷新（理由同 needsRefresh）
-        return latest != null && latest.isBefore(LocalDate.now().atStartOfDay());
+        return latest != null && latest.isBefore(CnTime.today().atStartOfDay());
     }
 
     // ==================== 分析（幂等） ====================
@@ -946,7 +947,7 @@ public class NewsService {
             // 否则每一次搜索都要打一次上游，而这几条罕见条目不该决定刷新节奏。
             return false;
         }
-        return latest.isBefore(LocalDate.now().atStartOfDay());
+        return latest.isBefore(CnTime.today().atStartOfDay());
     }
 
     /**
@@ -1227,7 +1228,7 @@ public class NewsService {
         } catch (DateTimeParseException e) {
             throw new IllegalArgumentException("day 必须是 YYYYMMDD（如 20260914）");
         }
-        LocalDate today = LocalDate.now();
+        LocalDate today = CnTime.today();
         if (target.isAfter(today)) {
             throw new IllegalArgumentException("day 不能是未来的日期");
         }
@@ -1235,7 +1236,7 @@ public class NewsService {
     }
 
     private static LocalDateTime windowStart(int days) {
-        return LocalDateTime.now().minusDays(days);
+        return CnTime.now().minusDays(days);
     }
 
     /**

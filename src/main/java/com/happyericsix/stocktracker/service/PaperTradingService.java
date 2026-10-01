@@ -18,6 +18,7 @@ import com.happyericsix.stocktracker.repository.PaperEquitySnapshotRepository;
 import com.happyericsix.stocktracker.repository.PaperTradeRepository;
 import com.happyericsix.stocktracker.repository.StrategyRepository;
 import com.happyericsix.stocktracker.repository.UserRepository;
+import com.happyericsix.stocktracker.util.CnTime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.PageRequest;
@@ -149,12 +150,17 @@ public class PaperTradingService {
 
     public void evaluateDaily() {
         List<Strategy> strategies = strategyRepository.findByPaperEnabledTrue();
-        LocalDate today = LocalDate.now();
+        LocalDate today = CnTime.today();
         for (Strategy strategy : strategies) {
             try {
                 Long strategyId = strategy.getId();
-                PaperAccount settled = transactionTemplate.execute(status -> evaluateStrategy(strategyId, today));
-                // 盘后复盘放在结算事务**提交之后**：报告读的是已落库的痕迹与账户，
+                // 不把结算包进事务：evaluateStrategy 中段是阻塞的 Python 决策调用
+                // （rule 端点最长 60s；agent 委员会一次 LLM 往返更长），包进事务等于
+                // 占着一个连接等网络 —— 与 startPaper 的既定纪律一致（见其注释）。
+                // 断点续跑的保证来自幂等守卫（existsByStrategyIdAndTradeDate、
+                // lastBarTime、痕迹 dedupe 键），不来自事务回滚。
+                PaperAccount settled = evaluateStrategy(strategyId, today);
+                // 盘后复盘放在结算落库**之后**：报告读的是已落库的痕迹与账户，
                 // 而报告这一步再怎么出问题，都不可能回滚掉当天的真实成交
                 // （发消息用的是自己的独立事务，见 MessageService.saveReport）。
                 if (settled != null && paperReviewReportService != null) {
@@ -179,11 +185,9 @@ public class PaperTradingService {
         List<Strategy> strategies = strategyRepository.findByPaperEnabledTrue();
         for (Strategy strategy : strategies) {
             try {
-                Long strategyId = strategy.getId();
-                transactionTemplate.execute(status -> {
-                    evaluateRealtimeStrategy(strategyId);
-                    return null;
-                });
+                // 同 evaluateDaily：Python 调用（最长 60s）不进事务，
+                // 落库由各仓储自己的短事务完成（与 startPaper 手动路径同一语义）。
+                evaluateRealtimeStrategy(strategy.getId());
             } catch (Exception e) {
                 log.error("Realtime paper settlement failed for strategy id={}", strategy.getId(), e);
             }
@@ -201,7 +205,7 @@ public class PaperTradingService {
      * <p>两步都各自 try/catch：验证失败不该挡掉报告（报告里正会写"这次验证没有可用样本"）。
      */
     public void runWeeklyReview() {
-        LocalDate today = LocalDate.now();
+        LocalDate today = CnTime.today();
         for (Strategy strategy : strategyRepository.findByPaperEnabledTrue()) {
             try {
                 if (strategyService != null) {
@@ -645,7 +649,7 @@ public class PaperTradingService {
         // 在这里记会把取代链冲成一天上百个值（见 recordPaperFacts 的说明）。
         // alreadyTradedToday=false：盘中这条**就是**下单的那条路，
         // 它自己要跑的就是"能不能成交"的判断（重复成交由 dedupe 键与 T+1 守卫挡）。
-        return applyBarResult(strategy, account, result, LocalDate.now(), barTime,
+        return applyBarResult(strategy, account, result, CnTime.today(), barTime,
                 ExecutionContract.SETTLEMENT_REALTIME, trigger, false);
     }
 

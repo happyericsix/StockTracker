@@ -9,6 +9,7 @@ import com.happyericsix.stocktracker.service.evaluator.EvaluationResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.event.EventListener;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -25,6 +26,9 @@ import java.util.stream.Collectors;
  *  1. 价刷新和评估绑在同一个时点，逻辑上"价的快照 → 评估"是一体的
  *  2. 价刷新和评估频率自动一致，不会出现"价已变但评估没跑"或"评估跑在两次刷新之间"
  *  3. 单只股票挂掉不影响其他（try/catch 隔离）
+ *
+ * 为什么 @Async：同步监听全部跑在默认单线程调度器上，与模拟盘结算互相排队
+ * （Python 一慢，fixedRate 的价格刷新就持续滞后）。
  */
 @Component
 public class AlertEvaluationListener {
@@ -40,6 +44,7 @@ public class AlertEvaluationListener {
         this.evaluationService = evaluationService;
     }
 
+    @Async("settlementExecutor")
     @EventListener
     public void onPricesRefreshed(PricesRefreshedEvent event) {
         long t0 = System.currentTimeMillis();

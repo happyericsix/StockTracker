@@ -6,6 +6,7 @@ import com.happyericsix.stocktracker.entity.User;
 import com.happyericsix.stocktracker.exception.FavoriteAlreadyExistsException;
 import com.happyericsix.stocktracker.repository.FavoriteStockRepository;
 import com.happyericsix.stocktracker.repository.UserRepository;
+import com.happyericsix.stocktracker.util.CnTime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -155,7 +156,7 @@ public class StockService {
                 .user(user)
                 .buyPrice(buyPrice)
                 .quantity(quantity)
-                .buyDate(java.time.LocalDate.now().toString())
+                .buyDate(CnTime.today().toString())
                 .build();
         return favoriteStockRepository.save(favoriteStock);
     }

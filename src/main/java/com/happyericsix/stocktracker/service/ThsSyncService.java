@@ -8,6 +8,7 @@ import com.happyericsix.stocktracker.entity.ThsBinding;
 import com.happyericsix.stocktracker.repository.FavoriteStockRepository;
 import com.happyericsix.stocktracker.repository.ThsBindingRepository;
 import com.happyericsix.stocktracker.util.AesGcmCipher;
+import com.happyericsix.stocktracker.util.CnTime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -39,15 +40,18 @@ public class ThsSyncService {
     private final ThsClient thsClient;
     private final ThsBindingRepository bindingRepository;
     private final FavoriteStockRepository favoriteStockRepository;
+    private final org.springframework.transaction.support.TransactionTemplate transactionTemplate;
     private final String aesKey;
 
     public ThsSyncService(ThsClient thsClient,
                           ThsBindingRepository bindingRepository,
                           FavoriteStockRepository favoriteStockRepository,
+                          org.springframework.transaction.support.TransactionTemplate transactionTemplate,
                           @Value("${ths.aes.key:}") String aesKey) {
         this.thsClient = thsClient;
         this.bindingRepository = bindingRepository;
         this.favoriteStockRepository = favoriteStockRepository;
+        this.transactionTemplate = transactionTemplate;
         this.aesKey = aesKey;
     }
 
@@ -55,14 +59,15 @@ public class ThsSyncService {
     public record SyncResult(int added, int unchanged, int total, LocalDateTime syncedAt) {}
 
     /**
-     * 同步某用户的自选股。
+     * 同步某用户的自选股。<b>不包 @Transactional</b>：中段是一次最长 15s 的 Python HTTP
+     * （thsClient.selfStocks），包在事务里会占着数据库连接等网络；
+     * 拉到结果后用 TransactionTemplate 把"批量入库 + 绑定状态更新"收进一个短事务。
      *
      * <p>失败不抛异常（同步是后台行为，不该阻塞登录），
      * 原因记进 {@code ths_bindings.lastError} 供前端展示。
      *
      * @return 同步摘要；未绑定时返回 null
      */
-    @Transactional
     public SyncResult syncFavorites(Long userId) {
         ThsBinding binding = bindingRepository.findByUserId(userId).orElse(null);
         if (binding == null) {
@@ -83,6 +88,13 @@ public class ThsSyncService {
             return null;
         }
 
+        // 绑定实体在事务外读过；进事务后重新拿一份受管实体，避免写回旧快照
+        ThsBinding managed = bindingRepository.findByUserId(userId).orElse(binding);
+        return transactionTemplate.execute(status -> applySyncedFavorites(managed, userId, stocks));
+    }
+
+    private SyncResult applySyncedFavorites(ThsBinding binding, Long userId,
+                                            List<ThsSelfStocksResponse.Stock> stocks) {
         // 现有股票的「底层代码」集合，用于等价去重
         List<FavoriteStock> existing = favoriteStockRepository.findByUserId(userId);
         Set<String> existingBare = new HashSet<>();
@@ -111,7 +123,7 @@ public class ThsSyncService {
             added++;
         }
 
-        binding.setLastSyncAt(LocalDateTime.now());
+        binding.setLastSyncAt(CnTime.now());
         binding.setLastSyncCount(added);
         binding.setLastError(null);
         bindingRepository.save(binding);

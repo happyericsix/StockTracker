@@ -5,6 +5,7 @@ import com.happyericsix.stocktracker.entity.Alert;
 import com.happyericsix.stocktracker.repository.AlertRepository;
 import com.happyericsix.stocktracker.service.evaluator.AlertEvaluator;
 import com.happyericsix.stocktracker.service.evaluator.EvaluationResult;
+import com.happyericsix.stocktracker.util.CnTime;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -101,7 +102,7 @@ public class AlertEvaluationService {
     @Transactional
     public boolean tryTrigger(Alert alert, RefreshedPrice data, EvaluationResult result) {
         int cooldownMinutes = alert.getCooldownMinutes() != null ? alert.getCooldownMinutes() : 5;
-        LocalDateTime cooldownStart = LocalDateTime.now().minusMinutes(cooldownMinutes);
+        LocalDateTime cooldownStart = CnTime.now().minusMinutes(cooldownMinutes);
         if (messageService.isAlertInCooldown(alert.getId(), cooldownStart)) {
             log.debug("Alert {} in cooldown, skip", alert.getId());
             return false;
@@ -109,7 +110,7 @@ public class AlertEvaluationService {
 
         // 1) 更新 Alert 状态
         alert.setTriggered(true);
-        alert.setLastTriggeredAt(LocalDateTime.now());
+        alert.setLastTriggeredAt(CnTime.now());
         alertRepo.save(alert);
 
         // 2) 写历史消息 + SSE 推送

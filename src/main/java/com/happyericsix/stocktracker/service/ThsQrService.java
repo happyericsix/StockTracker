@@ -12,6 +12,7 @@ import com.happyericsix.stocktracker.entity.User;
 import com.happyericsix.stocktracker.repository.ThsBindingRepository;
 import com.happyericsix.stocktracker.repository.UserRepository;
 import com.happyericsix.stocktracker.util.AesGcmCipher;
+import com.happyericsix.stocktracker.util.CnTime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -53,6 +54,7 @@ public class ThsQrService {
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
     private final TokenService tokenService;
+    private final org.springframework.transaction.support.TransactionTemplate transactionTemplate;
     private final String aesKey;
 
     public ThsQrService(ThsClient thsClient,
@@ -60,12 +62,14 @@ public class ThsQrService {
                         UserRepository userRepository,
                         PasswordEncoder passwordEncoder,
                         TokenService tokenService,
+                        org.springframework.transaction.support.TransactionTemplate transactionTemplate,
                         @Value("${ths.aes.key:}") String aesKey) {
         this.thsClient = thsClient;
         this.bindingRepository = bindingRepository;
         this.userRepository = userRepository;
         this.passwordEncoder = passwordEncoder;
         this.tokenService = tokenService;
+        this.transactionTemplate = transactionTemplate;
         this.aesKey = aesKey;
     }
 
@@ -95,7 +99,11 @@ public class ThsQrService {
      *                      传了 → 这次扫码是"绑定到该用户"；
      *                      没传 → 这次扫码是"登录"（找不到已有绑定就自动建号）。
      */
-    @Transactional
+    /**
+     * 轮询扫码状态。<b>不包 @Transactional</b>：开头是一次最长 10s 的 Python HTTP，
+     * 而这个接口被前端每 4 秒打一次 —— 包在事务里等于长期占着一个数据库连接等网络。
+     * 写库段（找/建用户 + 存绑定）用 TransactionTemplate 收短。
+     */
     public ThsQrPollResponse pollQr(String qrSessionId, Long currentUserId) {
         ThsQrPollApiResponse api;
         try {
@@ -124,10 +132,13 @@ public class ThsQrService {
             throw new RuntimeException("扫码成功但未返回凭证，请重新扫码");
         }
 
-        // ① 先把绑定存下来，再发令牌。
+        // ① 先把绑定存下来，再发令牌（短事务：找/建用户 + 存绑定必须一起成功）。
         //    顺序不能反 —— 如果先发令牌、用户当场关掉浏览器，凭证就丢了，下次还得重扫。
-        UserResolution resolution = resolveUser(session.account(), currentUserId);
-        saveBinding(resolution.user(), session);
+        UserResolution resolution = transactionTemplate.execute(status -> {
+            UserResolution r = resolveUser(session.account(), currentUserId);
+            saveBinding(r.user(), session);
+            return r;
+        });
 
         // ② 签发本项目自己的 JWT（不透传同花顺凭证）
         String token = issueToken(resolution.user());
@@ -234,7 +245,7 @@ public class ThsQrService {
         // expireTime=0 表示手机端没勾「30 天免登录」，存 null（策略是"先试再说"）
         binding.setExpireTime(session.expireTime() > 0
                 ? LocalDateTime.ofInstant(
-                        Instant.ofEpochSecond(session.expireTime()), ZoneId.systemDefault())
+                        Instant.ofEpochSecond(session.expireTime()), CnTime.ZONE)
                 : null);
         // 换了凭证，之前可能的错误状态清掉
         binding.setLastError(null);

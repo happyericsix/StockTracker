@@ -19,6 +19,10 @@ import html
 import logging
 import re
 from datetime import date, datetime, timedelta
+
+# 资讯窗口按北京时间口径：published_at 是北京时间字符串，Docker 镜像默认 UTC 时
+# date.today() 会把"今天的公告"取成昨天（北京时间 0-8 点之间）。统一走 trading_calendar.CN_TZ。
+from trading_calendar import CN_TZ
 from urllib.parse import urlsplit, urlunsplit
 
 import akshare
@@ -228,7 +232,7 @@ def _in_window(published_at: str, days: int) -> bool:
         moment = datetime.strptime(published_at, "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return True
-    return moment >= datetime.now() - timedelta(days=max(0, int(days)))
+    return moment >= datetime.now(CN_TZ).replace(tzinfo=None) - timedelta(days=max(0, int(days)))
 
 
 def _sort_key(item: dict):
@@ -254,7 +258,7 @@ def fetch_announcements(day: str = "", symbol: str = "") -> list[dict]:
     Returns:
         统一事件结构列表；失败返回 `[]`。
     """
-    _day = str(day or "").strip() or date.today().strftime("%Y%m%d")
+    _day = str(day or "").strip() or datetime.now(CN_TZ).strftime("%Y%m%d")
     try:
         df = akshare.stock_notice_report(symbol="全部", date=_day)
     except Exception as exc:  # noqa: BLE001
@@ -652,7 +656,7 @@ def fetch_symbol_announcements(symbol: str, days: int = 90,
         return []
 
     name = _stock_name(code)
-    cutoff = (date.today() - timedelta(days=max(1, int(days)))).isoformat()
+    cutoff = (datetime.now(CN_TZ).date() - timedelta(days=max(1, int(days)))).isoformat()
     items: list[dict] = []
     for page in range(1, max(1, SYMBOL_NOTICE_MAX_PAGES) + 1):
         if len(items) >= limit:

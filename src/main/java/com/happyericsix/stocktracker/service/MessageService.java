@@ -122,7 +122,8 @@ public class MessageService {
      * 发送聊天消息：
      * 1. 立即落库 CHAT_USER 并回显推送
      * 2. 写记忆账本（用户说了什么，这是"前情提要"的原料，只追加）
-     * 3. 异步交给 ChatService 调 LLM，回复由 ChatService.saveBotReply 自己落库并推送
+     * 3. **事务提交后**再异步交给 ChatService 调 LLM，
+     *    回复由 ChatService.saveBotReply 自己落库并推送
      */
     @Transactional
     public void handleChatSend(String username, ChatSendRequest request) {
@@ -138,7 +139,22 @@ public class MessageService {
 
         appendUserEventToLedger(user.getId(), request.getMessage());
 
-        chatService.processAsync(user.getId(), username, request.getMessage());
+        // 异步线程的 buildHistory 依赖"这条 CHAT_USER 已提交可见"来剔除当前消息；
+        // 事务提交前触发会把同一条消息重复喂给模型。注册 afterCommit 兜住这一点。
+        if (org.springframework.transaction.support.TransactionSynchronizationManager
+                .isSynchronizationActive()) {
+            org.springframework.transaction.support.TransactionSynchronizationManager
+                    .registerSynchronization(
+                            new org.springframework.transaction.support.TransactionSynchronization() {
+                                @Override
+                                public void afterCommit() {
+                                    chatService.processAsync(user.getId(), username, request.getMessage());
+                                }
+                            });
+        } else {
+            // 无事务上下文（单测直调）时保持原行为
+            chatService.processAsync(user.getId(), username, request.getMessage());
+        }
     }
 
     /**

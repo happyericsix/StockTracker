@@ -10,6 +10,7 @@ import com.happyericsix.stocktracker.entity.User;
 import com.happyericsix.stocktracker.repository.UserRepository;
 import com.happyericsix.stocktracker.service.ThsQrService;
 import com.happyericsix.stocktracker.service.ThsSyncService;
+import com.happyericsix.stocktracker.util.CnTime;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -121,7 +122,7 @@ public class ThsController {
         LocalDateTime expire = b.getExpireTime();
         // expireTime 为 null = 手机端没勾「30 天免登录」。
         // 这不代表凭证不能用（策略是"先试再说"），所以 expired 只是本地参考值。
-        boolean expired = expire != null && expire.isBefore(LocalDateTime.now());
+        boolean expired = expire != null && expire.isBefore(CnTime.now());
         return Result.success(new ThsStatusResponse(
                 true, expire, expired, b.getLastSyncAt(), b.getLastSyncCount(), b.getLastError()));
     }

@@ -16,4 +16,6 @@ WORKDIR /app
 COPY --from=build /app/target/*.jar app.jar
 
 EXPOSE 8080
-ENTRYPOINT ["java", "-jar", "app.jar"]
+# A 股业务时间钉死东八区：Java 自带 tzdb，不依赖镜像里的 tzdata
+# （与 StocktrackerApplication.main 的 TimeZone.setDefault 双保险）
+ENTRYPOINT ["java", "-Duser.timezone=Asia/Shanghai", "-jar", "app.jar"]
