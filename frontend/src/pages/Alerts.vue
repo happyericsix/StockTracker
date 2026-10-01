@@ -228,7 +228,15 @@ const openEdit = (item) => {
 
     conditionType,
 
-    threshold: String(displayThreshold)
+    threshold: String(displayThreshold),
+
+    // 高级参数回填：后端"不传保留原值",但表单若显示成空占位,
+    // 用户会误以为当前就是默认值(5/0.5/2),保存时无从核对
+    cooldownMinutes: item.cooldownMinutes != null ? String(item.cooldownMinutes) : '',
+
+    resetRatio: item.resetRatio != null ? String(item.resetRatio) : '',
+
+    reArmHours: item.reArmHours != null ? String(item.reArmHours) : ''
 
   }
 
@@ -329,7 +337,14 @@ const handleToggle = async (item) => {
   // 乐观切换 UI,失败时回滚
   item.enabled = next
   try {
-    await updateAlert(item.id, { enabled: next })
+    // PUT 是全量校验(AlertRequest 的 symbol/threshold 都是必填),只发 {enabled} 必 400。
+    // item 里的 conditionType/threshold 是后端归一后的规范值,原样带回等于"不变只改开关"。
+    await updateAlert(item.id, {
+      symbol: item.symbol,
+      conditionType: item.conditionType,
+      threshold: item.threshold,
+      enabled: next
+    })
   } catch (e) {
     const cls = classifyError(e)
     if (cls.retryable) {
@@ -477,8 +492,10 @@ const saveLocalFallback = async () => {
   }
 
   saveLocal()
-
-  await loadAlerts()
+  // 不再 loadAlerts()：此刻后端 5xx/网络故障才走到这里,
+  // 重拉要么又失败(白费一次请求、还把更明确的 opError 覆盖成"加载失败"),
+  // 要么后端恰好恢复——服务端列表(不含刚暂存的条目)会把本地兜底冲掉,
+  // 且没有任何后续同步机制,条目就永远丢了。
 
 }
 
@@ -500,12 +517,6 @@ const getConditionLabel = (type, threshold) => {
 
 
 const getConditionDesc = (type) => {
-
-  if (type === 'pnl_profit' || type === 'pnl_loss') {
-
-    return conditionTypes.find(c => c.value === type)?.desc || ''
-
-  }
 
   return conditionTypes.find(c => c.value === type)?.desc || ''
 

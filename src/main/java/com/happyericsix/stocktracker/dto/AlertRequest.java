@@ -11,8 +11,11 @@ import jakarta.validation.constraints.Pattern;
 
 public class AlertRequest {
 
+    // pnl_profit/pnl_loss 是前端"止盈%/止损%"下拉的历史值：Service 层会归一成
+    // pnl_percent（正数止盈 / 负数止损）再落库。白名单必须放行它们，
+    // 否则 @Valid 在进 Service 前就 400，归一逻辑永远走不到。
     private static final String TYPE_REGEX =
-            "^(price_above|price_below|pnl_percent|rsi_overbought|rsi_oversold" +
+            "^(price_above|price_below|pnl_percent|pnl_profit|pnl_loss|rsi_overbought|rsi_oversold" +
             "|macd_golden_cross|macd_death_cross|trailing_take_profit)$";
 
     @NotBlank(message = "股票代码不能为空")
@@ -68,7 +71,7 @@ public class AlertRequest {
             case "price_above", "price_below" -> threshold > 0;
             case "rsi_overbought", "rsi_oversold", "trailing_take_profit"
                     -> threshold > 0 && threshold < 100;
-            case "pnl_percent" -> true;  // 正数止盈、负数止损都允许
+            case "pnl_percent", "pnl_profit", "pnl_loss" -> true;  // 正数止盈、负数止损都允许（旧值归一前阈值恒为正）
             case "macd_golden_cross", "macd_death_cross" -> true;  // 这两个用户不该传,但宽容处理
             default -> false;
         };

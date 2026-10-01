@@ -82,11 +82,24 @@ public class AlertService {
         if (request.getSymbol() != null && !request.getSymbol().isBlank()) {
             alert.setStockSymbol(request.getSymbol().toUpperCase());
         }
-        if (request.getConditionType() != null) {
-            alert.setConditionType(request.getConditionType());
-        }
-        if (request.getThreshold() != null) {
-            alert.setThreshold(request.getThreshold());
+        // 旧值归一（与 addAlert 同一条规则）：pnl_profit/pnl_loss → pnl_percent（正/负阈值）。
+        // 这对值必须一起翻译：只改类型不改符号，"止损"会变成正阈值的"止盈"；
+        // 缺阈值时宁可整对不动，也不落一个语义错位的半截更新。
+        String incomingType = request.getConditionType();
+        Double incomingThreshold = request.getThreshold();
+        if ("pnl_profit".equals(incomingType) || "pnl_loss".equals(incomingType)) {
+            if (incomingThreshold != null) {
+                alert.setConditionType("pnl_percent");
+                alert.setThreshold("pnl_profit".equals(incomingType)
+                        ? Math.abs(incomingThreshold) : -Math.abs(incomingThreshold));
+            }
+        } else {
+            if (incomingType != null) {
+                alert.setConditionType(incomingType);
+            }
+            if (incomingThreshold != null) {
+                alert.setThreshold(incomingThreshold);
+            }
         }
         if (request.getEnabled() != null) {
             alert.setEnabled(request.getEnabled());
