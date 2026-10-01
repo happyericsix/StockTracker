@@ -122,7 +122,7 @@ N0 地基 → N1 取数 → N2 分析 → N3 落库+搜索API+漏斗
 
 1. **每一层 Agent 都要一次 LLM 往返** → 延迟与 token 成本按层数翻倍。新闻是 469 条/日量级，Agent 化后成本差两个数量级。
 2. **子 Agent 之间只能用自然语言通信** → 丢失结构化契约。本项目最值钱的设计恰恰是"策略 JSON 是唯一契约"；新闻也应该有"事件 JSON 契约"（spec §6），Agent 之间传文本会把这份契约腐化掉。
-3. **幂等与重试会失效**。管道必须"失败可重跑、断点可续"，而 ReAct loop 每次的步骤序列可能不同 → 去重键、重试边界全变复杂。现有 Agent 已有 `MAX_STEPS = 6` 的硬上限，本身就说明它的输出不确定。
+3. **幂等与重试会失效**。管道必须"失败可重跑、断点可续"，而 ReAct loop 每次的步骤序列可能不同 → 去重键、重试边界全变复杂。现有 Agent 已有 `MAX_STEPS = 12` 的硬上限，本身就说明它的输出不确定。
 4. **可测试性断崖式下降**。确定性管道能 mock akshare 断言字段映射（N1 的单测就是这么写的）；Agent 只能做行为测试，**又慢又烧钱**，无法进 CI。
 5. **当前只有 2 个域（策略、新闻），路由复杂度还没到需要独立调度器的程度**。多一层调度的收益（解耦）远小于成本（延迟、成本、调试难度）。
 
@@ -358,6 +358,34 @@ def extract_json(text: str) -> dict | None              # 通用容错 JSON 提�
 
 ## N3 Java 落库 + 搜索 API（2–3 天）
 
+> ⚠️ **2026-09-19 实现回填（本节文字未改动，以下是实际做出来时与它的差异 + 端到端实测发现）**
+>
+> **1. 本节写在 N1 定稿之前，所以完全没提公告正文。** 实际接口是
+> `POST /api/v1/news/fetch` 多了一个 `withBody` 开关：东财公告只有标题没有正文，
+> 不补正文时 N2 对公告只能回"信息不足，不判断方向"（实测：不补 0/6 判出方向，补了 6/8）。
+> Java 侧在**指定了 symbol** 时开 `true`（"用户正在看某只股票"），无标的搜索为 `false`。
+>
+> **2. 本节"验收"里那条「第二次直接命中库（日志可验证未调 Python）」原本不成立**，
+> 端到端冒烟实测：连续两次 `POST /news/search {600519}` 都打了上游（3.7s / 3.3s，
+> Python 访问日志两条 `news/fetch`）。根因是本节自己给的判据
+> （「该 symbol 的最新事件早于今日 → 调 fetch」）对**今天没有新公告的股票永远成立**。
+> 修法：保留判据 + **5 分钟/标的冷却**（`Caffeine`，先占位再干活）。修后实测第二次 29–100ms。
+>
+> **3. 本节只要求 `GET /news/events` 读库，但 N5b 是它**之前**的交付项** ——
+> 只读库会让个股页在新库上恒为空（实测 `symbol=000001` 返回 0 条），
+> 且落库条目都没有解读（实测 11 条全部 `analyzed=false`）→ 渲染成纯标题列表。
+> 因此时间轴也走"库优先 + 实时兜底 + 补解读"：兜底与补解读共用同一个冷却门控，
+> 补解读**有界**（5 条/次）且用 `batch`（1 次模型调用覆盖 5 条），幂等。
+>
+> **4. `POST /news/analyze` 的 body 里没有 mode**（本节未指定由谁决定）：
+> 实现为按待分析条数决定 —— ≤20（Python 的 `NEWS_ANALYZE_MAX_DEEP`）走 `deep`，否则 `batch`。
+>
+> **5. `refresh?day=` 只能表达回看窗口**，不能取历史某一日的快照：
+> Python 的 fetch 端点没有 `day` 参数（全市场公告源只支持当日）。已写进 javadoc。
+>
+> 验证口径：Java **258 passed / 0 failed**（基线 233）；真 MySQL + 真 Python 的端到端冒烟见
+> `docs/ROADMAP.md` 的 2026-09-19 续报。
+
 **文件**
 - 新建：`entity/NewsEvent.java`、`entity/NewsStockRel.java`、`repository/NewsEventRepository.java`、`repository/NewsStockRelRepository.java`、`client/NewsClient.java`、`service/NewsService.java`、`controller/NewsController.java`、`dto/NewsEventResponse.java`、`dto/NewsSearchRequest.java`。
 - 修改：`config/SecurityConfig.java`（无需改，走默认 JWT 保护）、`application.properties`（如需新增新闻相关开关）。
@@ -522,6 +550,25 @@ public void runPostMarketBrief() { runQuietly("盘后简报", () -> briefService
 
 ## N5b 个股页事件区 + Dashboard 汇总卡（1–2 天，N5a 之后）
 
+> ⚠️ **2026-09-19 修订（以 `specs/2026-09-19-stock-detail-news-layout-design.md` 为准）**
+>
+> 本节的两处**落点**在实现时被判为不合适，已改：
+>
+> 1. **N5b-1 归因对照条**：原写"插在 `.chart-container` **之前**"（独立卡片）。这会把图表
+>    推到第二屏，而图是这个页面的主体。现改为：图表副标题 = 纯读数
+>    （`当前价 | 涨跌 | 更新`），归因句放进**紧邻图表下方的事件区标题**。理由是
+>    ECharts 的 `title.subtext` 不会自动折行，整句塞进去会把图挤变形；而 canvas 上的字
+>    也不能被选中/复制/读屏。
+> 2. **N5b-2 事件时间轴**：原写"插在 `.price-info` **之后**（`</main>` 之前）"——那是页面
+>    **最底部**，手机上要先滚过一整屏的图 + 指标面板。"最近有什么消息"是第一眼问题，
+>    不能排到第二屏。现改为手机单列顺序 `图 → 事件 → 指标`，桌面 ≥1024px 才移到右侧 360px
+>    `sticky` 栏（用 `grid-template-areas` 实现，DOM 顺序不动）。
+>    另外 `.price-info` 与副标题信息重复，已整块删除，其独有的"行情源更新时间"并进副标题。
+>
+> **形态本身也被否决过一次**：不再考虑"数据区 + 新闻侧栏"并列（该 app 的 manifest 是
+> `orientation: 'portrait'`，且把解读工作还给了用户）。改为**事件锚定在 K 线上**
+> （`markLine`）+ 与事件流双向联动。
+
 **文件**：修改 `frontend/src/pages/KLineChart.vue`、`frontend/src/pages/Dashboard.vue`。
 
 - **N5b-1 归因对照条**（插在 `KLineChart.vue` 的 `.chart-container` **之前**）：
@@ -552,7 +599,7 @@ _tool("explain_event", "Explain one specific event in plain language: who it aff
 
 - 工具描述里**必须写明"用于回答为什么涨跌"**——ReAct Agent 的工具选择完全依赖 description，这是它与"总调度 Agent"唯一真正等价的能力（选工具），而且只花一次 LLM 往返。
 - `execute_tool` 里对应分支：`search_news` → 调 Java 搜索接口或直接复用 `news_client.search_news`；`explain_event` → 调 `news_understanding.analyze_one`。
-- 现有 Agent 的 `MAX_STEPS = 6`、非法 JSON 重试一次、`split_replies` 分片全部复用，**零架构改动**。
+- 现有 Agent 的 `MAX_STEPS = 12`、非法 JSON 重试一次、`split_replies` 分片全部复用，**零架构改动**。
 - 验收：在聊天框问"茅台今天为什么跌"能自动查到事件并给出"与事件方向一致 / 无明显事件，大概率情绪波动"，且**不会**因此多出买/卖建议（沿用既有的禁投顾约束）。
 
 | 项 | 内容 | 前置 |

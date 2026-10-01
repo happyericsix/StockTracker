@@ -97,9 +97,9 @@
 | 后端框架 | Spring Boot 4 + Java 21 |
 | 数据服务 | Python 3.11+ / FastAPI |
 | 前端 | Vue 3 + Vite（PWA：manifest/SW 已配置，Web Push 与离线体验待完善） |
-| 数据库 | MySQL 8（生产） / H2（开发） |
+| 数据库 | MySQL 8（运行时）/ H2 内存库（测试） |
 | 缓存 | Caffeine (本地) + Redis (分布式) |
-| 机器学习 | LightGBM + 手写 Transformer + DQN + FinRL |
+| 机器学习 | LightGBM + 手写 Transformer + DQN |
 | 实验追踪 | MLflow |
 | LLM | DeepSeek（自然语言解释） |
 | 部署 | Docker Compose |
@@ -231,13 +231,31 @@ docker compose up -d
 | GET | `/api/v1/stocks/{symbol}/overview` | 公司概况 |
 | GET | `/api/v1/stocks/{symbol}/history?page=0&size=30` | K 线历史 |
 
-### 自选股
+### 市场状态（交易日历）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/v1/stocks/favorites` | 自选股 + 实时价 |
-| POST | `/api/v1/stocks/favorites` | 添加自选 |
-| DELETE | `/api/v1/stocks/favorites/{symbol}` | 删除自选 |
+| GET | `/api/v1/market/status` | 今天开不开市、休到哪天、这个价是哪一天的 |
+
+⚠️ **这不是可选信息**。休市日腾讯行情返回的仍然是上一交易日的收盘价与涨跌幅，
+行情接口自身**没有任何信息**能说明这一点；没有这条接口，页面唯一的做法就是把
+周五的收盘价当成今天的数据展示。前端据此显示"今日休市 · 本轮连休 N 天 · 下一交易日 …"，
+并把行情卡的"更新 <日期>"改写成"最近交易日 <日期> 收盘"。
+
+交易日历取自 akshare 的 `tool_trade_date_hist_sina()`（含已公布的调休与长假安排），
+落盘缓存 12 小时。**日历不覆盖今天时，接口会说"不知道"**（`known=false`、
+`tradingDay=null`），而不是猜一个答案 —— 猜错的代价正是这次要修的 bug。
+
+### 自选股
+
+自选股是**用户态数据**（每个请求都要登录身份），所以挂在 `/api/v1/user/**` 下，
+与 `/api/v1/user/profile` 同一命名空间；`/api/v1/stocks/**` 只放市场数据。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/v1/user/favorites` | 自选股 + 实时价 |
+| POST | `/api/v1/user/favorites` | 添加自选 |
+| DELETE | `/api/v1/user/favorites/{symbol}` | 删除自选（⚠️ 会连带删除该股票的全部预警） |
 
 ### AI 分析（Python 服务）
 
@@ -246,6 +264,21 @@ docker compose up -d
 | GET | `/api/v1/indicators/{symbol}` | 技术指标 + LGB 预测 |
 | GET | `/api/v1/backtest/{symbol}?capital=100000` | 回测报告 |
 | GET | `/api/v1/stocks/search?keyword=...` | 股票搜索（联想） |
+| GET | `/api/v1/market/status` | 市场状态（交易日历，见上一节） |
+
+### 资讯与解读
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/v1/news/events?symbol=&days=90` | 个股事件时间轴 + **后台解读进度** |
+| GET | `/api/v1/news/stock-read?symbol=&days=90` | 「当前怎么看」：读完整批事件后的一段连贯判断 |
+| POST | `/api/v1/news/analyze` | 逐条结构化解读（幂等，前端点"深读"才跑） |
+| POST | `/api/v1/news/search` | 全库搜索（可按自选过滤） |
+
+`/news/events` **立刻返回库内已有内容**，抓上游与分批 LLM 解读交给后台，
+进度通过 `analyzing` / `analyzedCount` / `pendingCount` 一起返回；
+前端先渲染列表，再每 2 秒轮询把新落库的解读贴上来（用户反馈：
+"点进来过了几秒才有新闻内容，结果出来以后还要再等一会才有你的 ai 分析"）。
 
 **示例**：
 
@@ -295,19 +328,24 @@ curl "http://localhost:8000/api/v1/backtest/sh600519?capital=100000"
 
 ```
 stock-tracker/
-├── frontend/                    # Vue 3 前端（将升级为 PWA）
+├── frontend/                    # Vue 3 前端（PWA）
 │   ├── src/
-│   │   ├── api/                 # API 调用层
-│   │   ├── components/          # 通用组件
-│   │   ├── pages/               # 页面
-│   │   │   ├── Login.vue        # 登录/注册
-│   │   │   ├── Dashboard.vue    # 自选股 + 搜索
-│   │   │   ├── StockDetail.vue  # 行情 + K线 + AI 分析
-│   │   │   ├── Portfolio.vue    # 持仓管理（路线图）
-│   │   │   ├── Alerts.vue       # 价格预警（路线图）
-│   │   │   └── Profile.vue
+│   │   ├── api/                 # API 调用层（request.js 统一剥 Result 信封）
+│   │   ├── components/          # 通用组件（AppIcon 图标系统、QrLogin、StockSearchInput）
+│   │   ├── pages/               # 页面（与 router/index.js 一一对应）
+│   │   │   ├── Login.vue         # 登录/注册 + 同花顺扫码
+│   │   │   ├── Dashboard.vue     # 自选股 + 搜索 + 四个功能入口
+│   │   │   ├── KLineChart.vue    # 行情 + K 线 + 技术指标（路由 /chart/:symbol）
+│   │   │   ├── Alerts.vue        # 价格预警（增删改 + 启停开关）
+│   │   │   ├── Assistant.vue     # 智能助手对话
+│   │   │   ├── Messages.vue      # 消息中心（SSE 实时）
+│   │   │   ├── Strategies.vue    # 策略库
+│   │   │   ├── StrategyDetail.vue# 策略详情（回测 / 模拟盘 / 预期 / 决策模式）
+│   │   │   ├── Paper.vue         # 模拟盘总览（跨策略）
+│   │   │   ├── Memory.vue        # 记忆（事实 / 经验 / 画像）
+│   │   │   └── Profile.vue       # 我的（同花顺绑定）
 │   │   └── router/              # 路由
-│   ├── vite.config.js           # vite-plugin-pwa 配置（路线图）
+│   ├── vite.config.js           # Vite + vite-plugin-pwa（已启用，含 Workbox 预缓存）
 │   └── package.json
 ├── python-data-service/         # AI 数据服务
 │   ├── app.py                   # FastAPI 入口
@@ -315,7 +353,6 @@ stock-tracker/
 │   ├── quant_model.py           # 技术指标 + LGB 三窗口
 │   ├── deep_models.py           # Transformer + DQN
 │   ├── backtest.py              # 回测引擎
-│   ├── finrl_demo.py            # FinRL PPO 集成
 │   ├── mlflow_utils.py          # 实验追踪
 │   ├── llm_service.py           # DeepSeek 客户端
 │   ├── models/                  # 训练好的模型（gitignore）
@@ -364,11 +401,12 @@ stock-tracker/
 - Strategy Agent：自然语言生成策略 JSON，支持回测与模拟盘
 
 ### 🚧 进行中：PWA 化（接下来重点）
-- [ ] vite-plugin-pwa 集成
-- [ ] Web App Manifest（图标 / 主题色 / 启动画面）
-- [ ] Service Worker 离线缓存
+- [x] vite-plugin-pwa 集成
+- [x] Web App Manifest（图标 / 主题色 / 启动画面）
+- [x] Service Worker 离线缓存（Workbox 预缓存，构建产物 11 条）
 - [ ] Web Push 价格预警（前端 + 后端 + 推送服务）
-- [ ] 移动端 UI 优化（响应式 + 手势）
+- [x] 移动端安全区与视口适配（100dvh / env(safe-area-inset-*)）
+- [ ] 手势交互
 
 ### 🔜 下一阶段
 - [ ] 持仓成本分析（用户绑定买入价，盈亏可视化）

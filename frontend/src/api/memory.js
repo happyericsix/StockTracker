@@ -12,9 +12,8 @@ export const listMemoryFacts = (params) => request.get('/memory/facts', { params
 /** 长期画像：稳定身份信息，与注入给助手的同一份 */
 export const listMemoryPersona = () => request.get('/memory/persona')
 
-/** 某个事实的历史变更链（"这个设置以前是什么"） */
-export const getFactHistory = (subject, predicate) =>
-  request.get('/memory/facts/history', { params: { subject, predicate } })
+/** 某个事实的历史变更链（"这个设置以前是什么"）——
+ *  全站无调用方，已移除。后端 /memory/facts/history 仍在，需要时补回。 */
 
 /** 撤回一条事实：助手不再使用它，历史记录仍保留 */
 export const retractFact = (id) => request.post(`/memory/facts/${id}/retract`)

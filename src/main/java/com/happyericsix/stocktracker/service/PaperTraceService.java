@@ -264,11 +264,6 @@ public class PaperTraceService {
         return repository.findByStrategyIdAndTradeDateOrderByCreatedAtAsc(strategyId, tradeDate);
     }
 
-    public List<PaperTradeTrace> listBySkipReason(Long strategyId, String skipReason) {
-        return repository.findByStrategyIdAndSkipReasonOrderByCreatedAtDesc(
-                strategyId, ExecutionContract.normalizeSkipReason(skipReason));
-    }
-
     public long count(Long strategyId) {
         return repository.countByStrategyId(strategyId);
     }

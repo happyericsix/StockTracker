@@ -3,6 +3,7 @@ import { ref } from "vue"
 import { useRouter } from "vue-router"
 import { login, register } from "../api/auth.js"
 import QrLogin from "../components/QrLogin.vue"
+import AppIcon from "../components/AppIcon.vue"
 
 const router = useRouter()
 const isLogin = ref(true)
@@ -98,7 +99,7 @@ const onQrSuccess = ({ token }) => {
         <div class="qr-entry">
           <div class="divider"><span>或</span></div>
           <button type="button" class="qr-trigger" @click="toggleQr">
-            <span class="qr-icon" aria-hidden="true">📱</span> 同花顺扫码登录
+            <AppIcon name="smartphone" :size="17" :stroke-width="2" /> 同花顺扫码登录
           </button>
           <p class="qr-note">
             更快一步 —— 免注册、免记密码，用手机同花顺 App 扫一下即可登录。
@@ -122,48 +123,52 @@ const onQrSuccess = ({ token }) => {
 </template>
 
 <style scoped>
-/* 100vh 在移动浏览器里会把地址栏高度算进去，补 100dvh 兜底 */
-.login-container { display: flex; justify-content: center; align-items: center; min-height: 100vh; min-height: 100dvh; background: var(--color-bg-page); }
-.login-card { background: var(--color-bg-surface); padding: 40px; border-radius: var(--radius-lg); box-shadow: var(--shadow-1); width: 380px; }
-.brand { text-align: center; font-size: 22px; font-weight: 700; color: var(--color-text-primary); margin-bottom: 8px; }
-h2 { text-align: center; margin-bottom: 24px; color: var(--color-text-secondary); font-size: 16px; font-weight: 400; }
-input { width: 100%; padding: 10px 12px; margin-bottom: 16px; border: 1px solid var(--color-border-control); border-radius: var(--radius-sm); font-size: 14px; box-sizing: border-box; }
+/* 100vh 在移动浏览器里会把地址栏高度算进去，补 100dvh 兜底。
+   容器补内距：旧实现没有内距，320px 下卡片直接贴到视口边缘。 */
+.login-container { display: flex; justify-content: center; align-items: center; min-height: 100vh; min-height: 100dvh; padding: var(--space-4); background: var(--color-bg-page); }
+/* width: min(...) 代替固定 380px —— 固定值靠 flex-shrink 兜底才能不溢出，
+   是"碰巧没坏"而不是"构造上不会坏"。 */
+.login-card { background: var(--color-bg-surface); padding: var(--space-7); border-radius: var(--radius-3xl); box-shadow: var(--shadow-1); width: min(400px, 100%); }
+.brand { text-align: center; font: var(--font-title); color: var(--color-text-primary); margin-bottom: var(--space-2); }
+h2 { text-align: center; margin-bottom: var(--space-5); color: var(--color-text-secondary); font: var(--font-body); }
+/* 输入框用 16px（--font-body）：小于 16px 时 iOS Safari 会把整页放大。
+   旧值 14px 在 iPhone 上点一下输入框页面就跳一下。 */
+input { width: 100%; padding: var(--space-3); margin-bottom: var(--space-4); border: 1px solid var(--color-border-control); border-radius: var(--radius-sm); font: var(--font-body); box-sizing: border-box; }
 /* 焦点：删掉 outline: none（旧值只靠 1px 边框 + #4096ff 撑，对白仅 2.99:1），
    让 style.css 的全局 :focus-visible 环接管；边框变色只作第二通道。 */
 input:focus-visible { border-color: var(--color-accent); }
-.forgot-row { text-align: right; margin-bottom: 16px; margin-top: -8px; }
+.forgot-row { text-align: right; margin-bottom: var(--space-4); margin-top: calc(-1 * var(--space-2)); }
 /* 按钮默认样式显式重置；上下留 4px 内边距让命中区达到 24×24（WCAG 2.5.8） */
 .forgot {
-  display: inline-block; width: auto; padding: 4px 0;
+  display: inline-block; width: auto; padding: var(--space-1) 0;
   background: none; border: none; text-align: inherit;
-  color: var(--color-accent); font-size: 13px; cursor: pointer;
+  color: var(--color-accent); font: var(--font-caption); cursor: pointer;
 }
 /* 注意：下面的裸 button:hover 规则会命中所有按钮，
    不显式重置背景的话，悬停会被染成实心主色，而文字色同为深蓝 → 按钮文字看不见。 */
 .forgot:hover { background: none; color: var(--color-accent-hover); }
-button { width: 100%; padding: 10px; background: var(--color-accent); color: var(--color-text-on-accent); border: none; border-radius: var(--radius-sm); font-size: 16px; cursor: pointer; }
+button { width: 100%; padding: var(--space-3); background: var(--color-accent); color: var(--color-text-on-accent); border: none; border-radius: var(--radius-sm); font: var(--font-body); font-weight: 500; cursor: pointer; }
 button:hover { background: var(--color-accent-hover); }
-.error { color: var(--color-danger); font-size: 13px; margin-bottom: 12px; }
+.error { color: var(--color-danger); font: var(--font-caption); margin-bottom: var(--space-3); }
 /* 换成按钮后保持原来"居中一行文字"的外观，同时整行都可点 */
 .toggle {
-  display: block; width: 100%; padding: 4px 0; margin-top: 16px;
+  display: block; width: 100%; padding: var(--space-1) 0; margin-top: var(--space-4);
   background: none; border: none; text-align: center;
-  color: var(--color-accent); font-size: 14px; cursor: pointer;
+  color: var(--color-accent); font: var(--font-ui); cursor: pointer;
 }
 /* 同上：显式重置悬停背景，避免被裸 button:hover 规则染成实心主色 */
 .toggle:hover { background: none; color: var(--color-accent-hover); }
 
 /* ---- 同花顺扫码入口 ---- */
-.qr-entry { margin-top: 20px; }
-.divider { display: flex; align-items: center; gap: 10px; margin: 18px 0; color: var(--color-text-muted); font-size: 12px; }
+.qr-entry { margin-top: var(--space-5); }
+.divider { display: flex; align-items: center; gap: var(--space-3); margin: var(--space-4) 0; color: var(--color-text-muted); font: var(--font-caption); }
 .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--color-border); }
 /* 文字型按钮：文字与边框都用达标的 --color-accent（旧 #1677ff 对白仅 4.10:1） */
 .qr-trigger {
   background: var(--color-bg-surface); color: var(--color-accent); border: 1px solid var(--color-accent);
-  font-size: 15px; display: flex; align-items: center; justify-content: center; gap: 6px;
+  font: var(--font-ui); display: flex; align-items: center; justify-content: center; gap: var(--space-2);
 }
 .qr-trigger:hover { background: var(--color-accent-soft); }
-.qr-icon { font-size: 17px; }
-.qr-note { font-size: 12px; color: var(--color-text-muted); text-align: left; margin: 8px 0 0; line-height: 1.5; }
+.qr-note { font: var(--font-caption); color: var(--color-text-muted); text-align: left; margin: var(--space-2) 0 0; line-height: 1.5; }
 .qr-note-center { text-align: center; }
 </style>

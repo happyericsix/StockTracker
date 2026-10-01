@@ -2,7 +2,10 @@
 
 > 本文是**决策记录**，不是设计文档。目的：把"要不要用 TradingAgents"这件事一次性查清并留证，
 > 免得三个月后再讨论一遍。结论是**不采用**；但其中四件事值得吸收，两件是我们目前缺的。
-> 全部原始产物在项目外的沙箱里（`E:\GitHubjob\ta-sandbox`），可整目录删除。
+> 原始产物已归档进本仓库（只有证据，1.3 MB / 18 个文件）：
+> `docs/superpowers/specs/2026-09-18-tradingagents-artifacts/`。
+> 项目外那个 599.5 MB 的沙箱（`E:\GitHubjob\ta-sandbox`，含 Python 运行时与 venv）已于 2026-09-18 删除，
+> 那部分是可重装的，重建命令见 §2；§6 记录了归档与清理的完整状态。
 
 ## 0. 结论
 
@@ -41,12 +44,13 @@ Market / News-Sentiment / News / Fundamentals 分析师（各自绑 yfinance 工
    返回 True，缓存文件是 `<results_dir>/data_cache/<TICKER>-YFin-data.csv`。
 3. 所以用**我们自己的行情源**（腾讯 ifzq，与产品同一个源）把真实日线写进那个 CSV：
    `600519.SS` 3716 根、`000001.SZ` 3704 根（2011-06-01 ~ 2026-09-17，覆盖它要求的
-   `[curr_date-15y, curr_date]`）。脚本：沙箱里的 `seed_cache.py`（复用产品的分页取数，
+   `[curr_date-15y, curr_date]`）。脚本已归档为
+   `2026-09-18-tradingagents-artifacts/seed_cache.py`（复用产品的分页取数，
    只把 `MAX_PAGES` 成本上限临时抬高）。
    **刻意用真实数据**，没有伪造一根 15 年前的 bar 去骗过覆盖检查。
 
-环境：Python 3.12.9（项目是 3.10，所以装在项目外 `E:\GitHubjob\ta-sandbox\py312`）+ 独立 venv +
-PyPI 走清华镜像（`pypi.org` 本机超时）。
+环境：Python 3.12.9（项目是 3.10，所以当时装在项目外 `E:\GitHubjob\ta-sandbox\py312`）+ 独立 venv +
+PyPI 走清华镜像（`pypi.org` 本机超时）。该沙箱已于 2026-09-18 删除，要重跑请按本节命令重建运行时。
 
 跑法：
 
@@ -132,8 +136,29 @@ random_baseline +0.0056 / sma_crossover +0.0056`。
 
 ## 6. 复现与清理
 
-- 沙箱：`E:\GitHubjob\ta-sandbox`（`py312\` Python 3.12.9、`venv\` 依赖、`ta\` 工作目录与结果、
-  `seed_cache.py`）。**与项目完全隔离**，删除该目录即彻底还原。
-- 项目内改动：只有本文档。（产品代码、依赖、数据源一处未动。）
-- 唯一需要人工留意的：验证/报告里目前**没有** look-ahead 守卫（§5 第 2 条），
-  这是本次评估暴露出的我们自身的缺口。
+**证据归档（在仓库内，1.3 MB / 18 个文件）**：
+`docs/superpowers/specs/2026-09-18-tradingagents-artifacts/`
+
+| 归档路径 | 是什么 |
+|---|---|
+| `ta/results/600519.SS/conversation_log_*.{json,txt}` | 两次决策的完整对话日志（各 65–130 KB）—— §3 表格与 §3.1 引文的出处 |
+| `ta/results/600519.SS/full_states_log_*.json` | 每一步的完整状态快照（各 200 KB） |
+| `ta/deepseek_report.json`、`ta/dryrun_report.json` | 真实（DeepSeek）与桩 LLM 两次回测汇总 —— §3 的 `warning_rate`/四个基准数字出处 |
+| `ta/results/data_cache/*.csv` | 用我们自己的行情源播种的真实日线（§2 第 3 步） |
+| `ta/results/data_cache/memories/*.jsonl` | 它那 5 份 BM25 词法记忆 |
+| `seed_cache.py`、`committee_600519_20260821.json`、`final_committee_600519.json` | 播种脚本与委员会产物 |
+
+本文 §3 的每个数字与引文都能在这些文件里对上。
+
+**运行时已删除**：`E:\GitHubjob\ta-sandbox`（599.51 MB，其中 `venv\` 536.5 MB / 36335 文件、
+`py312\` 61.7 MB / 3421 文件）已于 2026-09-18 删除 —— 这一部分**是可重装**的
+（Python 3.12.9 运行时 + `pip install` 依赖），重建步骤见 §2。
+删除后 `E:\GitHubjob` 只剩 `Stock Tracker/`。
+
+**项目内改动**：除本文档与新归档的证据目录外，产品代码里只有 **8 处注释**提到 TradingAgents，
+记录"照它的形状"或"与它刻意分歧"（`agent/trading_committee.py`、`agent/trading_decision.py`、
+`llm_service.py`，以及 `tests/test_llm_usage_shape.py`、`tests/test_trading_decision.py`）。
+**没有 import、没有新增依赖、没有新增数据源、没有新建第二个运行时。**
+
+**唯一需要人工留意的**：验证/报告里目前**没有** look-ahead 守卫（§5 第 2 条），
+这是本次评估暴露出的我们自身的缺口。

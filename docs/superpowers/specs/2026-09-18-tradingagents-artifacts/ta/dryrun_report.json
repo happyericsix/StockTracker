@@ -1,0 +1,133 @@
+{
+  "trades": [
+    {
+      "ticker": "600519.SS",
+      "decision_date": "2026-08-14",
+      "dataset_split": "train",
+      "recommendation": {
+        "signal": "BUY",
+        "size_fraction": 0.5,
+        "entry_reference_price": 1341.99,
+        "target_price": null,
+        "stop_loss": null,
+        "time_horizon_days": 5,
+        "confidence": 0.6,
+        "currency": null,
+        "rationale": "Stub rationale for backtest harness validation.",
+        "warning_message": null
+      },
+      "entry_price": 1341.99,
+      "exit_date": "2026-08-21",
+      "exit_price": 1272.83,
+      "realised_return": -0.010707081274823227,
+      "benchmark_returns": {
+        "buy_and_hold": -0.010707081274823227,
+        "always_hold": 0.0,
+        "sma_crossover": 0.009907081274823228,
+        "random_baseline": 0.009907081274823228
+      },
+      "reflection_scores": {},
+      "notes": ""
+    },
+    {
+      "ticker": "600519.SS",
+      "decision_date": "2026-08-21",
+      "dataset_split": "test",
+      "recommendation": {
+        "signal": "BUY",
+        "size_fraction": 0.5,
+        "entry_reference_price": 1272.83,
+        "target_price": null,
+        "stop_loss": null,
+        "time_horizon_days": 5,
+        "confidence": 0.6,
+        "currency": null,
+        "rationale": "Stub rationale for backtest harness validation.",
+        "warning_message": null
+      },
+      "entry_price": 1272.83,
+      "exit_date": "2026-08-28",
+      "exit_price": 1297.4,
+      "realised_return": 0.003460688387294475,
+      "benchmark_returns": {
+        "buy_and_hold": 0.003460688387294475,
+        "always_hold": 0.0,
+        "sma_crossover": -0.0042606883872944755,
+        "random_baseline": -0.0042606883872944755
+      },
+      "reflection_scores": {},
+      "notes": ""
+    }
+  ],
+  "sharpe": -2.607996856094152,
+  "hit_rate": 0.5,
+  "expectancy": -0.003623196443764376,
+  "avg_trade_return": -0.003623196443764376,
+  "worst_drawdown": -0.010707081274823227,
+  "total_return": -0.007283446759358325,
+  "n_buy": 2,
+  "n_sell": 0,
+  "n_hold": 0,
+  "estimated_cost_usd": 0.0,
+  "benchmarks": {
+    "always_hold": {
+      "total_return": 0.0,
+      "avg_return": 0.0,
+      "hit_rate": 0.0,
+      "sharpe": null,
+      "worst_drawdown": 0.0
+    },
+    "buy_and_hold": {
+      "total_return": -0.007283446759358325,
+      "avg_return": -0.003623196443764376,
+      "hit_rate": 0.5,
+      "sharpe": -2.607996856094152,
+      "worst_drawdown": -0.010707081274823227
+    },
+    "random_baseline": {
+      "total_return": 0.005604181901389227,
+      "avg_return": 0.0028231964437643764,
+      "hit_rate": 0.5,
+      "sharpe": 2.032152427767316,
+      "worst_drawdown": -0.00426068838729432
+    },
+    "sma_crossover": {
+      "total_return": 0.005604181901389227,
+      "avg_return": 0.0028231964437643764,
+      "hit_rate": 0.5,
+      "sharpe": 2.032152427767316,
+      "worst_drawdown": -0.00426068838729432
+    }
+  },
+  "split_reports": {
+    "train": {
+      "total_return": -0.010707081274823227,
+      "avg_return": -0.010707081274823227,
+      "hit_rate": 0.0,
+      "sharpe": null,
+      "worst_drawdown": -0.010707081274823227
+    },
+    "test": {
+      "total_return": 0.0034606883872945193,
+      "avg_return": 0.003460688387294475,
+      "hit_rate": 1.0,
+      "sharpe": null,
+      "worst_drawdown": 0.0
+    }
+  },
+  "signal_distribution": {
+    "BUY": 2,
+    "SELL": 0,
+    "HOLD": 0
+  },
+  "warning_rate": 0.0,
+  "prompt_versions": {
+    "backtest_evaluation": "backtest-eval-v1",
+    "reflection": "reflector-v1"
+  },
+  "model_names": {
+    "llm_provider": "google_genai",
+    "deep_think_llm": "gemini-flash-latest",
+    "quick_think_llm": "gemini-flash-latest"
+  }
+}

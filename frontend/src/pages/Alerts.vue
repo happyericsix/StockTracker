@@ -5,6 +5,7 @@ import { ref, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 
 import { getAlerts, addAlert, updateAlert, deleteAlert } from '../api/alerts.js'
+import AppIcon from '../components/AppIcon.vue'
 
 
 
@@ -553,7 +554,7 @@ onMounted(async () => {
 
     <header>
 
-      <button class="back-btn" @click="goBack">← 返回</button>
+      <button class="back-btn" @click="goBack"><AppIcon name="chevron-left" :size="16" :stroke-width="2" /> 返回</button>
 
       <h1>预警设置</h1>
 
@@ -713,7 +714,6 @@ onMounted(async () => {
 
 
 <style scoped>
-
 .alerts-page {
   min-height: 100vh;
   /* 移动端地址栏高度算进 100vh，会顶出底部，补 dvh 兜底 */
@@ -721,100 +721,219 @@ onMounted(async () => {
   background: var(--color-bg-page);
 }
 
-header {
+/* 用子选择器限定到页面级 chrome。裸元素选择器会命中组件里**任何** header/main ——
+   Dashboard 那次"行情卡头部白字压深蓝、对比度 1:1"就是这么来的（见那里的注释）。
+   这里目前只有一个页面级 header/main，但那是"碰巧没事"，不是"构造上没事"。 */
+.alerts-page > header {
   background: var(--color-bg-inverse);
   color: var(--color-text-inverse);
   /* iOS 独立模式（black-translucent）内容会顶到状态栏下，让出顶部安全区 */
-  padding: calc(16px + env(safe-area-inset-top, 0px)) 24px 16px;
-  display: flex; align-items: center; gap: 16px;
+  padding: calc(var(--space-4) + env(safe-area-inset-top, 0px)) var(--space-5) var(--space-4);
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
 }
 
-header h1 { margin: 0; font-size: 20px; flex: 1; }
+.alerts-page > header h1 {
+  margin: 0;
+  font: var(--font-heading);
+  color: var(--color-text-inverse);
+  flex: 1;
+}
 
-.back-btn { background: transparent; border: 1px solid var(--color-text-inverse); color: var(--color-text-inverse); padding: 6px 16px; border-radius: var(--radius-sm); cursor: pointer; }
+.back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  background: transparent;
+  border: 1px solid var(--color-text-inverse);
+  color: var(--color-text-inverse);
+  padding: 6px var(--space-4);
+  border-radius: var(--radius-sm);
+  font: var(--font-ui);
+  cursor: pointer;
+}
 
 /* 原 #fa8c16 配白字只有 2.38:1（严重不达标），换警示色 5.43:1 */
-.add-btn { background: var(--color-warning); border: none; color: var(--color-text-on-accent); padding: 6px 16px; border-radius: var(--radius-sm); cursor: pointer; font-size: 14px; }
+.add-btn {
+  background: var(--color-warning);
+  border: none;
+  color: var(--color-text-on-accent);
+  padding: 6px var(--space-4);
+  border-radius: var(--radius-sm);
+  font: var(--font-ui);
+  font-weight: 500;
+  cursor: pointer;
+}
 
 /* 悬停不再换更浅的橙（#ffa940 配白字只有 3.5:1），改为整体压暗，文字对比度只增不减 */
 .add-btn:hover { filter: brightness(0.88); }
 
-main { max-width: 700px; margin: 0 auto; padding: 24px 16px; }
+.alerts-page > main {
+  max-width: 700px;
+  margin: 0 auto;
+  padding: var(--space-5) var(--space-4);
+}
 
+/* ---------- 表单卡 ---------- */
+.form-card {
+  background: var(--color-bg-surface);
+  border-radius: var(--radius-3xl);
+  padding: var(--space-5);
+  margin-bottom: var(--space-5);
+  box-shadow: var(--shadow-1);
+}
 
+.form-card h2 {
+  font: var(--font-heading);
+  color: var(--color-text-primary);
+  margin-bottom: var(--space-4);
+}
 
-.form-card { background: var(--color-bg-surface); border-radius: var(--radius-lg); padding: 24px; margin-bottom: 16px; box-shadow: var(--shadow-1); }
+.form-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
 
-.form-card h2 { margin-bottom: 16px; font-size: 16px; }
+/* 输入框 16px（--font-body）：小于 16px 时 iOS Safari 会把整页放大。
+   原值 14px 在 iPhone 上点一下输入框整页就跳一下。 */
+.form-row input,
+.form-row select {
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-control);
+  border-radius: var(--radius-sm);
+  font: var(--font-body);
+}
 
-.form-row { display: flex; flex-direction: column; gap: 10px; }
-
-/* 输入控件边界需 ≥3:1（1.4.11），原 #d9d9d9 对白只有 1.41:1 */
-.form-row input, .form-row select { padding: 10px 12px; border: 1px solid var(--color-border-control); border-radius: var(--radius-sm); font-size: 14px; }
-
-/* 删掉 outline: none，焦点环交回全局 :focus-visible；边框变色只作第二通道 */
-.form-row input:focus-visible, .form-row select:focus-visible { border-color: var(--color-accent); }
+.form-row input:focus-visible,
+.form-row select:focus-visible { border-color: var(--color-accent); }
 
 .form-row select { background: var(--color-bg-surface); cursor: pointer; }
 
-.condition-desc { font-size: 12px; color: var(--color-text-muted); margin-top: 8px; }
+.condition-desc {
+  font: var(--font-caption);
+  color: var(--color-text-muted);
+  margin-top: var(--space-2);
+}
 
-.form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.form-actions {
+  display: flex;
+  gap: var(--space-2);
+  justify-content: flex-end;
+  margin-top: var(--space-4);
+}
 
+/* ---------- 预警列表 ---------- */
+.alerts-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
 
+.alert-card {
+  background: var(--color-bg-surface);
+  border-radius: var(--radius-3xl);
+  padding: var(--space-5);
+  box-shadow: var(--shadow-1);
+}
 
-.alerts-list { display: flex; flex-direction: column; gap: 12px; }
+/* 停用态**不用** opacity。整卡半透明会把卡里所有文字一起拖到 4.5:1 以下
+   （白底上 #1a1a2e 加 50% 透明度实测约 3.0:1），而"哪只股票、什么条件"仍然是
+   用户要读的内容，不是装饰。改成"表面变浅 + 标的降一档字号色"，
+   文字对比度不退；开关自身的状态由 .toggle-slider 表达，不靠整卡变淡。 */
+.alert-card.disabled { background: var(--color-bg-subtle); }
 
-.alert-card { background: var(--color-bg-surface); border-radius: var(--radius-lg); padding: 16px 20px; box-shadow: var(--shadow-1); transition: opacity var(--duration-base) var(--ease-out); }
+.alert-card.disabled .alert-symbol { color: var(--color-text-secondary); }
 
-.alert-card.disabled { opacity: 0.5; }
+.alert-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-4);
+}
 
-.alert-main { display: flex; justify-content: space-between; align-items: center; }
+.alert-left {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
 
-.alert-left { display: flex; flex-direction: column; gap: 4px; }
+.alert-symbol {
+  font: var(--font-heading);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
 
-.alert-symbol { font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
-.alert-symbol-code { font-size: 12px; color: var(--color-text-muted); font-weight: normal; }
+.alert-symbol-code {
+  font: var(--font-caption);
+  color: var(--color-text-muted);
+  font-weight: 400;
+}
 
-/* 原来是 #fff7e6 底 + #fa8c16 文字（对浅底约 2.4:1）。恢复米黄底但把文字换成达标的警示色 */
+/* 原来是 #fff7e6 底 + #fa8c16 文字（对浅底约 2.4:1）。恢复米黄底但把文字换成达标的警示色。
+   字号从 11px 提到 12px（--font-micro）：11px 已低于小字号下限。 */
 .local-badge {
-  font-size: 11px; font-weight: 500; padding: 2px 6px;
-  background: var(--color-warning-soft); color: var(--color-warning);
-  border: 1px solid var(--color-warning-mark); border-radius: var(--radius-sm);
+  font: var(--font-micro);
+  padding: 2px 6px;
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+  border: 1px solid var(--color-warning-mark);
+  border-radius: var(--radius-sm);
 }
 
 .form-advanced {
-  margin-top: 12px; padding: 8px 0;
+  margin-top: var(--space-3);
+  padding: var(--space-2) 0;
   border-top: 1px dashed var(--color-border);
 }
+
 .form-advanced summary {
-  cursor: pointer; font-size: 13px; color: var(--color-text-muted);
+  cursor: pointer;
+  font: var(--font-caption);
+  color: var(--color-text-muted);
   user-select: none;
 }
+
 .form-advanced summary:hover { color: var(--color-accent); }
-.form-row-advanced { margin-top: 10px; }
+
+.form-row-advanced { margin-top: var(--space-3); }
 
 .form-field {
-  display: flex; flex-direction: column; gap: 4px;
-  font-size: 12px; color: var(--color-text-muted);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font: var(--font-caption);
+  color: var(--color-text-muted);
 }
-.form-field > .field-label { font-size: 12px; color: var(--color-text-muted); }
+
+.form-field > .field-label {
+  font: var(--font-caption);
+  color: var(--color-text-muted);
+}
+
 .form-field > input,
 .form-field > select {
-  padding: 10px 12px; border: 1px solid var(--color-border-control);
-  border-radius: var(--radius-sm); font-size: 14px;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-control);
+  border-radius: var(--radius-sm);
+  font: var(--font-body);
   background: var(--color-bg-surface);
   color: var(--color-text-primary);  /* 显式深色,避免继承父级灰色导致文字看不清 */
-  font-family: inherit;
   /* 关键:让 select 用浏览器默认外观,避免我们覆盖导致 dropdown 不显示 */
   appearance: auto;
   -webkit-appearance: auto;
   -moz-appearance: auto;
 }
+
 /* number input 的上下箭头(spinner) 强制可见且可点 */
 .form-field > input[type="number"] {
   -moz-appearance: textfield;
 }
+
 .form-field > input[type="number"]::-webkit-inner-spin-button,
 .form-field > input[type="number"]::-webkit-outer-spin-button {
   opacity: 1;
@@ -822,8 +941,10 @@ main { max-width: 700px; margin: 0 auto; padding: 24px 16px; }
   height: 24px;
   width: 14px;
 }
+
 .form-field > input:focus-visible,
 .form-field > select:focus-visible { border-color: var(--color-accent); }
+
 /* 原来只有边框变色，扫读时不够醒目；恢复原有的浅红底做整块标红。
    文字/边框用 --color-danger（对浅红底 5.07:1），底色用 --color-danger-soft */
 .form-field.has-error > input,
@@ -831,51 +952,95 @@ main { max-width: 700px; margin: 0 auto; padding: 24px 16px; }
   border-color: var(--color-danger);
   background: var(--color-danger-soft);
 }
+
 .field-error {
-  font-size: 12px; color: var(--color-danger);
+  font: var(--font-caption);
+  color: var(--color-danger);
   line-height: 1.4;
 }
 
-.alert-condition { font-size: 13px; color: var(--color-text-secondary); }
+.alert-condition { font: var(--font-caption); color: var(--color-text-secondary); }
 
-.alert-right { display: flex; align-items: center; gap: 16px; }
+.alert-right { display: flex; align-items: center; gap: var(--space-4); }
 
-/* 原 #fa8c16 作文字对白仅 2.38:1 */
-.alert-threshold { font-size: 16px; font-weight: 600; color: var(--color-warning); }
+.alert-threshold {
+  font: var(--font-body);
+  font-weight: 600;
+  color: var(--color-warning);
+}
 
-.alert-hwm { font-size: 12px; color: var(--color-text-muted); margin-top: 2px; }
+.alert-hwm { font: var(--font-caption); color: var(--color-text-muted); margin-top: 2px; }
 
-.alert-actions { display: flex; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--color-border); }
+.alert-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+}
 
-
-
-/* Toggle Switch */
-
-.toggle-switch { position: relative; display: inline-block; width: 44px; height: 24px; }
+/* ---------- 开关 ---------- */
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+  flex-shrink: 0;
+}
 
 .toggle-switch input { opacity: 0; width: 0; height: 0; }
 
-/* 关闭态轨道原 #ccc 对白仅 1.6:1，白滑块几乎看不出边界，换控件边界令牌（3.36:1） */
-.toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: var(--color-border-control); transition: var(--duration-base) var(--ease-out); border-radius: var(--radius-pill); }
+.toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-color: var(--color-border-control);
+  transition-property: background-color;
+  transition-duration: var(--duration-base);
+  transition-timing-function: var(--ease-out);
+  border-radius: var(--radius-pill);
+}
 
-.toggle-slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background-color: var(--color-bg-surface); transition: var(--duration-base) var(--ease-out); border-radius: 50%; }
+.toggle-slider:before {
+  position: absolute;
+  content: "";
+  height: 18px;
+  width: 18px;
+  left: 3px;
+  bottom: 3px;
+  background-color: var(--color-bg-surface);
+  transition-property: transform;
+  transition-duration: var(--duration-base);
+  transition-timing-function: var(--ease-out);
+  border-radius: 50%;
+}
 
-/* 开启态原 #52c41a 白滑块仅 2.27:1，换成功色 5.59:1。
-   状态不单靠颜色：滑块位置同时右移（下一条 transform），颜色只是第二通道。 */
 .toggle-switch input:checked + .toggle-slider { background-color: var(--color-success); }
 
 .toggle-switch input:checked + .toggle-slider:before { transform: translateX(20px); }
 
-/* 原生 checkbox 被压成 0 尺寸，全局焦点环落上去也看不见；把焦点环画到滑块上 */
-.toggle-switch input:focus-visible + .toggle-slider { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
+/* 开关是自定义控件，原生焦点环被 opacity:0 的 input 带走了，这里必须显式给 */
+.toggle-switch input:focus-visible + .toggle-slider {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
 
-
-
-.btn { padding: 8px 16px; border: none; border-radius: var(--radius-sm); font-size: 13px; cursor: pointer; transition: all var(--duration-base) var(--ease-out); }
+/* ---------- 按钮 ---------- */
+/* 原来是 transition: all —— 它会把**所有**可动画属性一起过渡（包括布局属性），
+   既浪费性能又会带来意外动画。只声明真正会变的那几个颜色属性。 */
+.btn {
+  padding: var(--space-2) var(--space-4);
+  border: none;
+  border-radius: var(--radius-sm);
+  font: var(--font-caption);
+  cursor: pointer;
+  transition-property: background-color, border-color, color;
+  transition-duration: var(--duration-base);
+  transition-timing-function: var(--ease-out);
+}
 
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* 原 #1677ff 配白字只有 4.10:1，不达 AA */
 .btn-primary { background: var(--color-accent); color: var(--color-text-on-accent); }
 
 .btn-primary:hover:not(:disabled) { background: var(--color-accent-hover); }
@@ -884,7 +1049,8 @@ main { max-width: 700px; margin: 0 auto; padding: 24px 16px; }
 
 .btn-text:hover { color: var(--color-text-primary); }
 
-.btn-sm { padding: 4px 12px; font-size: 12px; }
+/* 字号不再单独降到 12px，继承 .btn 的 13px（--font-caption）—— 12px 已在小字号下限上 */
+.btn-sm { padding: var(--space-1) var(--space-3); }
 
 /* 按钮边界同属控件边界，也要 ≥3:1（原 #d9d9d9 仅 1.41:1） */
 .btn-outline { background: transparent; border: 1px solid var(--color-border-control); color: var(--color-text-secondary); }
@@ -896,15 +1062,27 @@ main { max-width: 700px; margin: 0 auto; padding: 24px 16px; }
 
 .btn-danger-outline:hover { background: var(--color-bg-subtle); }
 
+/* ---------- 空态与状态文案 ---------- */
+/* 原 #999 对灰底 2.54:1。空态是空页面上**唯一**的内容，所以给它一个和卡片同级的表面，
+   而不是一行浮在灰底上的小字。 */
+.empty {
+  font: var(--font-ui);
+  color: var(--color-text-muted);
+  text-align: center;
+  padding: var(--space-6) var(--space-4);
+  background: var(--color-bg-surface);
+  border-radius: var(--radius-3xl);
+  box-shadow: var(--shadow-1);
+}
 
-
-/* 原 #999 对灰底 2.54:1 */
-.empty { color: var(--color-text-muted); text-align: center; padding: 48px 16px; font-size: 14px; }
-
-.error { color: var(--color-danger); font-size: 13px; margin-bottom: 8px; }
+.error { font: var(--font-caption); color: var(--color-danger); margin-bottom: var(--space-2); }
 
 /* 原 #52c41a 作文字对灰底约 2.2:1 */
-.success { color: var(--color-success); font-size: 13px; margin-bottom: 16px; text-align: center; }
-
+.success {
+  font: var(--font-caption);
+  color: var(--color-success);
+  margin-bottom: var(--space-4);
+  text-align: center;
+}
 </style>
 

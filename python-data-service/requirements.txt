@@ -11,3 +11,6 @@ pandas>=2.0.0
 # ML 模型(quant_model.py / deep_models.py / train_models.py)需要
 lightgbm>=4.0.0
 mlflow>=2.10.0
+
+# 向量召回(agent/vector_index.py)需要
+chromadb>=0.4.22

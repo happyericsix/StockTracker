@@ -19,8 +19,6 @@ public interface PaperTradeTraceRepository extends JpaRepository<PaperTradeTrace
 
     List<PaperTradeTrace> findByStrategyIdAndTradeDateOrderByCreatedAtAsc(Long strategyId, LocalDate tradeDate);
 
-    List<PaperTradeTrace> findByStrategyIdAndSkipReasonOrderByCreatedAtDesc(Long strategyId, String skipReason);
-
     long countByStrategyId(Long strategyId);
 
     /**

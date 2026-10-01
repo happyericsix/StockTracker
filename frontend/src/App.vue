@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { RouterView } from 'vue-router'
+import AppIcon from './components/AppIcon.vue'
 
 const installEvent = ref(null)
 const showInstall = ref(false)
@@ -39,7 +40,7 @@ const dismissInstall = () => {
   <!-- PWA 安装横幅 -->
   <div v-if="showInstall" class="install-banner">
     <div class="install-info">
-      <span class="install-icon" aria-hidden="true">📊</span>
+      <span class="install-icon"><AppIcon name="chart" :size="26" :stroke-width="2" /></span>
       <div>
         <div class="install-title">安装 Stock Tracker</div>
         <div class="install-desc">添加到桌面，快速查看行情</div>
@@ -48,7 +49,7 @@ const dismissInstall = () => {
     <div class="install-actions">
       <button type="button" class="install-btn" @click="handleInstall">安装</button>
       <button type="button" class="dismiss-btn" @click="dismissInstall" aria-label="关闭安装提示">
-        <span aria-hidden="true">✕</span>
+        <AppIcon name="close" :size="16" :stroke-width="2" />
       </button>
     </div>
   </div>
@@ -96,17 +97,18 @@ const dismissInstall = () => {
 }
 
 .install-icon {
-  font-size: 28px;
+  display: flex;
+  align-items: center;
   flex-shrink: 0;
 }
 
 .install-title {
-  font-size: 14px;
+  font: var(--font-ui);
   font-weight: 600;
 }
 
 .install-desc {
-  font-size: 12px;
+  font: var(--font-caption);
   color: var(--color-text-inverse-muted);
   margin-top: 2px;
 }

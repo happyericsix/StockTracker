@@ -101,9 +101,13 @@ Python FastAPI (:8000)
 - `agent/strategy_engine.py`：指标计算、规则求值、回测执行、单日求值。
 - 新端点：
   - `POST /api/v1/agent/chat`：聊天统一入口
-  - `POST /api/v1/strategies/validate`
   - `POST /api/v1/strategies/backtest`
   - `POST /api/v1/strategies/evaluate-bar`
+
+  > **2026-09-18 更新**：本条原还列着 `POST /api/v1/strategies/validate`，该路由已删除。
+  > 原因：它唯一的消费者是 Java 的 `StrategyClient.validateStrategy`，而那个方法全项目零调用；
+  > Agent 的策略校验走的是下面那个**进程内**工具 `validate_strategy`（`tool_registry.py`），
+  > 从不经过 HTTP。删除时同时在 `tests/test_endpoints.py` 移除了两个只测该路由的用例。
 
 工具集合（v1）：
 

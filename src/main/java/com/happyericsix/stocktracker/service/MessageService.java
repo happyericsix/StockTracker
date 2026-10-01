@@ -53,21 +53,6 @@ public class MessageService {
         return r;
     }
 
-    public List<MessageResponse> getMessages(String username) {
-        User user = getUser(username);
-        return messageRepo.findByUserIdOrderByCreatedAtDesc(user.getId()).stream()
-                .map(this::withSymbolName)
-                .collect(Collectors.toList());
-    }
-
-    /** 按 type 过滤查询（如 type=ALERT 看预警历史，type=CHAT_USER 聊天记录） */
-    public List<MessageResponse> getMessagesByType(String username, String type) {
-        User user = getUser(username);
-        return messageRepo.findByUserIdAndTypeOrderByCreatedAtDesc(user.getId(), type).stream()
-                .map(this::withSymbolName)
-                .collect(Collectors.toList());
-    }
-
     /**
      * 分页查询（消息中心主用）
      * @param page   页码（0-based）
@@ -137,7 +122,7 @@ public class MessageService {
      * 发送聊天消息：
      * 1. 立即落库 CHAT_USER 并回显推送
      * 2. 写记忆账本（用户说了什么，这是"前情提要"的原料，只追加）
-     * 3. 异步交给 ChatService 调 LLM，回复通过 saveAndPush 回来
+     * 3. 异步交给 ChatService 调 LLM，回复由 ChatService.saveBotReply 自己落库并推送
      */
     @Transactional
     public void handleChatSend(String username, ChatSendRequest request) {
@@ -169,7 +154,13 @@ public class MessageService {
         }
     }
 
-    /** 内部统一入口：落库 + SSE 推送（预警任务与聊天回复共用） */
+    /**
+     * 通用出口：落库 + SSE 推送（type 由调用方给）。
+     *
+     * <p>各条生产路径现在都有自己的出口：预警走 {@link #recordAlertTrigger}、
+     * 报告走 {@link #saveReport}、聊天回复走 {@code ChatService.saveBotReply}。
+     * 这个方法保留给测试与后续复用（{@code MessageReportIdempotencyTest} 在调）。
+     */
     @Transactional
     public void saveAndPush(User user, String type, String content, String relatedSymbol) {
         Message message = Message.builder()

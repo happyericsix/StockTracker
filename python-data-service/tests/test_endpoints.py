@@ -39,22 +39,6 @@ def make_bars(n=30, start=100.0, step=1.0):
         })
     return bars
 
-def test_validate_endpoint():
-    c = TestClient(main.app)
-    payload = {"strategy_json": VALID_STRATEGY}
-    r = c.post("/api/v1/strategies/validate", json=payload, headers=HEADERS)
-    assert r.status_code == 200
-    assert r.json()["valid"] is True
-
-def test_validate_rejects_non_object_strategy_json():
-    c = TestClient(main.app)
-    r = c.post("/api/v1/strategies/validate", json={"strategy_json": []}, headers=HEADERS)
-    assert r.status_code == 200
-    body = r.json()
-    assert body["valid"] is False
-    assert body["error"] == "strategy_json must be an object"
-    assert body["normalized"] is None
-
 def test_backtest_with_fixed_history():
     c = TestClient(main.app)
     original = akshare_client.get_history

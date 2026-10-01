@@ -1187,13 +1187,6 @@ public class PaperTradingService {
         }
     }
 
-    private double doubleOr(JsonNode node, double fallback) {
-        if (node == null || !node.isNumber()) {
-            return fallback;
-        }
-        return node.asDouble();
-    }
-
     private String textOr(JsonNode node, String fallback) {
         if (node == null || node.isNull()) {
             return fallback;

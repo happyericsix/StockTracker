@@ -43,9 +43,6 @@ public interface MessageRepository extends JpaRepository<Message, Long> {
      */
     List<Message> findTop20ByUserIdAndTypeInOrderByIdDesc(Long userId, List<String> types);
 
-    /** 消息中心：按 type 过滤（如 type=ALERT 看预警历史） */
-    List<Message> findByUserIdAndTypeOrderByCreatedAtDesc(Long userId, String type);
-
     long countByUserIdAndReadFalse(Long userId);
 
     /** 冷却判断：指定预警在 since 之后是否触发过 */

@@ -17,6 +17,7 @@
 import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import QRCode from 'qrcode'
 import { createQr, pollQr, createQrForBind, pollQrForBind } from '../api/ths.js'
+import AppIcon from './AppIcon.vue'
 
 const props = defineProps({
   mode: { type: String, default: 'login' },   // 'login' | 'bind'
@@ -156,7 +157,7 @@ defineExpose({ start, stop: stopTimers })
       </div>
 
       <div v-if="status === 'ok'" class="qr-placeholder qr-ok">
-        <p class="ph-text"><span aria-hidden="true">✓</span> {{ message }}</p>
+        <p class="ph-text"><AppIcon name="check" :size="16" :stroke-width="2" /> {{ message }}</p>
       </div>
     </div>
 

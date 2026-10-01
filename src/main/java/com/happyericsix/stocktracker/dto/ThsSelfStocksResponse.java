@@ -39,14 +39,5 @@ public record ThsSelfStocksResponse(
         public String toProjectSymbol() {
             return market + code;
         }
-
-        /**
-         * 去掉市场前缀的纯代码，用于「底层代码等价」去重。
-         *
-         * <p>防止 600519 与 SH600519 在数据库里出现两行。
-         */
-        public String bareCode() {
-            return code;
-        }
     }
 }

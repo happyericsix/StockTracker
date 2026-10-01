@@ -25,10 +25,11 @@ request.interceptors.request.use(config => {
  *
  *   1. Result 信封：{"code":200,"message":"success","data":<业务数据>}
  *      出现在 /alerts 的 DELETE、/chat/send、/messages 的两个 PUT、
- *      /stocks/search、/stocks/favorites 的 POST/DELETE，以及**整个** /strategies、/ths、/user
+ *      /stocks/search、/user/favorites 的 POST/DELETE，以及**整个** /strategies、/ths、/user
+ *      —— 注意 /user 有个例外：/user/favorites 的 GET 是裸数组（见下一组）
  *   2. 裸 DTO：直接就是业务对象或数组
  *      出现在 /alerts 的 GET/POST/PUT、/chat/history、/messages、/messages/unread-count、
- *      /stocks/{symbol} 及其 /overview /history /minute、/stocks/favorites 的 GET，以及 /auth/*
+ *      /stocks/{symbol} 及其 /overview /history /minute、/user/favorites 的 GET，以及 /auth/*
  *
  * 判据用"同时含 code、message、data 三个键"来识别信封。已核对不会被裸 DTO 误伤：
  *   AuthResponse{token,username,email,message} 有 message 但没有 code/data；

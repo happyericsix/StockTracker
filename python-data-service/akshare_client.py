@@ -733,7 +733,15 @@ def get_news(symbol: str = "", limit: int = 10) -> dict:
         —— 空结果返回 `{"items": []}`，由上层决定怎么说（"今天没消息"是合法答案）
     """
     if symbol and str(symbol).strip():
-        resolved = str(resolve_symbol(str(symbol).strip()) or "").strip()
+        resolved = str(resolve_symbol(str(symbol).strip()) or "").strip().upper()
+        # ⚠️ `resolve_symbol` 对 "sh600519" 返回的是**带前缀的** "SH600519"（它只负责识别市场，
+        # 不负责剥壳），而 `is_a_share` 只认 6 位纯数字。少了剥前缀这一步，"sh600519" ——
+        # 也就是 README「股票代码格式」表里写的标准写法 —— 会被判成"非 A 股"，
+        # 于是 get_news 静默回退成全市场快讯：用户问"茅台最近有什么消息"，
+        # 拿到的是宏观快讯，而整条链路一个错都不报。
+        # 只剥 SH/SZ：北交所个股新闻是否可用**未实测**，不在这里顺手打开未验证的路径。
+        if resolved.startswith(("SH", "SZ")):
+            resolved = resolved[2:]
         if is_a_share(resolved):
             return get_symbol_news(resolved, limit)
         # 东财个股新闻只认 6 位 A 股代码；港股/美股/北交所走市场快讯，别假装查到了

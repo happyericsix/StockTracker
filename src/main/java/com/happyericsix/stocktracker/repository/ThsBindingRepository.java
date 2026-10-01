@@ -12,7 +12,5 @@ public interface ThsBindingRepository extends JpaRepository<ThsBinding, Long> {
     /** 一个用户最多一条绑定。 */
     Optional<ThsBinding> findByUserId(Long userId);
 
-    boolean existsByUserId(Long userId);
-
     void deleteByUserId(Long userId);
 }

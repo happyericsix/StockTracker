@@ -221,6 +221,10 @@ const renderBacktestChart = async () => {
         smooth: true,
         data: strategyCurve.map((point) => point.equity),
         lineStyle: { width: 2, color: accentColor },
+        // 图例图标 = 线段(lineStyle.stroke) + 空心圆点(itemStyle.fill)，两者不同源。
+        // 只写 lineStyle.color，圆点就会去 ECharts 默认色板取色（#5070dd / #b6d634…），
+        // 图例旁边于是挂着一个两条曲线上都不存在的颜色；tooltip 的小色点同源，也一起跑偏。
+        itemStyle: { color: accentColor },
         areaStyle: { color: accentSoftColor }
       },
       {
@@ -229,7 +233,8 @@ const renderBacktestChart = async () => {
         showSymbol: false,
         smooth: true,
         data: benchmarkCurve.map((point) => point.equity),
-        lineStyle: { width: 1.5, type: 'dashed', color: mutedColor }
+        lineStyle: { width: 1.5, type: 'dashed', color: mutedColor },
+        itemStyle: { color: mutedColor }
       }
     ]
   }, { notMerge: true })
@@ -314,6 +319,9 @@ const renderEquityChart = async () => {
         showSymbol: false,
         data: points.map((point) => point.equity),
         lineStyle: { width: 2, color: accentColor },
+        // 这条曲线没有图例，但 tooltip 的小色点同样取 itemStyle.fill，
+        // 不写就会是 ECharts 默认色板的颜色，和曲线对不上。
+        itemStyle: { color: accentColor },
         areaStyle: { color: accentSoftColor },
         markLine
       }

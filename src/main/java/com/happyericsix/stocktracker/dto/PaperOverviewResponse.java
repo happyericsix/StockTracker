@@ -6,7 +6,6 @@ import com.happyericsix.stocktracker.service.PaperSchedule;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.util.List;
 
 /**
  * 模拟盘总览：**一次请求回答四个问题**。
@@ -75,10 +74,6 @@ public class PaperOverviewResponse {
     private PaperSchedule.NextEvaluation nextEvaluation;
     /** 下一次日线结算的人话（含"按工作日近似"的边界）。 */
     private String nextEvaluationNote;
-
-    public static List<String> metrics() {
-        return PaperEquitySeries.METRICS;
-    }
 
     public Long getStrategyId() { return strategyId; }
     public void setStrategyId(Long strategyId) { this.strategyId = strategyId; }

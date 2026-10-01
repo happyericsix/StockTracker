@@ -7,7 +7,7 @@ import asyncio
 import os
 import time
 from contextlib import asynccontextmanager
-from datetime import date, timedelta
+from datetime import date
 
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +15,14 @@ from fastapi.responses import JSONResponse
 
 from akshare_client import (get_quote, get_history, get_minute_kline, get_overview,
                             search_stocks, warm_stock_list)
+# news_client 是模块级导入而不是 lazy：它只依赖 akshare / akshare_client，
+# 两者本来就是这个进程的启动依赖，不存在"某个可选包缺失导致 app 起不来"的风险。
+# （与之对照：quant_model 用了 sklearn，所以它必须 lazy —— 见下面的注释。）
+import news_client
+import news_understanding
+# 交易日历：行情接口要回答"这个价是哪一天的"，前端要回答"今天休市、休到哪天"。
+# 它只依赖 akshare（本进程的启动依赖），所以可以模块级导入。
+import trading_calendar
 # 注意:quant_model(用了 sklearn) 改成 lazy import,
 # 避免启动时因 sklearn 缺失导致整个 app 挂掉
 # 真正的 import 在用到 analyze_stock 的 endpoint 函数里
@@ -39,6 +47,12 @@ async def lifespan(_app: FastAPI):
         warm_stock_list(background=True)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"启动预热失败（不影响服务）：{e}")
+    # 交易日历同理：第一次取要打新浪，挪到没人等的时段。
+    # 它比股票名单更关键 —— 拿不到就只能说"不知道今天开不开市"。
+    try:
+        trading_calendar.warm(background=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"交易日历预热失败（不影响服务）：{e}")
     yield
 
 
@@ -341,6 +355,24 @@ def stock_search(keyword: str = Query(default="", description="搜索关键词�
     return {"keyword": keyword, "count": len(results), "results": results}
 
 
+# ==================== 市场状态（交易日历） ====================
+
+@app.get("/api/v1/market/status")
+def market_status():
+    """今天开不开市、休到哪天、这个价是哪一天的。
+
+    <h3>为什么要有这条接口</h3>
+    休市日腾讯行情照样返回上一交易日的收盘价，前端如果只看行情自身，
+    **没有任何办法**分辨"现在是交易中的实时价"还是"周五的收盘价"。
+    交易日历是唯一的外部事实来源，所以它必须单独暴露出来。
+
+    返回结构见 `trading_calendar.status()`。`note` 是已经拼好的中文句子，
+    前端直接渲染即可；结构化字段留给需要做判断的地方（例如给行情卡打
+    "最近交易日收盘"的标记）。
+    """
+    return trading_calendar.status()
+
+
 # ==================== 实时行情 ====================
 
 def _quote_num(raw):
@@ -364,10 +396,18 @@ def stock_quote(symbol: str):
     price = data.get("最新价", "")
     if not price or price == "0.0":
         price = None
-    today_str = str(date.today())
+
+    # 这个价属于哪一个交易日 —— **不能**写 `date.today()`。
+    #
+    # 原来的写法是 `lastTradingDay=str(date.today())`，于是一个周日的行情被标成"周日的数据"：
+    # 腾讯在休市日回的其实是周五收盘价、`涨跌幅` 也是周五当天的涨跌，前端却渲染成
+    # "更新 2026-09-20"。用户看到的直接反应就是"明明在休息日，为什么还有今天的涨跌"。
+    # 现在改成问交易日历：今天开市且已过集合竞价 → 今天；否则 → 上一个交易日。
+    market = trading_calendar.status()
+    quote_day = market.get("quoteDate") or str(date.today())
 
     return StockQuoteResponse(
-        globalQuote=GlobalQuote(symbol=symbol, price=price, lastTradingDay=today_str,
+        globalQuote=GlobalQuote(symbol=symbol, price=price, lastTradingDay=quote_day,
                                 name=data.get("名称", symbol),
                                 # 涨跌方向：get_quote() 已经解析好了，这里必须带上，
                                 # 否则 Java 侧的 @JsonProperty 取不到值，前端就没有涨跌可判断。
@@ -716,21 +756,6 @@ async def agent_diagnostic(symbol: str):
         return {"symbol": symbol, "error": "模型诊断暂不可用"}
 
 
-@app.post("/api/v1/strategies/validate")
-async def validate_strategy_endpoint(req: Request):
-    from agent.strategy_schema import validate_strategy_config
-    try:
-        data = await req.json()
-        strategy_json = data.get("strategy_json", {})
-        if not isinstance(strategy_json, dict):
-            return {"valid": False, "error": "strategy_json must be an object", "normalized": None}
-        cfg, err = validate_strategy_config(strategy_json)
-        return {"valid": err is None, "error": err, "normalized": cfg.model_dump() if cfg else None}
-    except Exception as e:
-        logger.error(f"strategy validation error: {e}", exc_info=True)
-        return {"valid": False, "error": "策略校验失败，请稍后重试", "normalized": None}
-
-
 @app.post("/api/v1/strategies/backtest")
 async def backtest_strategy_endpoint(req: Request):
     from agent.strategy_schema import validate_strategy_config
@@ -1032,5 +1057,213 @@ async def ths_selfstocks(req: Request):
         return _ths_error(e.message)
 
     return {"ok": True, "data": data}
+
+
+# ==================== 新闻/资讯 ====================
+
+
+def _news_error(message: str, status_code: int = 502):
+    """新闻模块统一错误信封：`{"ok": false, "error": "中文可读原因"}`。
+
+    与 THS 的 `_ths_error` 同形状（前端已熟悉），但**不复用那个函数名** ——
+    新闻与同花顺是两个独立的数据域，共用一个以 THS 命名的 helper 会让
+    "改 THS 的错误处理"意外改到新闻，反之亦然。
+    """
+    return JSONResponse(status_code=status_code, content={"ok": False, "error": message})
+
+
+NEWS_TYPES = (news_client.LEVEL_NOTICE, news_client.LEVEL_MEDIA,
+              news_client.LEVEL_REPORT, news_client.LEVEL_FORUM)
+
+
+@app.post("/api/v1/news/fetch")
+async def news_fetch(req: Request):
+    """按标的/关键词聚合取数（N1 的唯一对外入口）。
+
+    请求体：`{"symbol":"600519","keyword":"","types":[1,2,3],"days":7,"withBody":false,"onlyRelevant":false}`
+    响应：`{"ok":true,"data":{"items":[…],"counts":{…},"errors":[…],"bodies_fetched":n}}`
+
+    - `withBody=true`：给最近的公告补抓正文（每条约 1~2 次 HTTP 请求），
+      只在"用户正在看某只股票"时打开 —— 没有正文时 N2 对公告只能回"信息不足，不判断方向"。
+    - `onlyRelevant=true`：丢掉"只是提及该股"的媒体条目（大盘综述）。
+      个股页打开它 —— 那页上每条都该是"关于这只票"的，否则用户看到的是"显示了一堆却不解释"。
+
+    `counts` 与 `items` 是**去重后**的口径，前端会并排显示"公告 x / 媒体 y"，
+    两者不一致会让用户以为丢了数据（这条约束由单测钉住）。
+
+    ⚠️ 必须 `asyncio.to_thread`：这个调用链里有 4 个外部 HTTP 请求，
+    其中全市场公告是上千行 —— 直接在事件循环里跑会把整个服务卡住。
+    """
+    try:
+        body = await req.json()
+    except Exception:
+        return _news_error("请求体不是合法 JSON", status_code=400)
+
+    if not isinstance(body, dict):
+        return _news_error("请求体必须是对象", status_code=400)
+
+    symbol = str(body.get("symbol") or "").strip()
+    keyword = str(body.get("keyword") or "").strip()
+
+    raw_types = body.get("types")
+    types = None
+    if raw_types is not None:
+        if not isinstance(raw_types, list):
+            return _news_error("types 必须是数组，如 [1,2,3]", status_code=400)
+        try:
+            chosen = {int(t) for t in raw_types}
+        except (TypeError, ValueError):
+            return _news_error("types 只能是数字（1公告 2媒体 3研报 4舆情）", status_code=400)
+        unknown = chosen - set(NEWS_TYPES)
+        if unknown:
+            # 静默忽略未知类型会返回"空结果"，被误解成"这只票没有资讯"
+            return _news_error(f"未知的资讯类型 {sorted(unknown)}（1公告 2媒体 3研报 4舆情）",
+                               status_code=400)
+        types = sorted(chosen)
+
+    try:
+        days = int(body.get("days", 7))
+    except (TypeError, ValueError):
+        return _news_error("days 必须是数字", status_code=400)
+    days = max(1, min(days, 365))
+
+    try:
+        data = await asyncio.to_thread(
+            news_client.search_news, symbol, keyword, types, days,
+            with_body=bool(body.get("withBody", False)),
+            only_relevant=bool(body.get("onlyRelevant", False)))
+    except Exception as e:
+        logger.error(f"news fetch error: {e}", exc_info=True)
+        return _news_error("资讯服务暂时不可用，请稍后再试")
+
+    return {"ok": True, "data": data}
+
+
+# 单次请求规模上限：批量是 5 条/次 LLM 调用，深读是**一条一次**调用。
+# 不设上限的话，一个 POST 就能触发上百次模型调用 —— 既慢又会烧掉一整天的额度。
+NEWS_ANALYZE_MAX_BATCH = 100
+NEWS_ANALYZE_MAX_DEEP = 20
+
+
+@app.post("/api/v1/news/analyze")
+async def news_analyze(req: Request):
+    """把资讯抽成 spec §6 的结构化字段（N2）。
+
+    请求体：`{"items":[{…N1 的事件结构…}],"mode":"batch"|"deep"}`
+    响应：`{"ok":true,"data":{"items":[…原始字段 + 分析字段…],"notice":"…"}}`
+
+    - `batch`：5 条一批，出方向/强度/一句话（量大、便宜）
+    - `deep`：一条一次，额外出 `risks` / `opportunities`（用户点开某条才跑）
+
+    两种模式**都不会因为模型不可用而失败**：降级为 `direction=null` +
+    "信息不足，不判断方向"，原文照常返回。"信息不足 ≠ 丢数据"。
+    """
+    try:
+        body = await req.json()
+    except Exception:
+        return _news_error("请求体不是合法 JSON", status_code=400)
+    if not isinstance(body, dict):
+        return _news_error("请求体必须是对象", status_code=400)
+
+    items = body.get("items")
+    if not isinstance(items, list) or not items:
+        return _news_error("items 必须是非空数组", status_code=400)
+    if not all(isinstance(item, dict) for item in items):
+        return _news_error("items 里每一项都必须是对象", status_code=400)
+
+    mode = str(body.get("mode") or "batch").strip()
+    if mode not in ("batch", "deep"):
+        return _news_error("mode 只能是 batch 或 deep", status_code=400)
+    limit = NEWS_ANALYZE_MAX_DEEP if mode == "deep" else NEWS_ANALYZE_MAX_BATCH
+    if len(items) > limit:
+        return _news_error(f"{mode} 模式单次最多 {limit} 条（收到 {len(items)} 条）",
+                           status_code=400)
+
+    try:
+        if mode == "deep":
+            analyzed = await asyncio.to_thread(
+                lambda: [news_understanding.analyze_one(item, mode="deep") for item in items])
+            data = {
+                "items": analyzed,
+                "analyzed": sum(1 for entry in analyzed if entry.get("analyzed")),
+                "skipped": 0,
+                "errors": [],
+            }
+        else:
+            data = await asyncio.to_thread(news_understanding.analyze_events, items)
+    except Exception as e:
+        logger.error(f"news analyze error: {e}", exc_info=True)
+        return _news_error("AI 分析暂时不可用，请稍后再试")
+
+    # 合规标识放在 data 里而不是信封顶层：信封形状 `{ok,data,error}` 是三个模块共用的，
+    # 为一条免责声明去加第四个顶层键，会让所有解析信封的代码都要考虑特例。
+    data["notice"] = news_understanding.AI_NOTICE
+    return {"ok": True, "data": data}
+
+
+NEWS_SYNTHESIS_MAX_ITEMS = 40
+
+
+@app.post("/api/v1/news/synthesize")
+async def news_synthesize(req: Request):
+    """把一批事件**综合**成一段"这只票现在怎么看"（一次 LLM 调用）。
+
+    与 `/news/analyze` 的分工：那个逐条分类（每条一个方向标签），这个做综合。
+    用户的原始反馈是*"你要去阅读实时的新闻去更新你的想法，而不是一个新闻一个想法"* ——
+    逐条标签回答不了"那合起来呢"，所以必须有这一层。
+
+    请求体：`{"symbol":"600519","name":"贵州茅台",
+             "quote":{"price":"1257.12","changePercent":"-0.78"},"items":[…]}`
+
+    响应：`{"ok":true,"data":{"read":"…","highlights":[…],"skepticism":"…",
+            "notice":"…","ok":true}}`
+
+    ⚠️ 失败时返回的 `data.ok=false` 且 `read` 为空串 —— 调用方据此**隐藏整块**。
+    宁可不显示，也不要用一段空话占住页面最显眼的位置。
+    """
+    try:
+        body = await req.json()
+    except Exception:
+        return _news_error("请求体不是合法 JSON", status_code=400)
+    if not isinstance(body, dict):
+        return _news_error("请求体必须是对象", status_code=400)
+
+    items = body.get("items")
+    if items is None:
+        items = []
+    if not isinstance(items, list):
+        return _news_error("items 必须是数组", status_code=400)
+    if len(items) > NEWS_SYNTHESIS_MAX_ITEMS:
+        return _news_error(f"单次最多综合 {NEWS_SYNTHESIS_MAX_ITEMS} 条（收到 {len(items)} 条）",
+                           status_code=400)
+
+    quote = body.get("quote") if isinstance(body.get("quote"), dict) else None
+    try:
+        data = await asyncio.to_thread(
+            news_understanding.synthesize_read,
+            items, str(body.get("symbol") or ""), str(body.get("name") or ""), quote)
+    except Exception as e:
+        logger.error(f"news synthesize error: {e}", exc_info=True)
+        return _news_error("AI 综合解读暂时不可用，请稍后再试")
+
+    return {"ok": True, "data": data}
+
+
+# ==================== 直接运行入口 ====================
+#
+# 为什么需要这一段：这个文件此前**没有 `__main__` 入口**，于是
+# "在 PyCharm / IDEA 里右键 app.py → Run" 只会导入模块然后立刻退出，什么都不会起 ——
+# 想用终端之外的方式启动服务就卡在这里，只能去敲 `python -m uvicorn app:app`。
+#
+# 参数与 `start.ps1` 对齐（127.0.0.1:8000）。刻意**不用 reload**：
+# 热重载要求把应用写成 import 字符串（"app:app"），那会依赖"工作目录正好是这个目录"，
+# 而 IDE 的运行配置里工作目录经常是仓库根 —— 与其留一个"在 IDE 里跑不起来"的坑，
+# 不如让这个入口在任何工作目录下都能用。要热重载请用 start.ps1。
+if __name__ == "__main__":
+    import uvicorn
+
+    logger.info("以脚本方式启动 uvicorn（127.0.0.1:8000，无热重载）")
+    uvicorn.run(app, host="127.0.0.1", port=8000)
+
 
 

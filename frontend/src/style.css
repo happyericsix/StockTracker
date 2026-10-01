@@ -62,6 +62,11 @@
   /* 粉：仅图表系列。对白 3.90:1 —— 满足图形对象的 3:1，不满足文字的 4.5:1 */
   --c-pink-600: #eb2f96;
 
+  /* 青、洋红：事件色板专用（见 --color-event-*）。
+     两者都按"要能当文字用"的标准选，所以必须 ≥4.5:1 —— 图上的事件编号就是文字。 */
+  --c-teal-800:    #006d75;  /* 对白 6.10:1 / 对灰底 5.44:1 */
+  --c-magenta-800: #9e1068;  /* 对白 7.70:1 / 对灰底 6.86:1 */
+
   /* ---------- 2. 语义令牌（组件唯一允许引用的层） ------------------------ */
 
   --color-bg-page:        var(--c-neutral-100);
@@ -86,13 +91,16 @@
   --color-accent-soft:    var(--c-blue-100);
 
   --color-success:        var(--c-green-700);
-  --color-success-hover:  var(--c-green-800);
   --color-success-mark:   var(--c-green-400);
   --color-success-soft:   var(--c-green-50);
   --color-warning:        var(--c-orange-800);
-  --color-warning-hover:  var(--c-orange-900);
   --color-warning-mark:   var(--c-orange-600);
   --color-warning-soft:   var(--c-orange-50);
+  /* 这里原有 --color-success-hover / --color-warning-hover（配实心按钮的加深 hover）。
+     「宽松」方向把首页那三个彩色实心操作按钮换成了安静的文字按钮，于是它们失去了
+     唯一的消费者。按本文件"零孤儿"的纪律移除 —— 如果将来重新出现实心 success/warning
+     按钮，加深档仍可从原始色板取：--c-green-800（白字 9.40:1）、--c-orange-900（8.09:1），
+     且必须**加深**而不是变浅，否则白字对比度会掉到 4.5:1 以下。 */
   --color-danger:         var(--c-red-600);
   --color-danger-hover:   var(--c-red-800);
   --color-danger-soft:    var(--c-red-50);
@@ -103,6 +111,13 @@
      （正是 better-colors「一个颜色一个含义」要避免的）。 */
   --color-gain:           var(--c-red-600);    /* 对白 5.57:1 */
   --color-loss:           var(--c-green-700);  /* 对灰底 4.98:1 */
+
+  /* 涨跌的浅底：承载"软底胶囊"里的涨跌结论（宽松方向用它做每张卡的结论位）。
+     与 --color-success-soft / --color-danger-soft 分开是刻意的 ——
+     "涨"和"成功"共用色相但不是同一个语义，共用一个令牌会让含义漂移。
+     实测：--color-gain(#cf1322) 压 #fff1f0 = 5.07:1；--color-loss(#237804) 压 #f6ffed = 5.44:1，都过 AA。*/
+  --color-gain-soft:      var(--c-red-50);
+  --color-loss-soft:      var(--c-green-50);
 
   /* 图表数据系列色（K线、均线、布林带、成交量）。
      这是"数据系列"这一角色，不是状态色 —— 所以独立成组，组件只引用这一层，
@@ -115,24 +130,90 @@
   --color-chart-ma60:     var(--c-green-400);   /* #389e0d  3.46:1  仅图形 */
   --color-chart-boll:     var(--c-pink-600);    /* #eb2f96  3.90:1  仅图形 */
 
+  /* 事件色板："图上的竖线是哪一条新闻"。
+     与 --color-chart-* 是**两个角色**：那一组是连续的数据系列（均线/布林带），
+     这一组是离散的事件标注。所以独立成组，不要互相借用。
+
+     三条硬约束（都是踩过坑才写下来的）：
+     1. **全部 ≥4.5:1**：图上的事件编号是**文字**，不是纯图形，门槛比 --color-chart-*
+        那组（只要求 3:1）更高；
+     2. **不含红、不含绿**：红=利好、绿=利空在本应用已有确定含义，
+        再让它们承担"这是第几条新闻"就是同一通道两层语义；
+     3. **方向改用线型表达**（实线利好 / 虚线利空 / 点线未判），
+        这样把颜色让给"身份"之后，图上的方向信息也不会丢。 */
+  --color-event-1:        var(--c-blue-800);    /* #003eb3  8.97:1 */
+  --color-event-2:        var(--c-teal-800);    /* #006d75  6.10:1 */
+  --color-event-3:        var(--c-orange-900);  /* #873800  8.09:1 */
+  --color-event-4:        var(--c-purple-800);  /* #531dab  9.85:1 */
+  --color-event-5:        var(--c-magenta-800); /* #9e1068  7.70:1 */
+
   --color-focus-ring:     var(--c-blue-700);
 
   --color-overlay:        rgb(0 0 0 / 0.45);
 
   /* ---------- 3. 形状 / 阴影 / 动效 -------------------------------------- */
 
+  /* 圆角。嵌套时遵守同心规则：外圆角 = 内圆角 + 内距（better-ui/surfaces.md）。
+     例：卡片 20px 圆角、内距 16px → 内部控件的圆角应当是 4px，而不是也写 20px。
+     内距超过 24px 时两层算独立表面，各选各的，不必强行凑同心。*/
   --radius-sm: 4px;
   --radius-md: 6px;
   --radius-lg: 8px;
   --radius-xl: 12px;
+  --radius-3xl: 20px;   /* 卡片级：配 16px 内距 → 内层 4px，同心 */
   --radius-pill: 999px;
 
-  --shadow-1: 0 1px 4px rgb(0 0 0 / 0.08);
+  /* 深度。原先只有两只：--shadow-1 用在 20 处里的 19 处，于是全站只有一个深度，
+     卡片之间没有前后关系 —— 这是"界面平坦单调"的直接来源，不是风格问题。
+     现在三档：1 = 卡片静止，2 = 卡片悬停/可交互，3 = 浮层（模态、安装横幅）。
+     用 box-shadow 而不是 border 表达深度（surfaces.md）：阴影带透明度，
+     所以它在白卡片上和灰页面底上自动成立，而固定颜色的边框做不到。
+
+     第 1 层是个 1px 的环 —— 它替代"给卡片加边框"，但比边框更耐背景变化。*/
+  --shadow-1:
+    0 0 0 1px oklch(0 0 0 / 0.06),
+    0 1px 2px -1px oklch(0 0 0 / 0.06),
+    0 2px 6px 0 oklch(0 0 0 / 0.04);
+  --shadow-2:
+    0 0 0 1px oklch(0 0 0 / 0.08),
+    0 1px 2px -1px oklch(0 0 0 / 0.08),
+    0 4px 12px 0 oklch(0 0 0 / 0.06);
   --shadow-3: 0 4px 20px rgb(0 0 0 / 0.35);
 
   --duration-fast: 150ms;
   --duration-base: 200ms;
   --ease-out: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ---------- 3.5 字阶（角色化）与间距节奏 ------------------------------- */
+
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+
+  /* 一个角色 = 字号 + 行高 + 字重，用 font 简写一次给全。
+     组件里写 font: var(--font-heading) 就是"用标题这个角色"，而不是每次自己挑
+     17px / 600 / 1.3 这种三连 —— 改前全项目有 232 处硬编码 font-size、14 个不同
+     字号、6 种字重写法，界面没有节奏就是从这里来的。
+
+     行高按角色给而不是按字号给：短文本可以紧（1.1），会折行的正文必须松（≥1.4）。
+     12px 是下限：13px 是说明文字档；12px 只留给徽章/角标这种"扫一眼就够"的极短
+     文本，并且必须是 500 字重（低于 400 的细体在小字号下会消失）。*/
+  --font-display: 600 2.25rem/1.1 var(--font-sans);   /* 36px 一屏只有一个：当前股价 */
+  --font-title:   600 1.5rem/1.2 var(--font-sans);    /* 24px 页面级数字 */
+  --font-heading: 600 1.125rem/1.3 var(--font-sans);  /* 18px 区块标题 */
+  --font-body:    400 1rem/1.5 var(--font-sans);      /* 16px 正文 / 输入框 */
+  --font-ui:      400 0.875rem/1.4 var(--font-sans);  /* 14px 列表行、菜单、按钮 */
+  --font-caption: 400 0.8125rem/1.4 var(--font-sans); /* 13px 说明文字 */
+  --font-micro:   500 0.75rem/1.3 var(--font-sans);   /* 12px 徽章，仅此用途 */
+
+  /* 间距节奏：组内用小的、组间用大的，且组间 ≥ 组内 2×，否则分组读起来像噪音
+     （better-layout 的硬性下限）。全部是 4 的倍数，避免手挑 5/7/9/11 这类值。*/
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
 
   /* ---------- 4. 文档级设置 ---------------------------------------------- */
 
@@ -143,8 +224,7 @@
 
   font-size: 16px;
   line-height: 1.5;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-    'Helvetica Neue', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  font-family: var(--font-sans);
   color: var(--color-text-primary);
   background-color: var(--color-bg-page);
 
@@ -259,6 +339,64 @@ textarea:focus-visible {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* ============================================================================
+ * 休市提示条（首页行情卡 + 个股 K 线页共用）
+ *
+ * 用户的原话："明明是在休息日，却显示昨收，这里难道不应该提醒用户几天休息吗"。
+ * 休市日行情接口返回的仍然是上一交易日的收盘价与涨跌幅，页面如果不把这件事
+ * 说出来，用户唯一的理解就是"这是今天的价格"。
+ *
+ * 放在全局而不是各页 scoped：两处必须**看起来是同一件事**。
+ * 各写一份的结果是文案与颜色慢慢漂移，而"休市了"正是最不该有两种说法的信息。
+ * ========================================================================== */
+
+.market-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-subtle);
+  font: var(--font-caption);
+  color: var(--color-text-primary);
+}
+
+.market-notice .market-badge {
+  flex-shrink: 0;
+  font: var(--font-micro);
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  /* 休市是"状态说明"不是"错误"：用中性底色 + 主文字色，
+     不用 danger/warning —— 那会把"市场今天不开门"说成"出问题了"。
+     形状（实心徽章）+ 文字（"休市"）承载含义，颜色只作区分。 */
+  background: var(--color-border);
+  color: var(--color-text-primary);
+}
+
+.market-notice .market-headline {
+  font-weight: 600;
+}
+
+.market-notice .market-detail {
+  /* 强制独占一行：它是"页面上这些价格是哪天的"，与上面那句"今天开不开市"
+     是两件事，挤在同一行会被读成一个长句。 */
+  flex-basis: 100%;
+  margin-top: -2px;
+  color: var(--color-text-secondary);
+  font-weight: 400;
+}
+
+/* 日历不可用：唯一的区别是徽章给警示色 —— 那时页面**确实**在说一件
+   "我们不知道"的事，值得被多看一眼。 */
+.market-notice.tone-unknown .market-badge {
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
 }
 
 /* ============================================================================

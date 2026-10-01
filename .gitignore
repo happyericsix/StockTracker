@@ -102,6 +102,10 @@ python-data-service/mlruns/
 python-data-service/mlflow.db*
 *.pkl
 
+### 交易日历落盘缓存（generated）###
+# 与 chroma_data/ 同一类：跑起来就有的本机状态，跟踪它每次启动都产生一个 diff。
+python-data-service/market_calendar_cache.json
+
 ### QQ bot remnants ###
 napcat/
 
@@ -113,3 +117,5 @@ napcat/
 # 那种噪声会把真正的改动淹掉（`git rm --cached` 之后文件仍在本地，只是不再是提交候选）。
 python-data-service/tests/*/report.json
 
+### pytest ###
+.pytest_cache/

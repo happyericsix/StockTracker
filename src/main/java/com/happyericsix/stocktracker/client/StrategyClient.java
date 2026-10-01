@@ -31,10 +31,6 @@ public class StrategyClient {
         this.mapper = mapper;
     }
 
-    public JsonNode validateStrategy(String configJson) {
-        return post("/api/v1/strategies/validate", java.util.Map.of("strategy_json", raw(configJson)));
-    }
-
     public JsonNode backtestStrategy(String configJson) {
         return post("/api/v1/strategies/backtest", java.util.Map.of("strategy_json", raw(configJson)));
     }

@@ -28,6 +28,14 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
         runtimeCaching: [
           {
+            // 资讯必须**不进缓存**：`NetworkFirst` 会在离线时用上一次的成功响应
+            // 冒充新响应，而 5 分钟（maxAgeSeconds）对公告是致命的 ——
+            // 用户会看到"今天没有新公告"，而其实是缓存没放行。
+            // 放在通用规则之前：Workbox 按顺序匹配，先命中的赢。
+            urlPattern: /^https?:\/\/.*\/api\/v1\/news\b.*/i,
+            handler: 'NetworkOnly'
+          },
+          {
             urlPattern: /^https?:\/\/.*\/api\/.*/i,
             handler: 'NetworkFirst',
             options: {

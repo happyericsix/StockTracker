@@ -102,14 +102,6 @@ public class StockService {
         return akshareStockClient.getStockOverview(stockSymbol);
     }
 
-    public StockHistoryResponse getHistory(final String stockSymbol, int days) {
-        return getHistory(stockSymbol, days, "day");
-    }
-
-    public StockHistoryResponse getHistory(final String stockSymbol, int days, String period) {
-        return akshareStockClient.getStockHistory(stockSymbol, period);
-    }
-
     /**
      * 解析股票名称：走 stockOverviews Redis 缓存，失败回退为股票代码本身。
      */
@@ -152,23 +144,14 @@ public class StockService {
         Map<String, Object> ind = (Map<String, Object>) indicatorsObj;
         IndicatorData data = new IndicatorData();
         data.setRsi(asDouble(ind.get("rsi")));
-        data.setMa5(asDouble(ind.get("ma5")));
-        data.setMa20(asDouble(ind.get("ma20")));
 
+        // 只解析真正会读的两个字段。Python 侧同样只返回这两个（见 quant_model.analyze_stock），
+        // ma5/ma20/macd.dif/dea/bollinger 以前在这里解析、存进缓存，然后没有任何读取点 ——
+        // 已从两侧一起删除。新指标要两处同时加。
         Object macdObj = ind.get("macd");
         if (macdObj instanceof Map) {
             Map<String, Object> macd = (Map<String, Object>) macdObj;
-            data.setMacdDif(asDouble(macd.get("dif")));
-            data.setMacdDea(asDouble(macd.get("dea")));
             data.setMacdHist(asDouble(macd.get("hist")));
-        }
-
-        Object bollObj = ind.get("bollinger");
-        if (bollObj instanceof Map) {
-            Map<String, Object> boll = (Map<String, Object>) bollObj;
-            data.setBollUpper(asDouble(boll.get("upper")));
-            data.setBollMiddle(asDouble(boll.get("middle")));
-            data.setBollLower(asDouble(boll.get("lower")));
         }
 
         return data;
@@ -197,10 +180,6 @@ public class StockService {
             log.warn("parseVolumeLong: bad volume format '{}'", volume);
             return 0L;
         }
-    }
-
-    public PagedResponse<DailyStockResponse> getHistoryPaged(String symbol, int page, int size) {
-        return getHistoryPaged(symbol, page, size, "day");
     }
 
     public PagedResponse<DailyStockResponse> getHistoryPaged(String symbol, int page, int size, String period) {
@@ -272,12 +251,11 @@ public class StockService {
         return false;
     }
 
-    public List<StockResponse> getFavoritesWithLivePrices() {
-        List<FavoriteStock> allFavorites = favoriteStockRepository.findAll();
-        return allFavorites.stream()
-                .map(fav -> getStockForSymbol(fav.getStockSymbol()))
-                .collect(Collectors.toList());
-    }
+    // 这里原先有一个无参重载 getFavoritesWithLivePrices()，用的是 findAll() —— 也就是
+    // **返回所有用户的自选股**。它从来没有被调用过（Controller 用的是下面带 username 的版本），
+    // 但它就紧挨着正确的方法，靠自动补全很容易选错，一旦选错就是跨用户数据泄漏。
+    // 已删除。如果将来真的要"全站所有自选股的最新价"，那是 refreshFavorites() 的职责
+    // （它按 symbol 去重并并行拉取），不要用这个形状。
 
     /**
      * 拉所有自选股的最新价 + 指标，打包成 RefreshedPrice 列表

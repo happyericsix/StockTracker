@@ -44,8 +44,5 @@ public interface MemoryFactRepository extends JpaRepository<MemoryFact, Long> {
                                       @Param("predicate") String predicate,
                                       Pageable pageable);
 
-    /** 谁取代了这条事实（用于展示"此前为 X"） */
-    List<MemoryFact> findBySupersedesId(Long supersedesId);
-
     long countByUserId(Long userId);
 }

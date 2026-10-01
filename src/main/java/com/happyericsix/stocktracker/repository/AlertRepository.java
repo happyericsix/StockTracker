@@ -12,7 +12,6 @@ import java.util.Optional;
 public interface AlertRepository extends JpaRepository<Alert, Long> {
     List<Alert> findByUserId(Long userId);
     Optional<Alert> findByIdAndUserId(Long id, Long userId);
-    List<Alert> findByUserIdAndEnabledTrue(Long userId);
     List<Alert> findByUserIdAndStockSymbol(Long userId, String stockSymbol);
     /** Job 用：拉所有启用的预警；fetch join user，避免调度线程上 LAZY 代理触发 LazyInitializationException */
     @EntityGraph(attributePaths = "user")

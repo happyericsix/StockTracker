@@ -15,7 +15,6 @@ import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 /**
  * 预警评估服务（策略模式 + 触发编排）：
@@ -120,10 +119,6 @@ public class AlertEvaluationService {
         messageService.recordAlertTrigger(alert.getUser(), alert, currentPrice, triggerValue, text);
 
         return true;
-    }
-
-    public Optional<AlertEvaluator> getEvaluator(String conditionType) {
-        return Optional.ofNullable(registry.get(conditionType));
     }
 
     private String buildMessageText(Alert alert, RefreshedPrice data, double triggerValue) {

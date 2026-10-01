@@ -1,6 +1,7 @@
 package com.happyericsix.stocktracker.client;
 
 import com.happyericsix.stocktracker.dto.DailyStockResponse;
+import com.happyericsix.stocktracker.dto.MarketStatusResponse;
 import com.happyericsix.stocktracker.dto.StockHistoryResponse;
 import com.happyericsix.stocktracker.dto.StockOverviewResponse;
 import com.happyericsix.stocktracker.dto.StockQuoteResponse;
@@ -109,11 +110,40 @@ public class AkshareStockClient {
     private StockQuoteResponse emptyQuote(String symbol) {
         return new StockQuoteResponse(
                 new StockQuoteResponse.GlobalQuote(
-                        symbol, null, java.time.LocalDate.now().toString(), symbol,
+                        // 降级时"这个价是哪一天的"必须给 null，**不能**写 `LocalDate.now()`：
+                        // 那正是本次要修的 bug —— 休市日把上一交易日的收盘价标成今天的数据。
+                        // 不知道就说不知道，前端据此不显示"更新 xx"。
+                        symbol, null, null, symbol,
                         // 降级时明确给出 null，前端按"无涨跌信息"处理中性色，不要猜方向
                         null, null, null),
                 null
         );
+    }
+
+    // ==================== 市场状态（交易日历）====================
+
+    /**
+     * 问 Python 侧"今天开不开市、休到哪天、这个价是哪一天的"。
+     *
+     * <p>失败返回 {@code null}（而不是编一个"今天开市"）：调用方
+     * （{@code MarketStatusService}）会把它翻成一条明确写着"日历不可用"的未知状态，
+     * 前端因此不会退回"把休市日的收盘价当成今天"的老行为。
+     */
+    public MarketStatusResponse getMarketStatus() {
+        try {
+            return webClient.get()
+                    .uri("/api/v1/market/status")
+                    .retrieve()
+                    .bodyToMono(MarketStatusResponse.class)
+                    .timeout(REQUEST_TIMEOUT)
+                    .block();
+        } catch (WebClientResponseException e) {
+            log.warn("akshare market status error: HTTP {} {}", e.getStatusCode(), e.getResponseBodyAsString());
+            return null;
+        } catch (Exception e) {
+            log.warn("akshare market status exception: {}", e.getMessage());
+            return null;
+        }
     }
 
     // ==================== 基本面概况 ====================
@@ -140,10 +170,6 @@ public class AkshareStockClient {
     }
 
     // ==================== 历史 K 线 ====================
-
-    public StockHistoryResponse getStockHistory(String symbol) {
-        return getStockHistory(symbol, "day");
-    }
 
     /**
      * @param period day / week / month

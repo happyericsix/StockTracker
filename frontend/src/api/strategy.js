@@ -1,8 +1,9 @@
 import request from './request.js'
 
 export const listStrategies = () => request.get('/strategies')
-export const createStrategy = (payload) => request.post('/strategies', payload)
-export const updateStrategy = (id, payload) => request.put(`/strategies/${id}`, payload)
+// 这里原有 createStrategy / updateStrategy —— 全站无任何调用方，已移除。
+// 策略的创建与修改走的是"智能助手"那条路（Python agent 调后端接口），
+// 前端界面只做列表 / 回测 / 模拟盘 / 删除，所以这两个封装从来没有被用过。
 export const deleteStrategy = (id) => request.delete(`/strategies/${id}`)
 export const runBacktest = (id) => request.post(`/strategies/${id}/backtest`)
 export const getStrategyDiagnostic = (id) => request.get(`/strategies/${id}/diagnostic`)

@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { getMessages, markRead, markAllRead } from '../api/messages.js'
 import { messageBus } from '../composables/messageBus.js'
+import AppIcon from '../components/AppIcon.vue'
 
 const router = useRouter()
 
@@ -40,15 +41,18 @@ const timeRanges = [
   { key: 'all', label: '全部时间', days: null }
 ]
 
-// 类型 → 中文标签 + 图标
+// 类型 → 中文标签 + 图标名。
+// 这里存的是**图标名**（对应 components/AppIcon.vue 的分支），不再是 emoji：
+// emoji 的字形由操作系统决定、颜色不受 currentColor 控制，和已经换成 SVG 的
+// 其它页面摆在一起会明显不一致。
 const typeMeta = (type) => {
   switch (type) {
-    case 'ALERT': return { icon: '🔔', label: '预警提醒' }
-    case 'CHAT_BOT': return { icon: '🤖', label: '智能助手' }
-    case 'CHAT_USER': return { icon: '💬', label: '我' }
+    case 'ALERT': return { icon: 'bell', label: '预警提醒' }
+    case 'CHAT_BOT': return { icon: 'bot', label: '智能助手' }
+    case 'CHAT_USER': return { icon: 'message', label: '我' }
     // 盘后复盘：内容由代码确定性拼装（痕迹 + 账户 + 样本外验证结论），不是模型写的
-    case 'PAPER_REPORT': return { icon: '📊', label: '模拟盘复盘' }
-    default: return { icon: '📌', label: '系统通知' }
+    case 'PAPER_REPORT': return { icon: 'chart', label: '模拟盘复盘' }
+    default: return { icon: 'info', label: '系统通知' }
   }
 }
 
@@ -57,14 +61,16 @@ const cardHitLabel = (m) => (m.read
   ? `${typeMeta(m.type).label}消息（已读）`
   : `标记为已读：${typeMeta(m.type).label}消息`)
 
-const CONDITION_LABELS = {
-  price_above: '📈 价格突破',
-  price_below: '📉 价格跌破',
-  pnl_percent: '💰 盈亏百分比',
-  rsi_overbought: '🔥 RSI 超买',
-  rsi_oversold: '❄️ RSI 超卖',
-  macd_golden_cross: '✨ MACD 金叉',
-  macd_death_cross: '💀 MACD 死叉'
+// 预警条件 → 图标名 + 文案。图标与文字分开存：图标是装饰（aria-hidden），
+// 文字才是可访问名称，读屏不会把图形再念一遍。
+const CONDITION_META = {
+  price_above: { icon: 'trend-up', label: '价格突破' },
+  price_below: { icon: 'trend-down', label: '价格跌破' },
+  pnl_percent: { icon: 'percent', label: '盈亏百分比' },
+  rsi_overbought: { icon: 'sun', label: 'RSI 超买' },
+  rsi_oversold: { icon: 'snow', label: 'RSI 超卖' },
+  macd_golden_cross: { icon: 'sparkle', label: 'MACD 金叉' },
+  macd_death_cross: { icon: 'arrow-down-right', label: 'MACD 死叉' }
 }
 
 const parseMetadata = (m) => {
@@ -73,7 +79,8 @@ const parseMetadata = (m) => {
     const meta = JSON.parse(m.metadata)
     return {
       conditionType: meta.conditionType || '',
-      conditionLabel: CONDITION_LABELS[meta.conditionType] || meta.conditionType || '未知',
+      conditionIcon: (CONDITION_META[meta.conditionType] || {}).icon || 'info',
+      conditionLabel: (CONDITION_META[meta.conditionType] || {}).label || meta.conditionType || '未知',
       triggerPrice: typeof meta.triggerPrice === 'number' ? meta.triggerPrice : null,
       triggerValue: typeof meta.triggerValue === 'number' ? meta.triggerValue : null,
       threshold: typeof meta.threshold === 'number' ? meta.threshold : null
@@ -344,7 +351,7 @@ onUnmounted(() => {
           :aria-label="cardHitLabel(m)"
           @click="handleRead(m)"
         ></button>
-        <div class="msg-icon">{{ typeMeta(m.type).icon }}</div>
+        <div class="msg-icon"><AppIcon :name="typeMeta(m.type).icon" :size="20" :stroke-width="2" /></div>
         <div class="msg-main">
           <div class="msg-top">
             <span class="msg-label">{{ typeMeta(m.type).label }}</span>
@@ -356,7 +363,7 @@ onUnmounted(() => {
           <div v-if="m.type === 'ALERT' && m.relatedSymbol" class="msg-symbol-row">
             <span class="msg-symbol">#{{ m.relatedSymbolName || m.relatedSymbol }}</span>
             <button class="chart-link" @click.stop="viewChart(m.relatedSymbol)">
-              📊 看 K 线
+              <AppIcon name="chart" :size="14" :stroke-width="2" /> 看 K 线
             </button>
           </div>
 
@@ -365,7 +372,7 @@ onUnmounted(() => {
 
           <!-- ALERT metadata 详情 -->
           <div v-if="m.type === 'ALERT' && parseMetadata(m)" class="msg-alert-detail">
-            <span class="alert-tag">{{ parseMetadata(m).conditionLabel }}</span>
+            <span class="alert-tag"><AppIcon :name="parseMetadata(m).conditionIcon" :size="14" :stroke-width="2" /> {{ parseMetadata(m).conditionLabel }}</span>
             <span v-if="parseMetadata(m).triggerPrice != null" class="alert-item">
               触发价 <b class="num">{{ fmt(parseMetadata(m).triggerPrice) }}</b>
             </span>
@@ -386,8 +393,8 @@ onUnmounted(() => {
       </div>
 
       <button class="chat-entry" @click="goChat">
-        <span>💬 去和智能助手聊聊</span>
-        <span class="arrow" aria-hidden="true">›</span>
+        <span class="chat-entry-label"><AppIcon name="message" :size="16" :stroke-width="2" /> 去和智能助手聊聊</span>
+        <AppIcon name="chevron-right" :size="18" :stroke-width="2" />
       </button>
     </main>
   </div>
@@ -515,7 +522,7 @@ main {
   border-radius: var(--radius-lg);
 }
 .msg-card.unread { background: var(--color-accent-soft); }
-.msg-icon { font-size: 22px; flex-shrink: 0; }
+.msg-icon { display: flex; align-items: center; flex-shrink: 0; }
 .msg-main { flex: 1; min-width: 0; }
 .msg-top { display: flex; justify-content: space-between; align-items: center; }
 .msg-label { font-size: 12px; color: var(--color-accent); font-weight: 600; }
@@ -602,7 +609,7 @@ main {
   justify-content: space-between;
   align-items: center;
 }
-.arrow { font-size: 18px; }
+.chat-entry-label { display: inline-flex; align-items: center; gap: var(--space-2); }
 .empty { color: var(--color-text-muted); text-align: center; padding: 48px 16px; font-size: 14px; }
 
 /* 加载失败分支：标题用主文字色（错误原因要看得清），提示用次级色 */

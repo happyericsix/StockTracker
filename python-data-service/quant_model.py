@@ -549,21 +549,22 @@ def analyze_stock(prices: list, symbol: str = "", include_models: bool = False) 
     tech_signal = generate_signal(close)
     current_rsi = rsi(close)[-1]
     current_macd = macd(close)
-    current_boll = bollinger(close)
 
+    # 只返回真正被消费的两个值：Java 的 IndicatorData 只读 rsi 与 macd.hist
+    # （对应 RSI 超买/超卖 + MACD 金叉/死叉 四个预警评估器）。
+    #
+    # 这里原先还返回 ma5 / ma20 / macd.dif / macd.dea / bollinger.*，全项目无人读：
+    #   · 前端 K 线页的指标是它自己在 JS 里算的（KLineChart.vue 的 calcIndicators）
+    #   · 策略引擎与 Agent 的 get_indicators 工具走 agent.strategy_engine.compute_indicators()，
+    #     不经过这个函数
+    #   · 而 StockPriceRefreshJob 每 5 分钟会为每只自选股拉一次这个载荷
+    #     → 等于持续计算 + 缓存没人要的值。删掉后连 bollinger() 那次计算也一起省了。
+    #
+    # 注意：bollinger() 本身仍在模型的**特征工程**里使用（见本文件上半部分），不要删函数。
     indicators = {
-        "ma5": round(ma(close, 5)[-1], 2),
-        "ma20": round(ma(close, 20)[-1], 2) if len(close) >= 20 else None,
         "rsi": round(current_rsi, 1),
         "macd": {
-            "dif": round(current_macd["dif"][-1], 3),
-            "dea": round(current_macd["dea"][-1], 3),
             "hist": round(current_macd["hist"][-1], 3),
-        },
-        "bollinger": {
-            "upper": round(current_boll["upper"][-1], 2),
-            "middle": round(current_boll["middle"][-1], 2),
-            "lower": round(current_boll["lower"][-1], 2),
         },
     }
 

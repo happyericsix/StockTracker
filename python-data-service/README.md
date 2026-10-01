@@ -4,7 +4,7 @@
 
 ## 快速启动
 
-`ash
+```bash
 # 1. 创建虚拟环境（推荐）
 python -m venv venv
 venv\Scripts\activate
@@ -14,7 +14,7 @@ pip install -r requirements.txt
 
 # 3. 启动服务（热重载）
 uvicorn app:app --reload --host 0.0.0.0 --port 8000
-`
+```
 
 ## API 端点
 
@@ -27,17 +27,18 @@ uvicorn app:app --reload --host 0.0.0.0 --port 8000
 
 ## 与 Java 后端集成
 
-在 StockService.java 中新增 AkshareStockClient，通过 WebClient 调用 http://python-data-service:8000/api/v1/...，替换原有的 ChoiceStockClient。
+已完成：`AkshareStockClient`（`client/` 包）通过 WebClient 调用本服务的 `/api/v1/...`，
+替代了原有的 `ChoiceStockClient`（东方财富 DLL 接口）。类注释里记着这次替换的原因。
 
 ### docker-compose 示例
 
-`yaml
+```yaml
 python-data:
   build: ./python-data-service
   container_name: stock-data
   ports:
     - "8000:8000"
-`
+```
 
 ## 数据说明
 

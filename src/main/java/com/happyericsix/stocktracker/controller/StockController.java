@@ -1,24 +1,26 @@
 package com.happyericsix.stocktracker.controller;
 
 import com.happyericsix.stocktracker.dto.*;
-import com.happyericsix.stocktracker.entity.FavoriteStock;
-import com.happyericsix.stocktracker.service.AlertService;
 import com.happyericsix.stocktracker.service.StockService;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.http.ResponseEntity;
-import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 
+/**
+ * 市场数据（公开可读的那一半）。
+ *
+ * <p>自选股（用户态数据）已迁到 {@link FavoriteController}（{@code /api/v1/user/favorites}），
+ * 不再挂在本路径下 —— 原因见那个类的注释：{@code /{stockSymbol}} 是通配路径段，
+ * 把用户态资源塞进市场数据命名空间会让优先级与鉴权意图都变糊。
+ */
 @RestController
 @RequiredArgsConstructor
 @RequestMapping("/api/v1/stocks")
 public class StockController {
     private final StockService stockService;
-    private final AlertService alertService;
 
     private static final Logger log = LoggerFactory.getLogger(StockController.class);
     // ==================== 股票搜索 (Autocomplete) ====================
@@ -67,45 +69,5 @@ public class StockController {
             @PathVariable String stockSymbol,
             @RequestParam(defaultValue = "5") int period) {
         return stockService.getMinuteKline(stockSymbol.toUpperCase(), period);
-    }
-
-    @PostMapping("/favorites")
-    public ResponseEntity<Result<FavoriteStockResponse>> saveFavoriteStock(
-            @RequestBody FavoriteStockRequest request,
-            Authentication authentication) {
-
-        final FavoriteStock saved = stockService.addFavorite(request.getSymbol(),
-                authentication.getName(),
-                request.getBuyPrice(),
-                request.getQuantity());
-
-        FavoriteStockResponse dto = FavoriteStockResponse.from(
-                saved.getStockSymbol(), saved.getBuyPrice(), saved.getQuantity(), saved.getBuyDate());
-        return ResponseEntity.ok().body(Result.success("已添加自选", dto));
-    }
-
-    @GetMapping("/favorites")
-    public List<StockResponse> getFavoriteStocks(Authentication authentication) {
-        long startTime = System.currentTimeMillis();
-        List<StockResponse> favorites = stockService.getFavoritesWithLivePrices(authentication.getName());
-        long duration = System.currentTimeMillis() - startTime;
-        log.info("GET /favorites returned {} stocks in {}ms", favorites.size(), duration);
-        return favorites;
-    }
-
-    @DeleteMapping("/favorites/{symbol}")
-    public Result<String> deleteFavoriteStocks(
-            @PathVariable String symbol,
-            Authentication authentication) {
-        final String normalized = symbol.trim().toUpperCase();
-        boolean deleted = stockService.deleteFavorite(normalized, authentication.getName());
-        if (deleted) {
-            alertService.deleteByUserAndSymbol(authentication.getName(), normalized);
-            return Result.success("已删除自选", normalized);
-        } else {
-            // 中文产品不该给用户看英文；这条消息现在会经由 request.js 的拦截器
-            // 以 reject 的形式出现在界面上，所以必须是可读的中文。
-            return Result.error(404, "自选股中不存在该股票：" + normalized);
-        }
     }
 }

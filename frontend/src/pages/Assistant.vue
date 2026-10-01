@@ -3,6 +3,7 @@ import { ref, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { sendChat, getChatHistory } from '../api/messages.js'
 import { messageBus } from '../composables/messageBus.js'
+import AppIcon from '../components/AppIcon.vue'
 
 const router = useRouter()
 const messages = ref([])
@@ -259,9 +260,9 @@ onUnmounted(() => {
 <template>
   <div class="chat-page">
     <header class="chat-header">
-      <button class="back-btn" @click="router.push('/dashboard')">← 返回</button>
+      <button class="back-btn" @click="router.push('/dashboard')"><AppIcon name="chevron-left" :size="16" :stroke-width="2" /> 返回</button>
       <!-- 头像只是装饰：机器人身份已由右侧「智能助手」文字承载 -->
-      <div class="bot-avatar" aria-hidden="true">🤖</div>
+      <div class="bot-avatar"><AppIcon name="bot" :size="22" :stroke-width="2" /></div>
       <div class="bot-info">
         <!-- 本页唯一的一级标题：原来是无标题的 div，页面标题大纲里什么都没有 -->
         <h1 class="bot-name">智能助手</h1>
@@ -271,7 +272,7 @@ onUnmounted(() => {
 
     <div class="chat-body" ref="listEl">
       <div v-if="messages.length === 0 && !typing" class="chat-empty">
-        <div class="empty-icon" aria-hidden="true">🤖</div>
+        <div class="empty-icon"><AppIcon name="bot" :size="44" :stroke-width="1.5" /></div>
         <p>你好，我是智能助手</p>
         <p class="empty-hint">可以问我：现价查询、走势预测、持仓建议…</p>
       </div>
@@ -282,7 +283,7 @@ onUnmounted(() => {
         class="msg-row"
         :class="m.type === 'CHAT_USER' ? 'mine' : 'theirs'"
       >
-        <div v-if="m.type !== 'CHAT_USER'" class="avatar">🤖</div>
+        <div v-if="m.type !== 'CHAT_USER'" class="avatar"><AppIcon name="bot" :size="18" :stroke-width="2" /></div>
         <div class="bubble-wrap">
         <div v-if="m.type !== 'CHAT_USER'" class="bubble markdown-body" v-html="renderMarkdown(m.content)"></div>
         <div v-else class="bubble">{{ m.content }}</div>
@@ -295,7 +296,7 @@ onUnmounted(() => {
       </div>
 
       <div v-if="typing" class="msg-row theirs">
-        <div class="avatar">🤖</div>
+        <div class="avatar"><AppIcon name="bot" :size="18" :stroke-width="2" /></div>
         <div class="bubble typing-bubble">
           <span></span><span></span><span></span>
         </div>
@@ -345,13 +346,16 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 .back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
   background: transparent;
   border: 1px solid var(--color-border-control);
   color: var(--color-text-inverse);
-  padding: 6px 12px;
+  padding: 6px var(--space-3);
   border-radius: var(--radius-sm);
   cursor: pointer;
-  font-size: 13px;
+  font: var(--font-caption);
 }
 .bot-avatar {
   width: 38px;
@@ -359,14 +363,16 @@ onUnmounted(() => {
   border-radius: 50%;
   /* 纯装饰圆底：改用达标主色，避免 #1677ff 配白字只有 4.10:1 */
   background: var(--color-accent);
+  color: var(--color-text-on-accent);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 20px;
+  flex-shrink: 0;
 }
 .bot-info { display: flex; flex-direction: column; }
-.bot-name { font-size: 15px; font-weight: 600; }
-.bot-status { font-size: 11px; color: var(--color-text-inverse-muted); margin-top: 1px; }
+.bot-name { font: var(--font-ui); font-weight: 600; }
+/* 11px 低于小字号下限，提到 12px（--font-micro） */
+.bot-status { font: var(--font-micro); color: var(--color-text-inverse-muted); margin-top: 1px; }
 
 .chat-body {
   flex: 1;
@@ -381,9 +387,10 @@ onUnmounted(() => {
   color: var(--color-text-muted);
   margin-top: 40px;
 }
-.empty-icon { font-size: 48px; margin-bottom: 8px; }
+/* 图标居中由布局负责，不再靠 font-size 撑一个字形 */
+.empty-icon { display: flex; justify-content: center; margin-bottom: var(--space-2); color: var(--color-text-muted); }
 /* 旧值 #bbb 对灰底只有 1.71:1，全站最差的一处 */
-.empty-hint { font-size: 12px; margin-top: 4px; color: var(--color-text-muted); }
+.empty-hint { font: var(--font-caption); margin-top: var(--space-1); color: var(--color-text-muted); }
 
 .msg-row {
   display: flex;
@@ -401,10 +408,10 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 16px;
   flex-shrink: 0;
 }
-.mine-avatar { background: var(--color-warning); font-size: 12px; }
+/* 「我」这个头像是文字而不是图标，所以字号留在这里 */
+.mine-avatar { background: var(--color-warning); font: var(--font-ui); }
 
 .bubble-wrap { display: flex; flex-direction: column; gap: 3px; }
 .bubble {

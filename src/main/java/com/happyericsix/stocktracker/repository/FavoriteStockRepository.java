@@ -9,9 +9,10 @@ import java.util.List;
 @Repository
 public interface FavoriteStockRepository extends JpaRepository<FavoriteStock, Long> {
 
-    void deleteByStockSymbol(String stockSymbol);
+    // 已删除未按用户隔离的旧版本 deleteByStockSymbol(String) / existsByStockSymbol(String)。
+    // 它们只看股票代码、不看 userId，任何调用都会跨用户命中别人的自选股 ——
+    // 已被下面的 ...AndUserId 版本取代，勿再加回。
 
-    boolean existsByStockSymbol(String stockSymbol);
     List<FavoriteStock> findByUserId(Long userId);
     void deleteByStockSymbolAndUserId(String stockSymbol, Long userId);
     boolean existsByStockSymbolAndUserId(String stockSymbol, Long userId);
