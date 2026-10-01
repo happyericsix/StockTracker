@@ -36,12 +36,21 @@ export default defineConfig({
             handler: 'NetworkOnly'
           },
           {
-            urlPattern: /^https?:\/\/.*\/api\/.*/i,
+            // 行情类只读市场数据可以 NetworkFirst（离线时看到旧价好过白屏，
+            // 且换账号也不构成串台风险）
+            urlPattern: /^https?:\/\/.*\/api\/v1\/(stocks|market)\b.*/i,
             handler: 'NetworkFirst',
             options: {
-              cacheName: 'api-cache',
+              cacheName: 'market-api-cache',
               expiration: { maxEntries: 50, maxAgeSeconds: 300 }
             }
+          },
+          {
+            // 其余 /api/ 一律 NetworkOnly：alerts/favorites/strategies/messages 是
+            // 用户态数据，NetworkFirst 会在离线时回放旧列表，换账号登录后同一
+            // 设备甚至可能看到上一账号的缓存
+            urlPattern: /^https?:\/\/.*\/api\/.*/i,
+            handler: 'NetworkOnly'
           }
         ]
       }

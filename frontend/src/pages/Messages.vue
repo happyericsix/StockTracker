@@ -134,21 +134,27 @@ const knownSymbols = computed(() => {
   return Array.from(set).sort()
 })
 
-// 切换 tab 时，根据 tab 类型决定要不要传 type 给后端
+// 切换 tab 时，根据 tab 类型决定要不要传 type 给后端。
+// 竞态防护：快速切 tab 会并发多个 loadPage，慢的旧请求（带旧 tab 的 type 参数）
+// 后到会把新 tab 的列表覆盖掉 —— 用序号丢弃过期响应。
+let loadSeq = 0
 const load = async () => {
+  const seq = ++loadSeq
   loading.value = true
   loadError.value = ''
   page.value = 0
   messages.value = []
   hasMore.value = true
-  await loadPage()
-  loading.value = false
+  await loadPage(seq)
+  if (seq === loadSeq) loading.value = false
 }
 
 /** 「重新加载」按钮：重置到第一页并重试 */
 const reload = () => load()
 
-const loadPage = async () => {
+const loadPage = async (seq = loadSeq) => {
+  // 互斥只应拦"同一列表的翻页"，不该吞掉新 tab 的首屏（旧写法会把第二次
+  // 切 tab 的请求直接 return 掉，旧响应回来把新 tab 过滤成"暂无消息"）
   if (loadingMore.value) return
   loadingMore.value = true
   try {
@@ -162,10 +168,15 @@ const loadPage = async () => {
     const range = timeRanges.find((r) => r.key === timeRange.value)
     if (range && range.days) {
       const since = new Date(Date.now() - range.days * 24 * 60 * 60 * 1000)
-      params.since = since.toISOString().slice(0, 19)  // YYYY-MM-DDTHH:mm:ss
+      // 手工拼本地时间：toISOString 是 UTC，后端按本地时间解析，
+      // 东八区会把窗口多包含 8 小时旧消息，西半球会把边缘几个小时漏掉
+      const p = (n) => String(n).padStart(2, '0')
+      params.since = `${since.getFullYear()}-${p(since.getMonth() + 1)}-${p(since.getDate())}` +
+        `T${p(since.getHours())}:${p(since.getMinutes())}:${p(since.getSeconds())}`
     }
 
     const res = await getMessages(params)
+    if (seq !== loadSeq) return
     const data = res.data || {}
     const list = data.content || []
     messages.value = page.value === 0 ? list : [...messages.value, ...list]
@@ -173,6 +184,7 @@ const loadPage = async () => {
     totalElements.value = data.totalElements || 0
     hasMore.value = page.value < (data.totalPages || 0) - 1
   } catch (e) {
+    if (seq !== loadSeq) return
     // 只把「首屏加载失败」升级成页面级错误 —— 那才是"列表为什么是空的"的原因，
     // 并给出「重新加载」这条恢复路径。
     // 翻页失败时列表里已有的内容还在，不能整块替换成"消息加载失败"去误导用户。

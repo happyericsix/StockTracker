@@ -748,7 +748,14 @@ const loadStockRead = async (sym) => {
   }
 }
 
+// 竞态防护：快速切股/切周期/切显示范围时多个 loadData 并发，
+// 慢的旧请求后到会把新图覆盖掉（旧代码只防了事件轮询，没防 K 线主链路）。
+// 每次 loadData 自增序号，响应回来先确认自己仍是最新一次再动状态。
+let loadDataSeq = 0
+
 const loadData = async (sym) => {
+  const seq = ++loadDataSeq
+  const isStale = () => seq !== loadDataSeq
   error.value = ''
   loading.value = true
   stockInfo.value = null
@@ -761,11 +768,13 @@ const loadData = async (sym) => {
   try {
     // 行情：分钟模式下用最近一个数据点的 close
     const stockRes = await getStock(sym).catch(() => null)
+    if (isStale()) return
     stockInfo.value = stockRes?.data ?? null
 
     let list = []
     if (period.value === 'minute') {
       const res = await getMinuteKline(sym, minutePeriod.value).catch(() => null)
+      if (isStale()) return
       // 后端返回的是 List<DailyStockResponse>（裸 DTO），拦截器不会动它，res.data 直接是 list
       const data = Array.isArray(res?.data) ? res.data : []
       list = data.map(r => ({
@@ -774,10 +783,12 @@ const loadData = async (sym) => {
     } else {
       // 拉 size=1000 让前端按 range 切；分页 size 给 1000 一次性拉够
       const historyRes = await getHistory(sym, 0, 1000, period.value).catch(() => null)
+      if (isStale()) return
       list = historyRes?.data?.content || []
     }
 
     if (list.length === 0) {
+      if (isStale()) return
       error.value = period.value === 'minute'
         ? '暂无分钟K线数据（仅支持 A 股，分钟 K 由 akshare 提供）'
         : '暂无 K 线数据，请检查股票代码或稍后重试'
@@ -799,6 +810,7 @@ const loadData = async (sym) => {
     lastUpdate.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
 
     await nextTick()
+    if (isStale()) return
     if (!chartRef.value) return
 
     chart = echarts.init(chartRef.value)
@@ -808,13 +820,14 @@ const loadData = async (sym) => {
     // 监听器在 onMounted 里只装一次，所以这里不重复 addEventListener。
     window.addEventListener('resize', handleResize)
   } catch (e) {
+    if (isStale()) return
     // 只采用后端返回的消息；去掉 axios 的 e.message —— 那是英文
     // ("Request failed with status code 500")，会原样显示给用户。
     // 兜底文案必须说清怎么恢复，不能只有"失败了"。
     error.value = e?.response?.data?.message
       || 'K 线数据加载失败，请检查股票代码是否正确，或确认网络后重试'
   } finally {
-    loading.value = false
+    if (!isStale()) loading.value = false
   }
 }
 

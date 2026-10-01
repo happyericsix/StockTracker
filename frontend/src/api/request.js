@@ -74,6 +74,11 @@ request.interceptors.response.use(
   error => {
     if (error.response?.status === 401) {
       localStorage.removeItem('token')
+      // 主动断开 SSE：否则旧 EventSource 要等下一次 onerror 才关，
+      // 窗口期内一直带着过期 token 重连打 401
+      import('../composables/messageBus').then(({ messageBus }) => {
+        messageBus.disconnect()
+      }).catch(() => {})
       if (router.currentRoute.value.path !== '/login') {
         router.push('/login')
       }

@@ -26,6 +26,8 @@ const routes = [
   // 藏进"某条策略的详情页最下面"正是"用户不知道有这个功能"的原因。
   { path: '/paper', component: Paper, meta: { requiresAuth: true } },
   { path: '/memory', component: Memory, meta: { requiresAuth: true } },
+  // 没有这条时访问未注册路径（手滑/旧链接）渲染一片空白页，没有任何反馈
+  { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
 ]
 
 const router = createRouter({

@@ -175,7 +175,12 @@ onMounted(() => {
   loadHistory()
   document.addEventListener('click', onClickOutside)
 })
-onUnmounted(() => document.removeEventListener('click', onClickOutside))
+onUnmounted(() => {
+  document.removeEventListener('click', onClickOutside)
+  // 输入后 300ms 内跳走组件：防抖定时器仍会触发并发出一次多余请求
+  if (timer) clearTimeout(timer)
+  if (abortController) abortController.abort()
+})
 </script>
 
 <template>
