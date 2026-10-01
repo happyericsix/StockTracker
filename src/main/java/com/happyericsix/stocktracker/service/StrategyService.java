@@ -141,6 +141,13 @@ public class StrategyService {
                     || strategy == null || result == null || !result.isObject()) {
                 return;
             }
+            // Python /api/v1/strategies/backtest 返回的是 {"valid": bool, "backtest": {...}} 信封，
+            // 指标嵌在 backtest 字段下 —— 与 ChatService.buildBacktestSummary 是同一份解释。
+            // 失败响应（valid=false）只有 error 字段、没有任何指标，path 不到对象自然整条跳过。
+            JsonNode metrics = result.path("backtest");
+            if (!metrics.isObject()) {
+                return;
+            }
             String subject = ObjectiveFactKeys.strategySubject(strategy.getId());
             if (subject.isBlank()) {
                 return;
@@ -148,19 +155,19 @@ public class StrategyService {
             LocalDateTime ranAt = LocalDateTime.now(ZoneId.of("Asia/Shanghai"));
             List<MemoryFactRequest> facts = new ArrayList<>();
             addMetric(facts, subject, ObjectiveFactKeys.BACKTEST_TOTAL_RETURN_PCT,
-                    result.get("total_return_pct"), ranAt);
+                    metrics.get("total_return_pct"), ranAt);
             addMetric(facts, subject, ObjectiveFactKeys.BACKTEST_BUY_AND_HOLD_RETURN_PCT,
-                    result.get("buy_and_hold_return_pct"), ranAt);
+                    metrics.get("buy_and_hold_return_pct"), ranAt);
             addMetric(facts, subject, ObjectiveFactKeys.BACKTEST_EXCESS_RETURN_PCT,
-                    result.get("excess_return_pct"), ranAt);
+                    metrics.get("excess_return_pct"), ranAt);
             addMetric(facts, subject, ObjectiveFactKeys.BACKTEST_MAX_DRAWDOWN_PCT,
-                    result.get("max_drawdown_pct"), ranAt);
+                    metrics.get("max_drawdown_pct"), ranAt);
             addMetric(facts, subject, ObjectiveFactKeys.BACKTEST_SHARPE,
-                    result.get("sharpe_ratio"), ranAt);
+                    metrics.get("sharpe_ratio"), ranAt);
             addMetric(facts, subject, ObjectiveFactKeys.BACKTEST_WIN_RATE_PCT,
-                    result.get("win_rate"), ranAt);
+                    metrics.get("win_rate"), ranAt);
             addMetric(facts, subject, ObjectiveFactKeys.BACKTEST_TRADE_COUNT,
-                    result.get("trade_count"), ranAt);
+                    metrics.get("trade_count"), ranAt);
             MemoryFactRequest ranAtFact = ObjectiveFactKeys.observation(
                     subject, ObjectiveFactKeys.BACKTEST_AT, ranAt.withNano(0).toString(), ranAt);
             if (ranAtFact != null) {

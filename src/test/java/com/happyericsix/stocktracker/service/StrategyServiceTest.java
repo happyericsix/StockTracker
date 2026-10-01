@@ -26,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -92,10 +93,15 @@ class StrategyServiceTest {
         when(strategyRepository.findByIdAndUserId(42L, 1L)).thenReturn(Optional.of(strategy));
         when(memoryService.currentSessionKey(1L)).thenReturn("1:2026-09-17");
 
+        // 夹具必须与 Python 端真实契约一致：{"valid": true, "backtest": {...}} 信封。
+        // 旧夹具把指标平铺在顶层，导致 recordBacktestFacts 读错层级的 bug 从未被测出。
         ObjectNode result = mapper.createObjectNode();
-        result.put("total_return_pct", 12.5);
-        result.put("max_drawdown_pct", -18.3);
-        result.put("trade_count", 7);
+        ObjectNode backtest = mapper.createObjectNode();
+        backtest.put("total_return_pct", 12.5);
+        backtest.put("max_drawdown_pct", -18.3);
+        backtest.put("trade_count", 7);
+        result.put("valid", true);
+        result.set("backtest", backtest);
         when(strategyClient.backtestStrategy("{}")).thenReturn(result);
 
         assertNotNull(strategyService.runBacktest("alice", 42L));
@@ -133,9 +139,36 @@ class StrategyServiceTest {
                 .thenThrow(new RuntimeException("memory down"));
 
         ObjectNode result = mapper.createObjectNode();
-        result.put("total_return_pct", 1.0);
+        ObjectNode backtest = mapper.createObjectNode();
+        backtest.put("total_return_pct", 1.0);
+        result.put("valid", true);
+        result.set("backtest", backtest);
         when(strategyClient.backtestStrategy("{}")).thenReturn(result);
 
         assertNotNull(strategyService.runBacktest("alice", 42L));
+    }
+
+    /**
+     * 回测失败（valid=false，只有 error 字段）时**一条事实都不能记**：
+     * 失败响应里没有指标，把 error 文本当观测写进记忆比不写更糟。
+     */
+    @Test
+    void failedBacktestRecordsNoFacts() {
+        User owner = User.builder().id(1L).username("alice")
+                .password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(42L).name("MA cross").symbol("600519").configJson("{}").user(owner).build();
+
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(owner));
+        when(strategyRepository.findByIdAndUserId(42L, 1L)).thenReturn(Optional.of(strategy));
+
+        ObjectNode result = mapper.createObjectNode();
+        result.put("valid", false);
+        result.put("error", "策略回测失败，请稍后重试");
+        when(strategyClient.backtestStrategy("{}")).thenReturn(result);
+
+        assertNotNull(strategyService.runBacktest("alice", 42L));
+
+        verify(memoryFactService, never()).recordObjective(any(), any(), any());
     }
 }
