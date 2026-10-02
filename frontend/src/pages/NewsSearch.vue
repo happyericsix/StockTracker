@@ -4,12 +4,7 @@
       <h1>资讯雷达</h1>
     </div>
 
-      <p class="intro">
-        全市场资讯搜索：按关键词或标的找事件，每条都带<b>可信度</b>（信源 + 措辞 + 交叉印证）
-        与<b>时效</b>标注 —— 先看"这条该不该信、还新不新鲜"，再看 AI 解读。
-      </p>
-
-      <!-- 搜索条件：一次提交型（不是每键入一个字就打一次后端） -->
+    <!-- 搜索条件：一次提交型（不是每键入一个字就打一次后端） -->
       <form class="search-form" @submit.prevent="load">
         <div class="form-row">
           <label class="field keyword">
@@ -93,7 +88,7 @@
             >看K线</button>
           </p>
           <p v-if="event.rumorFlag" class="rumor" role="alert">
-            ⚠️ 传闻特征明显，未经证实——请以官方公告为准
+            传闻特征明显，未经证实，请以官方公告为准
           </p>
           <p v-if="event.analyzed" class="summary">{{ event.plainSummary }}</p>
           <p v-else class="summary muted">信息不足，不判断方向</p>

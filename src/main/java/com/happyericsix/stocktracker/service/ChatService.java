@@ -226,23 +226,23 @@ public class ChatService {
             } catch (Exception backtestException) {
                 log.warn("Agent strategy auto backtest failed id={}: {}", strategy.getId(), backtestException.getMessage());
                 saveBotReply(userId,
-                        "📄 策略「" + strategy.getName() + "」已保存，但自动回测暂时失败，请到策略详情重试。",
+                        "策略「" + strategy.getName() + "」已保存，但自动回测暂时失败，请到策略详情重试。",
                         strategy.getSymbol(), metadata);
             }
         } catch (Exception createException) {
             log.error("Agent strategy save failed userId={}: {}", userId, createException.getMessage());
-            saveBotReply(userId, "⚠️ 策略已生成，但保存失败，请稍后再试。");
+            saveBotReply(userId, "策略已生成，但保存失败，请稍后再试。");
         }
     }
 
     private String buildBacktestSummary(StrategyResponse strategy, JsonNode result) {
         JsonNode backtest = result == null ? null : result.get("backtest");
         if (backtest == null || backtest.isNull()) {
-            return "📄 策略「" + strategy.getName() + "」已保存；当前暂无可用回测结果，请稍后重试。";
+            return "策略「" + strategy.getName() + "」已保存；当前暂无可用回测结果，请稍后重试。";
         }
 
         StringBuilder sb = new StringBuilder();
-        sb.append("📈 策略「").append(strategy.getName()).append("」已自动回测：\n");
+        sb.append("策略「").append(strategy.getName()).append("」已自动回测：\n");
         sb.append("- 总收益：").append(doubleOr(backtest.get("total_return_pct"), 0)).append("%\n");
         sb.append("- 买入持有：").append(doubleOr(backtest.get("buy_and_hold_return_pct"), 0)).append("%\n");
         sb.append("- 超额收益：").append(doubleOr(backtest.get("excess_return_pct"), 0)).append("%\n");

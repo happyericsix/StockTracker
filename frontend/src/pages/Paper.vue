@@ -176,9 +176,9 @@ onMounted(load)
 
         <!-- 还没被评估过：先把话说清楚，再谈数字（一片 N/A 会被读成"坏了"） -->
         <div v-if="!item.evaluated" class="pending-note">
-          <strong>还没有被评估过一次</strong> ——
+          <strong>还没有被评估过一次。</strong>
           <template v-if="item.decisionMode === 'agent'">
-            委员会只在日线结算时决策，盘中不做规则检查，所以第一次决策会在下一个交易日 15:30 产生。
+            委员会只在日线结算时决策，盘中不做规则检查，第一次决策会在下一个交易日 15:30 产生。
           </template>
           <template v-else>
             下一次盘中检查会在几分钟内发生；日线结算在下一个交易日 15:30。

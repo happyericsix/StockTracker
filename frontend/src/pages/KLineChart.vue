@@ -1382,7 +1382,7 @@ const macdColor = (h) => h == null
             </p>
             <!-- 传闻警示必须放在标题与解读之间：它改变的是"下面这段 AI 解读该带着多大怀疑看" -->
             <p v-if="event.rumorFlag" class="event-rumor" role="alert">
-              ⚠️ 传闻特征明显，未经证实——请以官方公告为准
+              传闻特征明显，未经证实，请以官方公告为准
               <span v-if="(event.credibilityReasons || []).length" class="rumor-why">{{ event.credibilityReasons[0] }}</span>
             </p>
             <p v-if="event.analyzed" class="event-summary">{{ event.plainSummary }}</p>

@@ -420,7 +420,7 @@ public class PaperReviewReportService {
         }
         long ageDays = ageInDays(summary.ranAt(), asOf);
         if (ageDays > StrategyService.VERIFICATION_STALE_DAYS) {
-            line.append("  ⚠️ 这份结论已 ").append(ageDays).append(" 天未更新，"
+            line.append("  · 注意：这份结论已 ").append(ageDays).append(" 天未更新，"
                     + "不能当作此刻的证据；下次验证会自动覆盖它。\n");
         }
         return line.toString();

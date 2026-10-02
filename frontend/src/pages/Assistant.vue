@@ -272,8 +272,8 @@ onUnmounted(() => {
     <div class="chat-body" ref="listEl">
       <div v-if="messages.length === 0 && !typing" class="chat-empty">
         <div class="empty-icon"><AppIcon name="bot" :size="44" :stroke-width="1.5" /></div>
-        <p>你好，我是智能助手</p>
-        <p class="empty-hint">可以问我：现价查询、走势预测、持仓建议…</p>
+        <p>问我行情、资讯或策略</p>
+        <p class="empty-hint">例：茅台现在多少钱</p>
       </div>
 
       <div

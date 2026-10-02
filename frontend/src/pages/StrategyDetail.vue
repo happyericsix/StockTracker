@@ -863,7 +863,7 @@ onUnmounted(() => {
             <!-- 先给"还没有评估过"一个明确的说法，再决定要不要摆出那一格数字。
                  只摆 N/A 的后果实测过一次：用户看到一片 N/A，第一反应是"这功能坏了"。 -->
             <div v-if="!accountEvaluated" class="account-pending">
-              <strong>这个账户还没有被评估过一次</strong> —— 所以除了初始资金与现金，其余字段都还没有值。
+              <strong>这个账户还没有被评估过一次。</strong>除初始资金与现金外，其余字段都还没有值。
               <template v-if="isAgentMode">
                 当前决策来源是<strong>多角色委员会</strong>：委员会只在<strong>日线结算</strong>
                 （交易日 15:30）决策，盘中不再做规则检查。第一次决策会在
