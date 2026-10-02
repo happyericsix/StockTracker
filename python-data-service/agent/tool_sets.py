@@ -33,8 +33,10 @@ TOOL_SETS = {
     "strategy": ("validate_strategy", "backtest_strategy", "backtest_matrix", "finalize_strategy"),
     "memory": ("memory_search",),
     "model": ("get_model_status", "get_model_consensus"),
-    # 外部内容型数据源（T2a）：单独成集，因为它们是唯一"内容不可信"的一类
-    "news": ("get_news",),
+    # 外部内容型数据源（T2a）：单独成集，因为它们是唯一"内容不可信"的一类。
+    # search_news 是资讯雷达同款链路（多源聚合 + 可信度标注）：
+    # "这消息靠谱吗"是行情/策略分析里的常见追问，比快讯慢但每条带可信度。
+    "news": ("get_news", "search_news"),
     "fundamental": ("get_financial_abstract",),
 }
 
@@ -44,11 +46,12 @@ MODES = {
     # "今天有什么消息"是典型的闲聊式提问，藏掉它模型只会凭训练数据编。
     "chat": ("core",),
     # 策略工作流：底座 + 行情 + 策略（含矩阵验证）+ 模型诊断（回测后常要解释模型参考）+ 基本面
+    # + 资讯搜索（"现在适合建仓吗"要看消息面，且要能答"这消息可信吗"）
     # `backtest_matrix` 刻意留在 strategy 集里：样本外验证不是"高级功能"，
     # 而是"这条规则到底行不行"的唯一答法。
-    "strategy": ("core", "market", "strategy", "model", "fundamental"),
-    # 行情/分析：底座 + 行情 + 基本面（不含策略工具）
-    "market": ("core", "market", "fundamental"),
+    "strategy": ("core", "market", "news", "strategy", "model", "fundamental"),
+    # 行情/分析：底座 + 行情 + 资讯搜索 + 基本面（不含策略工具）
+    "market": ("core", "market", "news", "fundamental"),
     # 内部诊断端点等显式场景
     "diagnostic": ("market", "model"),
     # None = 全给（默认，行为与改造前一致）

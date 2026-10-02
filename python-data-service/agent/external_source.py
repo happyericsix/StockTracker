@@ -86,6 +86,10 @@ class DatasetSpec:
 # 而行情（腾讯）走的是它自己那套 15 秒缓存与失败语义，不归这条边界管。
 PROVIDERS = {
     "eastmoney": "东方财富",
+    # 多源聚合搜索（公告/媒体/研报）：单独记健康。它挂在搜索页与 agent 的
+    # search_news 工具上 —— 若与快讯共用 eastmoney 这个上游，一次搜索失败
+    # 会把 get_news 的快讯源也一起摘掉，而两者连的接口根本不同。
+    "news": "多源资讯聚合",
 }
 
 # 数据集：TTL 是**实测出来的需求**，不是拍脑袋（新闻盘中会更新，财报按报告期）
@@ -100,6 +104,8 @@ DATASETS = {
         "eastmoney.news_global", "eastmoney", "全球财经快讯", 600, "10 分钟"),
     "eastmoney.financial": DatasetSpec(
         "eastmoney.financial", "eastmoney", "财务摘要", 86400, "1 天（按报告期披露）"),
+    "news.search": DatasetSpec(
+        "news.search", "news", "多源资讯搜索", 600, "10 分钟（与资讯雷达页同源）"),
 }
 
 
