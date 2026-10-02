@@ -105,6 +105,23 @@ public class NewsController {
     }
 
     /**
+     * 取资讯原文正文（首次阅读时懒抓取，之后命中库）。
+     *
+     * <p>失败用 {@code Result.error} 带回人话原因（不在白名单/JS 渲染页/请求失败），
+     * 前端据此降级为"摘要 + 原文链接"—— 抓不到正文不代表这条资讯坏了。
+     */
+    @PostMapping("/events/{id}/body")
+    public Result<String> eventBody(@PathVariable Long id) {
+        try {
+            return Result.success(newsService.getOrFetchBody(id));
+        } catch (IllegalArgumentException e) {
+            return Result.error(404, e.getMessage());
+        } catch (IllegalStateException e) {
+            return Result.error(502, e.getMessage());
+        }
+    }
+
+    /**
      * {@code POST /analyze} 的请求体。
      *
      * <p>刻意做成控制器内的 record 而不是新开一个 DTO 文件：它只有两个字段、

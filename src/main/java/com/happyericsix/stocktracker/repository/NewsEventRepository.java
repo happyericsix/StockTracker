@@ -19,6 +19,20 @@ public interface NewsEventRepository extends JpaRepository<NewsEvent, Long> {
     /** 去重主键：url 唯一（spec §7）。 */
     Optional<NewsEvent> findByUrl(String url);
 
+    /** 文件夹分类回填：只摸还没打标的存量行（回填完成后即空查询） */
+    List<NewsEvent> findByCategoryIsNull();
+
+    /** 时效清理：披露类（公告/研报）按信源级别统一保留期 */
+    long deleteBySourceLevelInAndPublishedAtBefore(Collection<Integer> levels, LocalDateTime cutoff);
+
+    /** 时效清理：普通分类各自的保留期（排除披露类，它们按上一条的长周期走） */
+    long deleteByCategoryAndSourceLevelNotInAndPublishedAtBefore(
+            String category, Collection<Integer> levels, LocalDateTime cutoff);
+
+    /** 时效清理：未分类存量行的兜底 */
+    long deleteByCategoryIsNullAndSourceLevelNotInAndPublishedAtBefore(
+            Collection<Integer> levels, LocalDateTime cutoff);
+
     /**
      * 公告没有 url 时的兜底去重键 {@code (symbol, title, published_at)}。
      *

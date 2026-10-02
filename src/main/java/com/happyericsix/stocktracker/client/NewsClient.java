@@ -138,6 +138,19 @@ public class NewsClient {
         return post("/api/v1/news/synthesize", body);
     }
 
+    /**
+     * 抓取资讯原文正文（article_fetcher 白名单管线）。
+     *
+     * <p>失败时 Python 返回 {@code ok=false} + 人话原因（不在白名单/JS 渲染页/
+     * 请求失败），这里原样透传 —— 调用方据此软降级为"摘要 + 原文链接"，
+     * 不要把抓不到正文当成"这条资讯坏了"。
+     */
+    public JsonNode fetchArticleBody(String url) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("url", url == null ? "" : url);
+        return post("/api/v1/news/body", body);
+    }
+
     /** 响应里是否 {@code ok=true}；降级节点、null 都是 false。 */
     public static boolean isOk(JsonNode response) {
         return response != null && response.path(KEY_OK).asBoolean(false);

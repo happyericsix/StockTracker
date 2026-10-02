@@ -778,6 +778,39 @@ public class NewsService {
      * （"把从 day 到今天的都补一遍"），不能取历史某一天的快照。
      * 要真正回补历史，得先给 Python 端点加 day 参数（本次不动 Python）。
      */
+    /**
+     * 取资讯原文正文（懒加载：首次阅读时抓，之后一直用库里的）。
+     *
+     * <p>返回 {@code body} 或抛出带人话原因的异常（控制器转 4xx/5xx 由全局处理，
+     * 前端拿到 message 软降级为"摘要 + 原文链接"）。
+     *
+     * <p>抓取失败也写 {@code bodyFetchedAt}：一条永远抓不到的链接（JS 渲染页/
+     * 白名单外）不该被每个访客反复请求 —— 但已经抓到正文的条目永远直接命中库。
+     */
+    public String getOrFetchBody(Long eventId) {
+        NewsEvent event = newsEventRepository.findById(eventId)
+                .orElseThrow(() -> new IllegalArgumentException("资讯不存在：" + eventId));
+        if (event.getBody() != null && !event.getBody().isBlank()) {
+            return event.getBody();
+        }
+        if (event.getUrl() == null || event.getUrl().isBlank()) {
+            throw new IllegalStateException("这条资讯没有原文链接（公告请等正文补抓）");
+        }
+        JsonNode response = newsClient.fetchArticleBody(event.getUrl());
+        if (NewsClient.isOk(response)) {
+            String body = response.path("data").path("body").asText("");
+            if (!body.isBlank()) {
+                event.setBody(body);
+                event.setBodyFetchedAt(LocalDateTime.now());
+                newsEventRepository.save(event);
+                return body;
+            }
+        }
+        event.setBodyFetchedAt(LocalDateTime.now());
+        newsEventRepository.save(event);
+        throw new IllegalStateException(NewsClient.errorOf(response));
+    }
+
     public String refresh(String day) {
         int window = refreshWindowDays(day);
         // 手动增量是运维动作，不做相关度过滤（要的是"当天全市场都进来"）
@@ -857,6 +890,8 @@ public class NewsService {
                     .sourceName(clip(text(item, "source_name"), 64))
                     .eventTypeRaw(clip(text(item, "event_type_raw"), 64))
                     .publishedAt(publishedAt)
+                    // 文件夹初值：关键词规则打标（解读管线之后可用模型的 category 覆写）
+                    .category(NewsCategory.classify(symbol, title, text(item, "content")))
                     .build();
             NewsEvent saved = newsEventRepository.save(event);
             ensureRel(saved);
@@ -913,6 +948,12 @@ public class NewsService {
                     continue;
                 }
                 event.setEventType(blankToNull(text(row, "event_type")));
+                // 模型分类优先覆写规则初值：错分成本只是一条进错文件夹，
+                // 但必须过封闭枚举的门 —— 模型自由发挥的类别会造出空文件夹
+                String modelCategory = blankToNull(text(row, "category"));
+                if (NewsCategory.isValid(modelCategory)) {
+                    event.setCategory(modelCategory);
+                }
                 event.setDirection(blankToNull(text(row, "direction")));
                 event.setConfidence(row.path("confidence").isNumber() ? row.path("confidence").asDouble() : null);
                 event.setImpactLevel(blankToNull(text(row, "impact_level")));

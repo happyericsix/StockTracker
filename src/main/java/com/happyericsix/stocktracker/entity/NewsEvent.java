@@ -73,6 +73,26 @@ public class NewsEvent {
     @Column(name = "event_type_raw", length = 64)
     private String eventTypeRaw;
 
+    /**
+     * 资讯雷达的"文件夹"分类（封闭枚举，见 {@code NewsCategory}）。
+     * 落库时由关键词规则打初值，AI 解读返回的 category 优先覆写 ——
+     * 规则兜底保证"没解读的条目也有文件夹可归"，模型修正错分。
+     */
+    @Column(name = "category", length = 16)
+    private String category;
+
+    /**
+     * 原文正文（"去链接化"）：首次被阅读时懒抓取（article_fetcher 白名单管线），
+     * 之后一直用库里的。{@code bodyFetchedAt} 防重复抓取 —— 抓取失败也记录时间，
+     * 避免一条永远抓不到的链接被反复请求。
+     */
+    @Lob
+    @Column(name = "body", columnDefinition = "TEXT")
+    private String body;
+
+    @Column(name = "body_fetched_at")
+    private LocalDateTime bodyFetchedAt;
+
     /** spec §6 的 event_type，AI 分析后回填 */
     @Column(name = "event_type", length = 32)
     private String eventType;

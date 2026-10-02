@@ -110,44 +110,94 @@
         {{ emptyHint }}
       </div>
 
-      <!-- 结果列表：与个股页事件卡同一套信息层级（信源/时间/可信度 → 标题 → 警示 → 解读） -->
-      <ul v-if="results.length" class="result-list">
-        <li v-for="event in results" :key="event.id" class="result-card">
-          <div class="meta-line">
-            <span class="source">
-              <AppIcon :name="sourceMeta(event.sourceLevel).icon" :size="13" :stroke-width="2" />
-              {{ event.sourceName || sourceMeta(event.sourceLevel).label }}
-            </span>
-            <span class="time num">{{ formatTime(event.publishedAt) }}</span>
-            <span v-if="event.freshnessLabel" class="fresh num">{{ event.freshnessLabel }}</span>
-            <span
-              v-if="event.credibilityGrade"
-              class="credibility"
-              :class="credibilityClass(event.credibilityGrade)"
-              :title="(event.credibilityReasons || []).join('；')"
-            >可信 {{ event.credibilityGrade }}</span>
-            <span v-if="event.direction" class="direction" :class="directionClass(event.direction)">{{ event.direction }}</span>
-          </div>
-          <p class="title">
-            <a v-if="event.url" :href="event.url" target="_blank" rel="noopener noreferrer">{{ event.title }}</a>
-            <template v-else>{{ event.title }}</template>
-            <button
-              v-if="event.symbol"
-              type="button"
-              class="inline-action"
-              @click="goChart(event.symbol)"
-            >看K线</button>
-          </p>
-          <p v-if="event.rumorFlag" class="rumor" role="alert">
-            传闻特征明显，未经证实，请以官方公告为准
-          </p>
-          <p v-if="event.analyzed" class="summary">{{ event.plainSummary }}</p>
-          <p v-else class="summary muted">信息不足，不判断方向</p>
-          <p v-if="(event.credibilityReasons || []).length" class="reasons">
-            {{ event.credibilityReasons.slice(0, 3).join('；') }}
-          </p>
-        </li>
-      </ul>
+      <!-- 文件夹切换：浏览流（大盘/个股）按分类分组，搜索结果保持平铺 -->
+      <div v-if="folderChips.length > 1" class="folder-tabs" role="tablist" aria-label="资讯分类">
+        <button
+          type="button"
+          class="folder-chip"
+          :class="{ active: !activeCategory }"
+          @click="activeCategory = ''"
+        >全部 {{ results.length }}</button>
+        <button
+          v-for="chip in folderChips"
+          :key="chip.name"
+          type="button"
+          class="folder-chip"
+          :class="{ active: activeCategory === chip.name }"
+          @click="activeCategory = chip.name"
+        >{{ chip.name }} {{ chip.count }}</button>
+      </div>
+
+      <!-- 结果区块：与个股页事件卡同一套信息层级（信源/时间/可信度 → 标题 → 警示 → 解读）。
+           统一走 sections 渲染：分组浏览=多个文件夹区块，选定文件夹/搜索=单个区块。 -->
+      <section v-for="section in displaySections" :key="section.key" class="folder">
+        <h2 v-if="section.category" class="folder-title">
+          {{ section.category }} <span class="folder-count num">{{ section.items.length }}</span>
+        </h2>
+        <ul class="result-list">
+          <li v-for="event in section.items" :key="event.id" class="result-card">
+            <div class="meta-line">
+              <span class="source">
+                <AppIcon :name="sourceMeta(event.sourceLevel).icon" :size="13" :stroke-width="2" />
+                {{ event.sourceName || sourceMeta(event.sourceLevel).label }}
+              </span>
+              <span class="time num">{{ formatTime(event.publishedAt) }}</span>
+              <span v-if="event.freshnessLabel" class="fresh num">{{ event.freshnessLabel }}</span>
+              <span
+                v-if="event.credibilityGrade"
+                class="credibility"
+                :class="credibilityClass(event.credibilityGrade)"
+                :title="(event.credibilityReasons || []).join('；')"
+              >可信 {{ event.credibilityGrade }}</span>
+              <span v-if="event.direction" class="direction" :class="directionClass(event.direction)">{{ event.direction }}</span>
+            </div>
+            <p class="title">
+              <!-- 标题点击原地展开全文（去链接化阅读）；原文链接降级为展开区里的次操作 -->
+              <button
+                type="button"
+                class="title-toggle"
+                :aria-expanded="expandedId === event.id"
+                @click="toggleBody(event)"
+              >
+                <AppIcon
+                  name="chevron-right"
+                  :size="14"
+                  :stroke-width="2"
+                  class="title-caret"
+                  :class="{ open: expandedId === event.id }"
+                />
+                {{ event.title }}
+              </button>
+              <button
+                v-if="event.symbol"
+                type="button"
+                class="inline-action"
+                @click="goChart(event.symbol)"
+              >看K线</button>
+            </p>
+            <!-- 展开的原文：抓取中/失败/正文三态，失败时原文链接升为主要出路 -->
+            <div v-if="expandedId === event.id" class="event-body">
+              <p v-if="bodyState(event) === 'loading'" class="body-status">正在抓取原文…</p>
+              <p v-else-if="bodyState(event) === 'error'" class="body-status" role="alert">
+                {{ bodyErrors[event.id] }}。
+                <a v-if="event.url" :href="event.url" target="_blank" rel="noopener noreferrer">在新窗口看原文</a>
+              </p>
+              <template v-else>
+                <div class="body-text">{{ bodyText(event) }}</div>
+                <a v-if="event.url" class="source-link" :href="event.url" target="_blank" rel="noopener noreferrer">查看原文</a>
+              </template>
+            </div>
+            <p v-if="event.rumorFlag" class="rumor" role="alert">
+              传闻特征明显，未经证实，请以官方公告为准
+            </p>
+            <p v-if="event.analyzed" class="summary">{{ event.plainSummary }}</p>
+            <p v-else class="summary muted">信息不足，不判断方向</p>
+            <p v-if="(event.credibilityReasons || []).length" class="reasons">
+              {{ event.credibilityReasons.slice(0, 3).join('；') }}
+            </p>
+          </li>
+        </ul>
+      </section>
 
       <button
         v-if="hasMore"
@@ -164,7 +214,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import AppIcon from '../components/AppIcon.vue'
 import InfoTip from '../components/InfoTip.vue'
-import { searchNews, getStockEvents, refreshNews } from '../api/news.js'
+import { searchNews, getStockEvents, refreshNews, getEventBody } from '../api/news.js'
 import { getFavorites, getFavoritesBrief } from '../api/stock.js'
 import { getSentiment } from '../api/market.js'
 
@@ -272,6 +322,37 @@ const emptyHint = computed(() => {
 
 const sourceMeta = (level) => SOURCE_META[level] || { icon: 'doc', label: '资讯' }
 
+// ---------- 文件夹（分类分组）：仅浏览流启用，搜索结果保持平铺 ----------
+const CATEGORY_ORDER = ['公司动态', '业绩财务', '行业关联', '宏观经济', '政策监管', '地缘政治', '市场快讯']
+const activeCategory = ref('')
+
+const groupedResults = computed(() => {
+  const groups = []
+  for (const category of CATEGORY_ORDER) {
+    const items = results.value.filter((e) => e.category === category)
+    if (items.length) groups.push({ category, items })
+  }
+  // 未分类（极早期数据没回填/模型表外值）兜底进"其他"，不让条目凭空消失
+  const rest = results.value.filter((e) => !CATEGORY_ORDER.includes(e.category))
+  if (rest.length) groups.push({ category: '其他', items: rest })
+  return groups
+})
+
+const folderChips = computed(() =>
+  mode.value === 'search' ? [] : groupedResults.value.map((g) => ({ name: g.category, count: g.items.length })))
+
+const displaySections = computed(() => {
+  if (!results.value.length) return []
+  if (mode.value === 'search') {
+    return [{ key: 'flat', category: '', items: results.value }]
+  }
+  if (activeCategory.value) {
+    const group = groupedResults.value.find((g) => g.category === activeCategory.value)
+    return group ? [{ key: group.category, category: group.category, items: group.items }] : []
+  }
+  return groupedResults.value.map((g) => ({ key: g.category, category: g.category, items: g.items }))
+})
+
 const credibilityClass = (grade) => {
   if (grade === '高' || grade === '较高') return 'cred-good'
   if (grade === '中') return 'cred-mid'
@@ -289,6 +370,53 @@ const formatTime = (value) => {
   return String(value).replace('T', ' ').slice(0, 16)
 }
 const goChart = (symbol) => router.push('/chart/' + symbol)
+
+// ---------- 原文展开（懒抓取 + 预热） ----------
+const expandedId = ref(null)
+const bodies = reactive({})
+const bodyErrors = reactive({})
+const bodyLoading = reactive({})
+
+const toggleBody = async (event) => {
+  if (expandedId.value === event.id) {
+    expandedId.value = null
+    return
+  }
+  expandedId.value = event.id
+  // 已有正文（库里的/预热到的/公告补抓进 content 的）直接展示，不发请求
+  if (bodyText(event) || bodyErrors[event.id] || !event.url) return
+  bodyLoading[event.id] = true
+  try {
+    const res = await getEventBody(event.id)
+    bodies[event.id] = res.data
+  } catch (e) {
+    bodyErrors[event.id] = e?.response?.data?.message || '原文抓取失败'
+  } finally {
+    bodyLoading[event.id] = false
+  }
+}
+
+const bodyText = (event) =>
+  bodies[event.id] || event.body
+  // 公告的正文由 enrich 管线直接写进 content（本就没有可点开的原文页）；
+  // 够长才算"全文"，300 字摘要不算
+  || (event.content && event.content.length >= 400 ? event.content : '')
+
+const bodyState = (event) => {
+  if (bodyLoading[event.id]) return 'loading'
+  if (bodyErrors[event.id]) return 'error'
+  return bodyText(event) ? 'ok' : 'none'
+}
+
+/** 静默预热浏览流的前几条：用户点开时正文已经在路上/已在库里 */
+const prefetchBodies = (items) => {
+  items
+    .filter((e) => e.url && !bodyText(e) && !bodyErrors[e.id] && !bodies[e.id])
+    .slice(0, 3)
+    .forEach((e) => {
+      getEventBody(e.id).then((res) => { bodies[e.id] = res.data }).catch(() => {})
+    })
+}
 
 // 竞态防护：快速切标签时旧的慢响应不得覆盖新结果（与 KLine/Messages 同一模式）
 let searchSeq = 0
@@ -325,6 +453,7 @@ const applyStockData = (data) => {
   analyzedCount.value = data.analyzedCount || 0
   pendingCount.value = data.pendingCount || 0
   hasMore.value = false
+  prefetchBodies(results.value)
 }
 
 let analyzeTimer = null
@@ -403,6 +532,7 @@ const load = async () => {
     totalElements.value = total
     hasMore.value = pages > 1
     searched.value = true
+    prefetchBodies(list)
   } catch (e) {
     if (seq !== searchSeq) return
     error.value = e?.response?.data?.message || '加载失败，请稍后重试'
@@ -436,6 +566,7 @@ const selectMarket = () => {
   stopAnalysisPolling()
   mode.value = 'market'
   activeSymbol.value = ''
+  activeCategory.value = ''
   sentiment.value = null
   load()
 }
@@ -444,6 +575,7 @@ const selectStock = (symbol) => {
   if (mode.value === 'stock') stopAnalysisPolling()
   mode.value = 'stock'
   activeSymbol.value = symbol
+  activeCategory.value = ''
   load()
   loadSentiment(symbol)
 }
@@ -498,6 +630,89 @@ onUnmounted(stopAnalysisPolling)
   font-size: 13px;
   color: var(--color-text-muted);
 }
+/* ---------- 文件夹（分类分组） ---------- */
+.folder-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.folder-chip {
+  padding: 4px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-out),
+              color var(--duration-fast) var(--ease-out),
+              border-color var(--duration-fast) var(--ease-out);
+}
+.folder-chip:hover { color: var(--color-text-primary); border-color: var(--color-border-strong); }
+.folder-chip.active {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+}
+.folder { margin-bottom: 4px; }
+.folder-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 14px 0 8px;
+  font: var(--font-heading);
+  color: var(--color-text-primary);
+}
+.folder-count {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--color-text-muted);
+}
+/* ---------- 原文手风琴 ---------- */
+.title-toggle {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-text-primary);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.title-toggle:hover { color: var(--color-accent); }
+.title-caret {
+  flex: none;
+  align-self: center;
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+.title-caret.open { transform: rotate(90deg); }
+.event-body {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-subtle);
+}
+.body-status { margin: 0; font-size: 13px; color: var(--color-text-muted); }
+.body-status a { color: var(--color-accent); }
+.body-text {
+  max-height: 480px;
+  overflow-y: auto;
+  font-size: 14px;
+  line-height: 1.8;
+  color: var(--color-text-secondary);
+  white-space: pre-line;
+}
+.source-link {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+.source-link:hover { color: var(--color-accent); }
 /* ---------- 个股情绪行（旁路信息） ---------- */
 .sentiment-line {
   display: flex;

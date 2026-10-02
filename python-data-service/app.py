@@ -1265,6 +1265,38 @@ async def news_synthesize(req: Request):
     return {"ok": True, "data": data}
 
 
+@app.post("/api/v1/news/body")
+async def news_body(req: Request):
+    """抓取资讯原文正文（"去链接化"的取数端点）。
+
+    请求体：`{"url":"https://finance.eastmoney.com/a/xxx.html"}`
+    响应：`{"ok":true,"data":{"body":"…","chars":1234}}`
+
+    安全栏（白名单/私网拦截/限额/最短长度）都在 article_fetcher 里；
+    这里失败返回 `ok=false` + 一句人话，Java 侧据此软降级为摘要+原文链接。
+    ⚠️ 必须 `asyncio.to_thread`：抓取要等外部站点最长 8 秒，不能占事件循环。
+    """
+    try:
+        body = await req.json()
+    except Exception:
+        return _news_error("请求体不是合法 JSON", status_code=400)
+    if not isinstance(body, dict):
+        return _news_error("请求体必须是对象", status_code=400)
+    url = str(body.get("url") or "").strip()
+    if not url:
+        return _news_error("url 不能为空", status_code=400)
+
+    from article_fetcher import FetchError, fetch_article_body
+    try:
+        text = await asyncio.to_thread(fetch_article_body, url)
+    except FetchError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - 取数边界必须兜住一切
+        logger.error(f"news body fetch error: {exc}", exc_info=True)
+        return {"ok": False, "error": "正文抓取失败，请稍后再试"}
+    return {"ok": True, "data": {"body": text, "chars": len(text)}}
+
+
 # ==================== 散户情绪（千股千评聚合指数）====================
 
 

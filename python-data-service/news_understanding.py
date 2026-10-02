@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 # ===== spec §6 的枚举（值一字不改，前端与落库都按它判等）=====
 EVENT_TYPES = ("业绩预告", "重大合同", "回购", "增减持", "监管处罚", "重组",
                "宏观政策", "行业动态", "其他")
+# 资讯雷达的"文件夹"分类（与 Java 侧 NewsCategory 同一张封闭枚举表）。
+# 落库的初值由 Java 的关键词规则打（upsert 时刻），这里的模型分类优先覆写；
+# 模型说了表外的词 → None，让 Java 侧的规则初值保留，不造空文件夹。
+CATEGORIES = ("公司动态", "业绩财务", "行业关联", "宏观经济", "政策监管", "地缘政治", "市场快讯")
 DIRECTIONS = ("利好", "利空", "中性")
 DIRECTION_SIGN = {"利好": 1, "利空": -1, "中性": 0}
 IMPACT_LEVELS = ("high", "medium", "low")
@@ -248,6 +252,8 @@ def normalize_analysis(raw, item: dict) -> dict:
 
     return {
         "event_type": _enum(data.get("event_type"), EVENT_TYPES, "其他"),
+        # 表外的词落 None：Java 侧保留规则初值，而不是让降级值盖掉一个更准的分类
+        "category": _enum(data.get("category"), CATEGORIES, None),
         "direction": direction,
         "confidence": confidence,
         "impact_level": _enum(data.get("impact_level"), IMPACT_LEVELS, "low"),

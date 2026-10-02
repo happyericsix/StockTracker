@@ -34,6 +34,8 @@ public class NewsEventResponse {
     /** 源站自带分类（公告类型 / 财新 tag） */
     private String eventTypeRaw;
     private String eventType;
+    /** 文件夹分类（NewsCategory 封闭枚举；null=极早期数据未回填） */
+    private String category;
     /** 利好/利空/中性；**null 表示"信息不足，不判断方向"**（不是中性） */
     private String direction;
     private Double confidence;
@@ -87,6 +89,7 @@ public class NewsEventResponse {
         response.sourceName = event.getSourceName();
         response.eventTypeRaw = event.getEventTypeRaw();
         response.eventType = event.getEventType();
+        response.category = event.getCategory();
         response.direction = event.getDirection();
         response.confidence = event.getConfidence();
         response.impactLevel = event.getImpactLevel();
@@ -186,6 +189,8 @@ public class NewsEventResponse {
     public String getEventTypeRaw() { return eventTypeRaw; }
     public void setEventTypeRaw(String eventTypeRaw) { this.eventTypeRaw = eventTypeRaw; }
     public String getEventType() { return eventType; }
+    public String getCategory() { return category; }
+    public void setCategory(String category) { this.category = category; }
     public void setEventType(String eventType) { this.eventType = eventType; }
     public String getDirection() { return direction; }
     public void setDirection(String direction) { this.direction = direction; }

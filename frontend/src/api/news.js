@@ -74,3 +74,11 @@ export const searchNews = (payload) => request.post('/news/search', payload)
  * 所以大盘流首次为空时前端会自动触发一次（幂等：去重键保证重复刷新不重复入库）。
  */
 export const refreshNews = () => request.post('/news/refresh')
+
+/**
+ * 取资讯原文正文（懒抓取：服务端首抓落库，之后命中库）。
+ *
+ * 失败时 data 为空、message 是人话原因（不在白名单/JS 渲染页）——
+ * 调用方据此降级为"摘要 + 原文链接"，抓不到正文不代表资讯坏了。
+ */
+export const getEventBody = (id) => request.post(`/news/events/${id}/body`)
