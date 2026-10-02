@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
+import { useRouter } from 'vue-router'
 import { getStock, getFavorites, addFavorite, deleteFavorite } from '../api/stock.js'
 import StockSearchInput from '../components/StockSearchInput.vue'
 import AppIcon from '../components/AppIcon.vue'
@@ -11,8 +11,6 @@ import { useMarketStatus } from '../composables/useMarketStatus.js'
 import { messageBus } from '../composables/messageBus.js'
 
 const router = useRouter()
-const route = useRoute()
-
 /**
  * 市场状态：今天开不开市、休到哪天、上面那些价格是哪一天的。
  *

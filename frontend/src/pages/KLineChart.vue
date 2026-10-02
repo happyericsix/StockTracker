@@ -6,6 +6,7 @@ import { getStockEvents, getStockRead } from '../api/news.js'
 import { getSentiment } from '../api/market.js'
 import { anchorDateFor as anchorOnAxis } from '../utils/newsAnchor.js'
 import { useMarketStatus } from '../composables/useMarketStatus.js'
+import AppIcon from '../components/AppIcon.vue'
 import * as echarts from 'echarts'
 
 const route = useRoute()
@@ -1145,9 +1146,9 @@ const macdColor = (h) => h == null
 <template>
   <div class="kline-page">
     <div class="page-head">
-      <div class="page-actions" style="margin-right:auto">
-        <button type="button" class="btn quiet" @click="router.back()">← 返回</button>
-      </div>
+      <!-- 本页没有右侧动作，返回键与标题同组靠左（全局 .page-head 是 space-between，
+           只有两个子元素时会把标题推到最右） -->
+      <button type="button" class="btn quiet" @click="router.back()">← 返回</button>
       <h1>K 线图</h1>
     </div>
 
@@ -1432,6 +1433,9 @@ const macdColor = (h) => h == null
 </template>
 
 <style scoped>
+/* 本页 page-head 只有"返回 + 标题"两个左组元素，没有右侧动作：
+   覆盖全局的 space-between，避免标题被推到最右 */
+.page-head { justify-content: flex-start; }
 .kline-page {
   min-height: 100vh;
   /* 移动端地址栏高度算进 100vh，会顶出底部，补 dvh 兜底 */
@@ -1440,17 +1444,6 @@ const macdColor = (h) => h == null
   display: flex;
   flex-direction: column;
 }
-header {
-  background: var(--color-bg-inverse);
-  color: var(--color-text-inverse);
-  /* iOS 独立模式（black-translucent）内容会顶到状态栏下，让出顶部安全区 */
-  padding: calc(14px + env(safe-area-inset-top, 0px)) 16px 14px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-shrink: 0;
-}
-header h1 { margin: 0; font-size: 18px; flex: 1; }
 
 
 .toolbar {

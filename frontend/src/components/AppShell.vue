@@ -18,7 +18,7 @@
  * 未读数来自 messageBus（SSE 单例，与消息中心共用）；模拟盘运行数来自
  * /paper/overview。都是软失败：拿不到就不显示徽章，绝不让导航等数据。
  */
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { RouterView, useRoute, useRouter } from 'vue-router'
 import AppIcon from './AppIcon.vue'
 import { messageBus } from '../composables/messageBus.js'
@@ -43,8 +43,16 @@ const navItems = [
 ]
 
 // ---------- 市场状态（壳底一行，与行情卡同一单例） ----------
-const { status: marketStatus, refresh: refreshMarket } = useMarketStatus()
-const marketBadge = computed(() => sessionBadgeFor(marketStatus.value) || '开市')
+// 注意导出名是 load：composable 没有 refresh。这里曾想当然写成 refresh，
+// 运行时抛 TypeError 并中断 onMounted 后续的 messageBus.connect() —— 深链
+// 直开非首页时 SSE 全挂，正是那次全面审查抓出来的 P0。
+const { status: marketStatus, load: refreshMarket } = useMarketStatus()
+// 三态，宁缺毋错：状态没到（加载中/拉取失败）显示中性的"…"，
+// 不拿"开市"兜底 —— 把"不知道"渲染成"开市"是市场状态模块自己明令禁止的。
+const marketBadge = computed(() => {
+  if (marketStatus.value == null) return '…'
+  return sessionBadgeFor(marketStatus.value) || '开市'
+})
 
 // ---------- 用户 ----------
 const username = ref('')
@@ -62,7 +70,10 @@ const paperRunning = ref(0)
 const loadPaper = async () => {
   try {
     const res = await getPaperOverview()
-    paperRunning.value = Number(res.data?.running) || 0
+    // /paper/overview 返回的是**数组**，每条带 paperEnabled 布尔；
+    // 顶层没有 running 字段（曾想当然读 res.data?.running，徽章因此永不显示）
+    const list = Array.isArray(res.data) ? res.data : []
+    paperRunning.value = list.filter((item) => item?.paperEnabled).length
   } catch {
     paperRunning.value = 0
   }
@@ -89,15 +100,16 @@ const badgeText = (count) => {
   return n > 99 ? '99+' : String(n)
 }
 
-let stopRouteWatch = null
 onMounted(() => {
   loadUser()
   loadPaper()
   refreshMarket()
   messageBus.connect()
-  // 切页即收抽屉：抽屉是临时导航，路由变化说明导航已完成
-  stopRouteWatch = route.path !== undefined ? null : null
 })
+
+// 切页即收抽屉：抽屉是临时导航，路由变化说明导航已完成。
+// 组件作用域内的 watch 随组件卸载自动停止，不必手动清理。
+watch(() => route.path, closeDrawer)
 </script>
 
 <template>
@@ -147,13 +159,17 @@ onMounted(() => {
           <span class="shell-market-dot" :class="{ live: marketBadge === '开市' }" aria-hidden="true"></span>
           {{ marketBadge }}
         </p>
-        <RouterLink to="/profile" class="shell-user-row" @click="closeDrawer">
-          <AppIcon name="user" :size="18" :stroke-width="2" />
-          <span class="who">{{ username || '我的' }}</span>
-          <button type="button" class="shell-logout" aria-label="退出登录" @click.prevent.stop="logout">
+        <!-- 用户行 = 进入个人中心 + 退出登录，两个独立交互元素平铺，
+             不把按钮嵌进链接里（interactive 嵌 interactive 违反 HTML 规范） -->
+        <div class="shell-user-row">
+          <RouterLink to="/profile" class="shell-user-link" @click="closeDrawer">
+            <AppIcon name="user" :size="18" :stroke-width="2" />
+            <span class="who">{{ username || '我的' }}</span>
+          </RouterLink>
+          <button type="button" class="shell-logout" aria-label="退出登录" @click="logout">
             <AppIcon name="logout" :size="16" :stroke-width="2" />
           </button>
-        </RouterLink>
+        </div>
       </div>
     </nav>
     <div v-if="drawerOpen" class="shell-mask" aria-hidden="true" @click="closeDrawer"></div>

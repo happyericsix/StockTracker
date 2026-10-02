@@ -571,15 +571,24 @@ textarea:focus-visible {
 .shell-user-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
+  gap: 4px;
+  padding: 2px 4px;
   border-radius: var(--radius-lg);
+}
+.shell-user-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: var(--radius-md);
   color: var(--color-text-secondary);
   font: var(--font-ui);
   text-decoration: none;
 }
-.shell-user-row:hover { background: var(--color-bg-page); color: var(--color-text-primary); }
-.shell-user-row .who { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shell-user-link:hover { background: var(--color-bg-page); color: var(--color-text-primary); }
+.shell-user-link .who { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .shell-logout {
   display: inline-flex;
   align-items: center;
@@ -757,3 +766,10 @@ textarea:focus-visible {
   color: var(--color-text-secondary);
 }
 .btn.quiet:hover { background: var(--color-bg-subtle); color: var(--color-text-primary); }
+/* 主操作：accent 只给"页面唯一的主动作"（operate.md 的 accent 纪律） */
+.btn.primary {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
+}
+.btn.primary:hover { background: var(--color-accent-hover); }

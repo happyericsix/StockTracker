@@ -524,8 +524,6 @@ const getConditionDesc = (type) => {
 
 
 
-const goBack = () => router.push('/dashboard')
-
 
 
 // 启动时:从 URL query 预填(从 Dashboard 的"+预警"按钮跳转过来)
@@ -561,8 +559,7 @@ onMounted(async () => {
 
 <template>
 
-  <div class="alerts-page">
-
+  <div class="page">
     <div class="page-head">
       <h1>预警设置</h1>
       <div class="page-actions">
@@ -721,12 +718,6 @@ onMounted(async () => {
 
 
 <style scoped>
-.alerts-page {
-  min-height: 100vh;
-  /* 移动端地址栏高度算进 100vh，会顶出底部，补 dvh 兜底 */
-  min-height: 100dvh;
-  background: var(--color-bg-page);
-}
 
 
 
@@ -734,10 +725,6 @@ onMounted(async () => {
 
 
 
-
-
-/* 悬停不再换更浅的橙（#ffa940 配白字只有 3.5:1），改为整体压暗，文字对比度只增不减 */
-.add-btn:hover { filter: brightness(0.88); }
 
 
 

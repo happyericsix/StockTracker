@@ -556,7 +556,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="app-layout">
+  <div class="page">
     <div class="page-head">
       <h1>策略详情</h1>
       <div class="page-actions">
@@ -1075,22 +1075,7 @@ onUnmounted(() => {
 
 <style scoped>
 
-header {
-  background: var(--color-bg-inverse);
-  color: var(--color-text-inverse);
-  padding: 16px 24px;
-  /* iOS 独立模式（index.html 声明了 black-translucent）内容会顶到状态栏下，补顶部安全区 */
-  padding-top: calc(16px + env(safe-area-inset-top, 0px));
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-header h1 { margin: 0; font-size: 20px; }
 
-
-.nav-btn:hover { background: color-mix(in srgb, var(--color-text-inverse) 25%, transparent); }
-
-main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }
 .card {
   background: var(--color-bg-surface);
   border-radius: var(--radius-lg);

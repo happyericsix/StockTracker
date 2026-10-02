@@ -175,8 +175,6 @@ const formatTime = (value) => {
   if (!value) return '时间未知'
   return String(value).replace('T', ' ').slice(0, 16)
 }
-
-const goDashboard = () => router.push('/dashboard')
 const goChart = (symbol) => router.push('/chart/' + symbol)
 
 // 竞态防护：快速连点"搜索"时旧的慢响应不得覆盖新结果（与 KLine/Messages 同一模式）

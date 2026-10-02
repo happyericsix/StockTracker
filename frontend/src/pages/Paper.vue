@@ -116,8 +116,6 @@ const togglePaper = async (item) => {
 
 const goDetail = (id) => router.push(`/strategies/${id}`)
 const goStrategies = () => router.push('/strategies')
-const goDashboard = () => router.push('/dashboard')
-
 onMounted(load)
 </script>
 
@@ -267,21 +265,7 @@ onMounted(load)
 
 <style scoped>
 
-header {
-  background: var(--color-bg-inverse);
-  color: var(--color-text-inverse);
-  padding: 16px 24px;
-  padding-top: calc(16px + env(safe-area-inset-top, 0px));
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-header h1 { margin: 0; font-size: 20px; }
 
-
-.nav-btn:hover { background: color-mix(in srgb, var(--color-text-inverse) 25%, transparent); }
-
-main { max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }
 .page-hint { font-size: 13px; color: var(--color-text-secondary); line-height: 1.7; margin: 0 0 16px; }
 .card {
   background: var(--color-bg-surface);

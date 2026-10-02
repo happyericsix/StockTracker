@@ -60,7 +60,9 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:8080',
+        // 8080 被同机其它应用占用时（曾发生：另一个 jar 抢占 8080，
+        // 前端全部接口 404 却像"代码坏了"），可用 API_PROXY_TARGET 指向备用端口后端。
+        target: process.env.API_PROXY_TARGET || 'http://localhost:8080',
         changeOrigin: true
       }
     }

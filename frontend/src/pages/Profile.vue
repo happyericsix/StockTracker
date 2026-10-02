@@ -112,8 +112,6 @@ const handleLogout = () => {
   router.push('/login')
 }
 
-const goBack = () => router.push('/dashboard')
-
 onMounted(() => {
   fetchProfile()
   loadThsStatus()
@@ -121,7 +119,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="profile-page">
+  <div class="page">
     <div class="page-head">
       <h1>个人中心</h1>
     </div>
@@ -206,12 +204,8 @@ onMounted(() => {
 
 <style scoped>
 /* 100vh 在移动浏览器里会把地址栏高度算进去，补 100dvh 兜底 */
-.profile-page { min-height: 100vh; min-height: 100dvh; background: var(--color-bg-page); }
 
 
-
-
-main { max-width: 600px; margin: 0 auto; padding: 24px 16px; }
 
 .card { background: var(--color-bg-surface); border-radius: var(--radius-lg); padding: 24px; margin-bottom: 16px; box-shadow: var(--shadow-1); }
 .card h2 { font-size: 16px; margin-bottom: 16px; color: var(--color-text-primary); }

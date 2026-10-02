@@ -113,8 +113,6 @@ const formatPct = (value) => {
 }
 
 const goDetail = (id) => router.push(`/strategies/${id}`)
-const goDashboard = () => router.push('/dashboard')
-const goPaper = () => router.push('/paper')
 
 const handleBacktest = async (item) => {
   backtestStatus.value = ''
@@ -290,22 +288,7 @@ onMounted(loadStrategies)
 
 <style scoped>
 
-header {
-  background: var(--color-bg-inverse);
-  color: var(--color-text-inverse);
-  padding: 16px 24px;
-  /* iOS 独立模式（index.html 声明了 black-translucent）内容会顶到状态栏下，补顶部安全区 */
-  padding-top: calc(16px + env(safe-area-inset-top, 0px));
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-header h1 { margin: 0; font-size: 20px; }
 
-
-.nav-btn:hover { background: color-mix(in srgb, var(--color-text-inverse) 25%, transparent); }
-
-main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }
 .strategy-list { display: flex; flex-direction: column; gap: 12px; }
 .strategy-card {
   background: var(--color-bg-surface);

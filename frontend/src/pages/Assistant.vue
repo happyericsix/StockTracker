@@ -554,8 +554,11 @@ onUnmounted(() => {
   cursor: pointer;
 }
 .send-btn:disabled { background: var(--color-accent-soft); color: var(--color-text-muted); cursor: not-allowed; }
-</style>
 
+/* 移动端：壳给 .shell-main 加了顶栏高度的 padding-top，聊天页若仍是整屏高，
+   输入栏会被顶出视口 56px —— 这里把高度减去顶栏。
+   （这段曾被误写在 style 块之外，编译器静默丢弃、样式不生效。） */
 @media (max-width: 1023px) {
   .chat-page { height: calc(100dvh - var(--shell-bar-h)); }
 }
+</style>

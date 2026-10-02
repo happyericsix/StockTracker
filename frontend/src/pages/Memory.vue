@@ -219,8 +219,6 @@ const changeLessonStatus = async (lesson, action) => {
 }
 
 const goAssistant = () => router.push('/assistant')
-const goDashboard = () => router.push('/dashboard')
-
 onMounted(load)
 </script>
 
@@ -441,24 +439,6 @@ onMounted(load)
 
 <style scoped>
 
-
-header {
-  background: var(--color-bg-inverse);
-  color: var(--color-text-inverse);
-  padding: 16px 24px;
-  padding-top: calc(16px + env(safe-area-inset-top, 0px));
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-header h1 { margin: 0; font-size: 20px; }
-
-
-
-.nav-btn:hover { background: color-mix(in srgb, var(--color-text-inverse) 25%, transparent); }
-
-main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }
 
 .intro {
   margin: 0 0 16px;
