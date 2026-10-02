@@ -49,6 +49,12 @@ class NewsCategoryTest {
     }
 
     @Test
+    void opinionKeywordsDetectedBeforeMacro() {
+        assertEquals(NewsCategory.OPINION,
+                NewsCategory.classify(null, "股吧人气榜：赛力斯居首", "人气榜前十"));
+    }
+
+    @Test
     void isValidRejectsUnknownCategory() {
         assertTrue(NewsCategory.isValid("公司动态"));
         assertFalse(NewsCategory.isValid("科技前沿"));

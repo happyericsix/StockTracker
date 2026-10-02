@@ -357,7 +357,7 @@ const emptyHint = computed(() => {
 const sourceMeta = (level) => SOURCE_META[level] || { icon: 'doc', label: '资讯' }
 
 // ---------- 文件夹（分类分组）：仅浏览流启用，搜索结果保持平铺 ----------
-const CATEGORY_ORDER = ['公司动态', '业绩财务', '行业关联', '宏观经济', '政策监管', '地缘政治', '市场快讯']
+const CATEGORY_ORDER = ['公司动态', '业绩财务', '行业关联', '宏观经济', '政策监管', '地缘政治', '舆论热度', '市场快讯']
 const activeCategory = ref('')
 
 const groupedResults = computed(() => {
@@ -458,9 +458,9 @@ let searchSeq = 0
 const fetchPage = async (pageNo) => {
   let payload
   if (mode.value === 'market') {
-    // 大盘流：只取媒体快讯（无标的时的媒体源=全球快讯）。
+    // 大盘流：媒体快讯（2，全球快讯）+ 舆情（4，股吧人气榜）。
     // 不带公告源：当日全市场公告是随机公司的法定披露，混进"大盘"全是噪音。
-    payload = { symbol: null, keyword: null, types: [2], days: 3, page: pageNo, size: PAGE_SIZE }
+    payload = { symbol: null, keyword: null, types: [2, 4], days: 3, page: pageNo, size: PAGE_SIZE }
   } else {
     payload = {
       keyword: form.keyword || null,
@@ -567,12 +567,25 @@ const load = async () => {
     hasMore.value = pages > 1
     searched.value = true
     prefetchBodies(list)
+    scheduleMarketReload(list)
   } catch (e) {
     if (seq !== searchSeq) return
     error.value = e?.response?.data?.message || '加载失败，请稍后重试'
   } finally {
     if (seq === searchSeq) loading.value = false
   }
+}
+
+// 大盘流的解读在后台生成（首访触发，需一次模型往返）：25 秒后静默补拉一次，
+// 让解读行"长出来"。只补一次 —— 没长出来的下次浏览自然会有。
+let marketReloadTimer = null
+const scheduleMarketReload = (list) => {
+  if (mode.value !== 'market' || !list.length) return
+  if (list.every((e) => e.analyzed)) return
+  clearTimeout(marketReloadTimer)
+  marketReloadTimer = setTimeout(() => {
+    if (mode.value === 'market') load()
+  }, 25000)
 }
 
 const loadMore = async () => {
@@ -626,7 +639,10 @@ onMounted(() => {
   // 首屏直接给大盘快讯：这个页面的第一眼不该是一张空表单
   load()
 })
-onUnmounted(stopAnalysisPolling)
+onUnmounted(() => {
+  stopAnalysisPolling()
+  clearTimeout(marketReloadTimer)
+})
 </script>
 
 <style scoped>

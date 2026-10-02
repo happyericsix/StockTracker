@@ -41,6 +41,7 @@ import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.stream.Collectors;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -256,9 +257,52 @@ public class NewsService {
             // 指定标的 → onlyRelevant=true：大盘综述不该进这只票的搜索结果里
             fetchInto(symbol, keyword, types, days, true);
             hit = queryEvents(since, levels, keyword, symbolFilter, pageable);
+        } else if (symbol == null && keyword == null) {
+            // 大盘浏览流：快讯此前从不进解读管线（个股时间轴才有补解读），
+            // 用户看到的就是满屏"信息不足，不判断方向"。这里把首屏里
+            // 还没解读的条目异步送去解读 —— analyze 按 plainSummary 判
+            // pending，天然幂等；5 分钟节流防刷屏式调用。
+            scheduleMarketAnalysis(username, hit.getContent());
         }
 
         return hit.map(event -> NewsEventResponse.from(event, mapper));
+    }
+
+    /** 上次大盘流解读触发的时间戳（毫秒）；0 = 还没触发过 */
+    private static final java.util.concurrent.atomic.AtomicLong LAST_MARKET_ANALYZE_MS =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    private static final long MARKET_ANALYZE_THROTTLE_MS = 5 * 60 * 1000L;
+
+    private void scheduleMarketAnalysis(String username, List<NewsEvent> page) {
+        try {
+            List<Long> pending = page.stream()
+                    .filter(e -> e.getPlainSummary() == null || e.getPlainSummary().isBlank())
+                    .map(NewsEvent::getId)
+                    .limit(6)
+                    .collect(Collectors.toList());
+            if (pending.isEmpty()) {
+                return;
+            }
+            long now = System.currentTimeMillis();
+            long last = LAST_MARKET_ANALYZE_MS.get();
+            if (now - last < MARKET_ANALYZE_THROTTLE_MS
+                    || !LAST_MARKET_ANALYZE_MS.compareAndSet(last, now)) {
+                return;
+            }
+            log.info("大盘流异步解读：{} 条待解读事件已送去分析", pending.size());
+            // analyze 内部是同步的模型调用（秒级），绝不能挡在搜索请求里
+            newsEnrichmentExecutor.execute(() -> {
+                try {
+                    analyze(username, pending, false);
+                } catch (Exception ex) {
+                    log.warn("大盘流后台解读失败（下次浏览自动重试）：{}", ex.toString());
+                }
+            });
+        } catch (Exception e) {
+            // 异步增强失败绝不影响搜索主链路
+            log.warn("大盘流解读触发失败（不影响搜索结果）：{}", e.getMessage());
+        }
     }
 
     // ==================== 实时兜底 ====================

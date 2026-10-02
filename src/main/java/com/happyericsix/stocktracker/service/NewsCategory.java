@@ -28,13 +28,14 @@ public final class NewsCategory {
     public static final String MACRO = "宏观经济";
     public static final String POLICY = "政策监管";
     public static final String GEO = "地缘政治";
+    public static final String OPINION = "舆论热度";
     public static final String COMPANY = "公司动态";
     public static final String EARNINGS = "业绩财务";
     public static final String INDUSTRY = "行业关联";
 
     /** 前端文件夹的渲染顺序（"最重要的问题在前"） */
     public static final List<String> ORDER = List.of(
-            COMPANY, EARNINGS, INDUSTRY, MACRO, POLICY, GEO, MARKET_FLASH);
+            COMPANY, EARNINGS, INDUSTRY, MACRO, POLICY, GEO, OPINION, MARKET_FLASH);
 
     private static final Map<String, List<String>> KEYWORDS = Map.of(
             MACRO, List.of("央行", "降息", "加息", "lpr", "gdp", "cpi", "ppi", "通胀",
@@ -44,6 +45,7 @@ public final class NewsCategory {
                     "指引", "管理办法", "退市"),
             GEO, List.of("关税", "制裁", "贸易战", "地缘", "军事", "冲突", "大选",
                     "g7", "g20", "中美", "国际关系", "外交部", "联合国"),
+            OPINION, List.of("人气榜", "股吧", "热度", "千股千评", "散户情绪"),
             EARNINGS, List.of("业绩", "年报", "季报", "财报", "预增", "预亏", "预盈",
                     "净利润", "营收", "营业收入", "分红", "派息", "业绩快报", "盈利"),
             INDUSTRY, List.of("行业", "板块", "产业链", "产能", "涨价", "跌价", "下游",
@@ -66,7 +68,8 @@ public final class NewsCategory {
      */
     public static String classify(String symbol, String title, String content) {
         String text = (safe(title) + " " + safe(title) + " " + safe(content)).toLowerCase();
-        for (String category : List.of(MACRO, POLICY, GEO)) {
+        // 舆论词（人气榜/股吧）比宏观政策词更特异，先判，避免"股吧里聊降息"被归进宏观
+        for (String category : List.of(OPINION, MACRO, POLICY, GEO)) {
             if (hits(text, KEYWORDS.get(category))) {
                 return category;
             }

@@ -20,6 +20,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import news_client  # noqa: E402
+_REAL_MARKET_OPINION = news_client.fetch_market_opinion
+
+
+# 大盘口径的 search_news 默认会带舆情源（股吧人气榜）；测试必须离线，
+# 统一桩掉它的上游取数（个别用例需要真实形状时自己再覆盖这个桩）。
+@pytest.fixture(autouse=True)
+def _no_market_opinion(monkeypatch):
+    monkeypatch.setattr(news_client, "fetch_market_opinion", lambda limit=10: [])
 
 # ==================== 工具 ====================
 
@@ -816,3 +824,47 @@ def test_news_fetch_endpoint_requires_internal_token(monkeypatch):
     _stub_search(monkeypatch, lambda *a, **k: pytest.fail("未鉴权的请求不该进入业务逻辑"))
     r = TestClient(main.app).post("/api/v1/news/fetch", json={"symbol": "600519"})
     assert r.status_code == 401
+
+
+# ==================== 社区舆论（股吧人气榜） ====================
+
+def test_fetch_market_opinion_summarizes_top10(monkeypatch):
+    """舆论源（LEVEL_FORUM 的数据，2026-10 接入）：一天一条汇总，不是一名一条。"""
+    import pandas as pd
+    monkeypatch.setattr(news_client.akshare, "stock_hot_rank_em", lambda: pd.DataFrame([
+        {"当前排名": 1, "代码": "SH601127", "股票名称": "赛力斯", "最新价": 46.94, "涨跌额": 0.13, "涨跌幅": 0.28},
+        {"当前排名": 2, "代码": "SH600418", "股票名称": "江淮汽车", "最新价": 27.47, "涨跌额": 1.51, "涨跌幅": 5.49},
+    ]))
+    items = _REAL_MARKET_OPINION()
+    assert len(items) == 1
+    item = items[0]
+    assert item["source_level"] == news_client.LEVEL_FORUM
+    assert "赛力斯" in item["title"] and "居首" in item["title"]
+    assert "人气榜前十" in item["content"] and "江淮汽车" in item["content"]
+    assert item["published_at"]  # 榜单条目也要有时间，否则进不了时间轴
+
+
+def test_fetch_market_opinion_retries_once_then_degrades(monkeypatch):
+    """上游秒级限流是常态：一次重试后再失败必须降级为空，而不是抛异常。"""
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        raise ConnectionError("Remote end closed connection")
+
+    monkeypatch.setattr(news_client.akshare, "stock_hot_rank_em", flaky)
+    monkeypatch.setattr(news_client.time, "sleep", lambda s: None)
+    assert _REAL_MARKET_OPINION() == []
+    assert calls["n"] == 2  # 首次 + 一次重试，不无限重试
+
+
+def test_search_news_without_symbol_includes_opinion(monkeypatch):
+    """大盘口径：舆情源进聚合（此前是'暂无数据源'的空占位）。"""
+    monkeypatch.setattr(news_client, "fetch_market_opinion", lambda: [
+        {"symbol": "", "name": "", "title": "股吧人气榜", "content": "前十",
+         "url": "", "source_level": 4, "source_name": "东方财富·股吧",
+         "event_type_raw": "", "published_at": "2026-10-02 12:00:00"}])
+    monkeypatch.setattr(news_client, "fetch_announcements", lambda: [])
+    monkeypatch.setattr(news_client, "fetch_market_news", lambda: [])
+    out = news_client.search_news(symbol="", keyword="", types=[4], days=1)
+    assert out["counts"]["forum"] == 1

@@ -25,6 +25,7 @@ public class NewsRetention {
     private final int macroDays;
     private final int policyDays;
     private final int geoDays;
+    private final int opinionDays;
     private final int companyDays;
     private final int earningsDays;
     private final int industryDays;
@@ -37,6 +38,7 @@ public class NewsRetention {
             @Value("${news.retention.macro-days:30}") int macroDays,
             @Value("${news.retention.policy-days:30}") int policyDays,
             @Value("${news.retention.geo-days:30}") int geoDays,
+            @Value("${news.retention.opinion-days:7}") int opinionDays,
             @Value("${news.retention.company-days:30}") int companyDays,
             @Value("${news.retention.earnings-days:30}") int earningsDays,
             @Value("${news.retention.industry-days:30}") int industryDays,
@@ -46,6 +48,7 @@ public class NewsRetention {
         this.macroDays = macroDays;
         this.policyDays = policyDays;
         this.geoDays = geoDays;
+        this.opinionDays = opinionDays;
         this.companyDays = companyDays;
         this.earningsDays = earningsDays;
         this.industryDays = industryDays;
@@ -60,6 +63,7 @@ public class NewsRetention {
                 NewsCategory.MACRO, macroDays,
                 NewsCategory.POLICY, policyDays,
                 NewsCategory.GEO, geoDays,
+                NewsCategory.OPINION, opinionDays,
                 NewsCategory.COMPANY, companyDays,
                 NewsCategory.EARNINGS, earningsDays,
                 NewsCategory.INDUSTRY, industryDays);

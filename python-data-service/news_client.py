@@ -18,6 +18,7 @@
 import html
 import logging
 import re
+import time
 from datetime import date, datetime, timedelta
 
 # 资讯窗口按北京时间口径：published_at 是北京时间字符串，Docker 镜像默认 UTC 时
@@ -370,6 +371,60 @@ def is_about_the_stock(item: dict):
     if code:
         return True if code in title else None
     return None
+
+
+def fetch_market_opinion(limit: int = 10) -> list[dict]:
+    """社区舆论（东方财富股吧人气榜 `stock_hot_rank_em`）—— LEVEL_FORUM 的数据源。
+
+    <h3>形态：一天一条汇总，而不是一名一条</h3>
+    人气榜是**榜单**不是事件流：拆成"第1名赛力斯""第2名江淮汽车"十条，
+    时间轴上会同时出现十条同一时刻的碎片，读起来像刷屏。汇总成一条
+    （榜首进标题、前十进正文），既保留榜单全貌，又不挤占时间轴。
+
+    <h3>时效语义</h3> published_at 用取数时刻：榜单每分钟都在变，落库后
+    靠保留期清理（舆论热度 7 天）滚动，不追求"分钟级准确的存档"。
+    """
+    try:
+        df = akshare.stock_hot_rank_em()
+    except Exception as first:  # noqa: BLE001
+        # 人气榜上游有秒级限流（实测连续调用会被 RemoteDisconnected 拒掉），
+        # 等 5 秒重试一次；再失败就按空结果降级 —— 舆论是增强源，缺一天不影响主流程
+        logger.warning("股吧人气榜取数失败（5s 后重试一次）: %s", first)
+        time.sleep(5)
+        try:
+            df = akshare.stock_hot_rank_em()
+        except Exception as second:  # noqa: BLE001
+            logger.warning("股吧人气榜重试仍失败: %s", second)
+            return []
+    if df is None or df.empty:
+        return []
+
+    def _cell(row, col):
+        try:
+            return str(row[col]).strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    top = df.head(max(1, int(limit)))
+    lines, leader = [], ""
+    for _, row in top.iterrows():
+        name = _cell(row, "股票名称") or _cell(row, "代码")
+        rank = _cell(row, "当前排名")
+        change = _cell(row, "涨跌幅")
+        if not leader:
+            leader = f"{name}（第{rank}名）"
+        pct = f"，涨跌幅 {change}%" if change else ""
+        lines.append(f"{rank}. {name}{pct}")
+    if not lines:
+        return []
+    published = datetime.now(CN_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    return [_event(
+        title=f"股吧人气榜：{leader}居首",
+        content="东财股吧人气榜前十：" + "；".join(lines),
+        source_level=LEVEL_FORUM,
+        source_name="东方财富·股吧",
+        published_at=published,
+    )]
 
 
 def fetch_market_news() -> list[dict]:
@@ -764,15 +819,25 @@ def search_news(symbol: str = "", keyword: str = "", types: list[int] | None = N
     这正是 spec §1.2 明确反对的资讯噪音。所以只有 `symbol` 为空（用户在搜宏观/关键词）
     才带上快讯。
     """
-    wanted = set(int(t) for t in types) if types else set(SOURCES_WITH_DATA)
+    # 默认信源：有数据的三源；大盘口径（无标的）自动带上舆情（人气榜）——
+    # 个股默认不带：股吧榜单没有个股条目，带上了只会多一条 errors 噪音。
+    wanted = set(int(t) for t in types) if types else (
+        set(SOURCES_WITH_DATA) | ({LEVEL_FORUM} if not symbol else set()))
     keyword_text = str(keyword or "").strip().lower()
     counts = {"notice": 0, "news": 0, "report": 0, "market": 0}
     errors: list[str] = []
     collected: list[dict] = []
 
     if LEVEL_FORUM in wanted:
-        # 显式说出来，不要返回"空结果"让调用方以为"社区没人在讨论"。
-        errors.append("社区舆情暂无数据源（spec Phase C 未接入）")
+        if symbol:
+            # 人气榜是全市场榜单：个股口径下没有"这只票的舆情条目"可给。
+            # 个股的舆情信号在股吧指数（散户情绪行），不在这里。
+            errors.append("股吧人气榜仅提供大盘口径（个股舆情见股吧情绪指数）")
+        else:
+            # LEVEL_FORUM 的数据源（2026-10 接入，此前是 spec Phase C 的空占位）
+            opinion = fetch_market_opinion()
+            collected.extend(opinion)
+            counts["forum"] = len(opinion)
 
     if LEVEL_NOTICE in wanted:
         # 指定标的时走**个股公告历史**接口（否则库里只有"服务跑过的那几天"的公告 ——
@@ -843,6 +908,8 @@ def search_news(symbol: str = "", keyword: str = "", types: list[int] | None = N
             final_counts["notice"] += 1
         elif level == LEVEL_REPORT:
             final_counts["report"] += 1
+        elif level == LEVEL_FORUM:
+            final_counts["forum"] += 1
         elif level == LEVEL_MEDIA:
             # 无 symbol 的媒体条目 = 宏观快讯
             final_counts["market" if not item.get("symbol") else "news"] += 1

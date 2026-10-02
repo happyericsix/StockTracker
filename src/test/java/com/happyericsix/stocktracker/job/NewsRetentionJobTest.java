@@ -41,7 +41,7 @@ class NewsRetentionJobTest {
                 anyCollection(), any())).thenReturn(0L);
         // 全默认值：快讯 3 天、普通分类 30 天、披露类 180 天
         job = new NewsRetentionJob(repository, new NewsRetention(
-                3, 30, 30, 30, 30, 30, 30, 30, 180));
+                3, 30, 30, 30, 7, 30, 30, 30, 30, 180));
         now = LocalDateTime.now();
     }
 
@@ -72,8 +72,8 @@ class NewsRetentionJobTest {
     void everyBrowsingCategoryIsPurgedExactlyOnce() {
         job.purgeExpired();
 
-        // 7 个浏览分类 + 1 次披露类 + 1 次未分类兜底
-        verify(repository, times(7)).deleteByCategoryAndSourceLevelNotInAndPublishedAtBefore(
+        // 8 个浏览分类 + 1 次披露类 + 1 次未分类兜底
+        verify(repository, times(8)).deleteByCategoryAndSourceLevelNotInAndPublishedAtBefore(
                 anyString(), anyCollection(), any());
         verify(repository, times(1)).deleteBySourceLevelInAndPublishedAtBefore(
                 anyCollection(), any());
@@ -96,7 +96,7 @@ class NewsRetentionJobTest {
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<Collection<Integer>> levels = ArgumentCaptor.forClass(Collection.class);
-        verify(repository, times(7)).deleteByCategoryAndSourceLevelNotInAndPublishedAtBefore(
+        verify(repository, times(8)).deleteByCategoryAndSourceLevelNotInAndPublishedAtBefore(
                 anyString(), levels.capture(), any());
         for (Collection<Integer> captured : levels.getAllValues()) {
             assertEquals(List.of(1, 3), List.copyOf(captured),
