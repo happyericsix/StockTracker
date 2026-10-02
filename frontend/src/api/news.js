@@ -66,3 +66,11 @@ export const prefetchStockNews = (symbol, days = 90) => {
  * 与 freshnessLabel/freshHours（响应时实时计算的新鲜度）。
  */
 export const searchNews = (payload) => request.post('/news/search', payload)
+
+/**
+ * 手动增量刷新全市场资讯（抓上游 → 去重落库）。
+ *
+ * <p>资讯雷达的"大盘"标签读的是库；库里的全市场内容只有 refresh 落过才有。
+ * 所以大盘流首次为空时前端会自动触发一次（幂等：去重键保证重复刷新不重复入库）。
+ */
+export const refreshNews = () => request.post('/news/refresh')

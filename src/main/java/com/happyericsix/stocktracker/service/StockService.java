@@ -286,6 +286,21 @@ public class StockService {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * 自选股代码列表（纯库查询）。
+     *
+     * <p>给"只要知道有哪些票"的场景（资讯雷达的标签条）：**不走行情网关** ——
+     * 网关的名字解析依赖 Redis 缓存，Redis 不可用时那个接口整体 500，
+     * 标签条不该跟着挂。名称由调用方自行回退（显示代码）。
+     */
+    public List<String> listFavoriteSymbols(final String username) {
+        User user = userRepository.findByUsername(username)
+                .orElseThrow(() -> new IllegalArgumentException("用户不存在"));
+        return favoriteStockRepository.findByUserId(user.getId()).stream()
+                .map(FavoriteStock::getStockSymbol)
+                .collect(Collectors.toList());
+    }
+
     // ==================== 分钟 K 线（仅 A 股）====================
 
     /**

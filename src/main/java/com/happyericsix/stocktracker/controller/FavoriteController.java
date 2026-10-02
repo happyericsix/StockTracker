@@ -73,6 +73,18 @@ public class FavoriteController {
         return favorites;
     }
 
+    /**
+     * 自选股代码（纯库查询，不带行情与名称）。
+     *
+     * <p>给资讯雷达标签条这类"只要知道有哪些票"的场景做降级路径：
+     * 上面的 GET 要逐只走行情网关（Redis 缓存），缓存不可用时整体 500 ——
+     * 标签条不该因此消失。调用方拿代码自行显示（前端剥掉 SH/SZ 前缀）。
+     */
+    @GetMapping("/brief")
+    public List<String> getFavoriteSymbols(Authentication authentication) {
+        return stockService.listFavoriteSymbols(authentication.getName());
+    }
+
     @DeleteMapping("/{symbol}")
     public Result<String> deleteFavoriteStocks(
             @PathVariable String symbol,

@@ -15,5 +15,8 @@ export const searchStock = (keyword, signal) =>
 // 不再混在 /stocks/**（那是市场数据，且 /{stockSymbol} 是通配路径段）。
 // 后端对应 FavoriteController；契约未变：GET 是裸数组，POST/DELETE 是 Result 信封。
 export const getFavorites = () => request.get('/user/favorites')
+// 纯库查询的自选代码列表（无行情/名称）：getFavorites 走行情网关（Redis 缓存），
+// 缓存不可用会整体 500 —— 标签条这类场景用它降级，代码剥前缀显示。
+export const getFavoritesBrief = () => request.get('/user/favorites/brief')
 export const addFavorite = (symbol, buyPrice, quantity) => request.post('/user/favorites', { symbol, buyPrice, quantity })
 export const deleteFavorite = (symbol) => request.delete(`/user/favorites/${symbol}`)
