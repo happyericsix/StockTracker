@@ -7,6 +7,7 @@ import { getSentiment } from '../api/market.js'
 import { anchorDateFor as anchorOnAxis } from '../utils/newsAnchor.js'
 import { useMarketStatus } from '../composables/useMarketStatus.js'
 import AppIcon from '../components/AppIcon.vue'
+import InfoTip from '../components/InfoTip.vue'
 import * as echarts from 'echarts'
 
 const route = useRoute()
@@ -1306,7 +1307,7 @@ const macdColor = (h) => h == null
         </div>
 
         <div class="event-head">
-          <h2 id="event-heading">事件与解读</h2>
+          <h2 id="event-heading">事件与解读 <InfoTip label="解读免责说明" text="解读由 AI 生成，仅供参考，不构成投资建议。" /></h2>
           <p v-if="eventsError" class="event-error" role="alert">{{ eventsError }}</p>
           <!-- 首屏：骨架屏而不是一行"加载中"。用户的原话是"点进来过了几秒才有新闻内容"，
                而那几秒里原来是整块空白 —— 骨架屏至少把"这里马上会有东西"说清楚。 -->
@@ -1424,9 +1425,6 @@ const macdColor = (h) => h == null
         >
           {{ showAllEvents ? '收起' : `展开全部 ${events.length} 条` }}
         </button>
-
-        <!-- spec §10：任何 AI 输出都要带免责标识 -->
-        <p class="event-notice">AI 生成内容，仅供参考，不构成投资建议</p>
       </aside>
     </main>
   </div>
@@ -1610,7 +1608,7 @@ main > .market-notice { grid-area: notice; }
   line-height: 1.5;
   color: var(--color-text-primary);
 }
-.event-empty, .event-notice {
+.event-empty {
   margin: 8px 0 0;
   font-size: 13px;
   line-height: 1.6;
@@ -1621,7 +1619,6 @@ main > .market-notice { grid-area: notice; }
   font-size: 13px;
   color: var(--color-danger);
 }
-.event-notice { font-size: 11px; }
 
 /* 后台补解读的进度。它必须**看起来像进度**而不是错误：
    用的是次级文字色 + 一个呼吸点，不是红色、也不是警示橙。 */

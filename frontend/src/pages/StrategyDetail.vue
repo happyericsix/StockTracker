@@ -2,6 +2,7 @@
 <script setup>
 import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import InfoTip from '../components/InfoTip.vue'
 import * as echarts from 'echarts'
 import {
   listStrategies,
@@ -808,8 +809,7 @@ onUnmounted(() => {
         <section class="card diagnostic-card">
           <div class="diagnostic-head">
             <div>
-              <h3>模型诊断</h3>
-              <p>仅作低权重参考，不参与策略买卖决策</p>
+              <h3>模型诊断 <InfoTip label="模型诊断说明" :text="diagnostic.disclaimer || '模型诊断仅作低权重参考，不参与策略买卖决策，不构成投资建议。'" /></h3>
             </div>
             <button type="button" class="btn-diagnostic" :disabled="diagnosticLoading" @click="loadDiagnostic">
               {{ diagnosticLoading ? '加载中...' : diagnosticData ? '重新加载' : '加载模型诊断' }}
@@ -853,7 +853,6 @@ onUnmounted(() => {
                 <div v-else class="empty">模型共识不可用</div>
               </div>
             </div>
-            <p class="disclaimer">{{ diagnostic.disclaimer || '模型诊断仅作低权重参考，不构成投资建议。' }}</p>
           </template>
         </section>
 
@@ -1191,7 +1190,6 @@ onUnmounted(() => {
   flex-wrap: wrap;
 }
 .diagnostic-head h3 { margin: 0; }
-.diagnostic-head p { margin: 4px 0 0; color: var(--color-text-muted); font-size: 12px; }
 .btn-diagnostic {
   padding: 7px 14px;
   border: none;
@@ -1227,12 +1225,6 @@ onUnmounted(() => {
   color: var(--color-text-secondary);
 }
 .diagnostic-meta b { color: var(--color-text-primary); }
-.disclaimer {
-  margin: 12px 0 0;
-  color: var(--color-text-muted);
-  font-size: 12px;
-}
-
 .account-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));

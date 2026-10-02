@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { getStock, getFavorites, addFavorite, deleteFavorite } from '../api/stock.js'
 import StockSearchInput from '../components/StockSearchInput.vue'
 import AppIcon from '../components/AppIcon.vue'
+import InfoTip from '../components/InfoTip.vue'
 import QrLogin from '../components/QrLogin.vue'
 import { getStatus, syncFavorites } from '../api/ths.js'
 import { prefetchStockNews } from '../api/news.js'
@@ -323,9 +324,7 @@ onBeforeUnmount(() => {
           <div class="ths-title">
             <span class="ths-dot" aria-hidden="true"></span>
             绑定同花顺账号
-          </div>
-          <div class="ths-sub">
-            绑定后自动同步你手机同花顺里的自选股，并支持以后直接扫码登录，免记密码。
+            <InfoTip label="绑定说明" text="绑定后自动同步你手机同花顺里的自选股，之后也可以直接扫码登录，免记密码。" />
           </div>
         </div>
         <div class="ths-actions">

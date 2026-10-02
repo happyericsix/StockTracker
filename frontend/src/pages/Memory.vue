@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, nextTick, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import InfoTip from '../components/InfoTip.vue'
 import {
   getMemoryOverview,
   listMemoryFacts,
@@ -225,13 +226,8 @@ onMounted(load)
 <template>
   <div class="page">
     <div class="page-head">
-      <h1>记忆</h1>
+      <h1>记忆 <InfoTip label="记忆说明" text="这里是你和助手之间被记住的内容。助手每次回答前都会参考它们，可以随时查看、撤回；助手从解决问题的过程里总结的做法，也要由你确认后才算数。" /></h1>
     </div>
-
-      <p class="intro">
-        这里是你和助手之间被记住的内容。助手每次回答前都会参考它们，所以你可以随时查看、
-        撤回；助手从解决问题的过程里总结的做法，也要由你确认后才算数。
-      </p>
 
       <!-- 结果播报：稳定的空区域先渲染再更新文本，重复播报才可靠 -->
       <p class="status" role="status">{{ status }}</p>
@@ -440,12 +436,6 @@ onMounted(load)
 <style scoped>
 
 
-.intro {
-  margin: 0 0 16px;
-  color: var(--color-text-secondary);
-  font-size: 13px;
-  line-height: 1.6;
-}
 
 /* 播报区在无内容时不占位，但始终存在于 DOM 里（live region 需要先渲染再更新） */
 .status {

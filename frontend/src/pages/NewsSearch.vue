@@ -1,7 +1,7 @@
 <template>
   <div class="page">
     <div class="page-head">
-      <h1>资讯雷达</h1>
+      <h1>资讯雷达 <InfoTip label="可信度与免责说明" text="可信度评估的是传播链路（信源/措辞/印证），判不了事实真伪；AI 解读仅供参考，不构成投资建议。" /></h1>
     </div>
 
     <!-- 搜索条件：一次提交型（不是每键入一个字就打一次后端） -->
@@ -104,9 +104,7 @@
         class="load-more"
         :disabled="loadingMore"
         @click="loadMore"
-      >{{ loadingMore ? '加载中…' : '加载更多' }}</button>
-
-      <p class="notice">可信度评估的是传播链路（信源/措辞/印证），判不了事实真伪；AI 解读仅供参考，不构成投资建议。</p>
+        >{{ loadingMore ? '加载中…' : '加载更多' }}</button>
   </div>
 </template>
 
@@ -114,6 +112,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import AppIcon from '../components/AppIcon.vue'
+import InfoTip from '../components/InfoTip.vue'
 import { searchNews } from '../api/news.js'
 
 const router = useRouter()
@@ -335,7 +334,6 @@ onMounted(() => {
   font-size: 13px;
   cursor: pointer;
 }
-.notice { margin-top: 18px; font-size: 12px; color: var(--color-text-muted); }
 .error { color: var(--color-danger); }
 .empty { color: var(--color-text-muted); padding: 24px 0; text-align: center; }
 </style>
