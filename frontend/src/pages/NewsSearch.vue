@@ -92,6 +92,16 @@
       <span v-if="sentimentVerdict" class="sentiment-verdict">{{ sentimentVerdict }}</span>
     </div>
 
+    <!-- 「当前怎么看」：结合这批事件的整体判断（与 K 线页同一接口）。
+         拿不到时整块不显示 —— "这次给不出结论"是合法状态，不占位不空话 -->
+    <div v-if="mode === 'stock' && stockRead" class="stock-read">
+      <p class="stock-read-label">当前怎么看</p>
+      <p class="stock-read-text">{{ stockRead }}</p>
+    </div>
+    <p v-else-if="mode === 'stock' && stockReadLoading" class="progress-line" role="status">
+      正在综合近期资讯生成判断…（约需几秒）
+    </p>
+
     <!-- 大盘首次空库：增量刷新要把上游抓一遍（十几秒），把状态说出来 -->
     <p v-if="marketRefreshing" class="progress-line" role="status">
       首次查看，正在同步大盘资讯，可能需要十几秒…
@@ -214,7 +224,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import AppIcon from '../components/AppIcon.vue'
 import InfoTip from '../components/InfoTip.vue'
-import { searchNews, getStockEvents, refreshNews, getEventBody } from '../api/news.js'
+import { searchNews, getStockEvents, refreshNews, getEventBody, getStockRead } from '../api/news.js'
 import { getFavorites, getFavoritesBrief } from '../api/stock.js'
 import { getSentiment } from '../api/market.js'
 
@@ -291,6 +301,30 @@ const sentimentVerdict = computed(() => {
   if (!v) return ''
   return v.verdict || ''
 })
+
+// ---------- 「当前怎么看」：读完这批事件后的一段连贯整体判断 ----------
+// 逐条方向标签把"所以呢"的综合责任推回给了用户；这一块才是
+// "结合整体新闻给出怎么看"的答案。与 K 线页同一接口同一语义。
+const stockRead = ref('')
+const stockReadLoading = ref(false)
+let readSeq = 0
+const loadStockRead = async (symbol) => {
+  const seq = ++readSeq
+  stockRead.value = ''
+  stockReadLoading.value = true
+  try {
+    // 与事件流并行：后端 /stock-read 内部会等在途补解读结束再合成，
+    // 顺序发会让用户等两次（先解读、再合成）
+    const res = await getStockRead(symbol, STOCK_DAYS)
+    if (seq !== readSeq) return
+    stockRead.value = typeof res?.data === 'string' ? res.data : ''
+  } catch {
+    // 综合判断是增强信息：拿不到就整块不显示（后端 data=null 是合法状态）
+    if (seq === readSeq) stockRead.value = ''
+  } finally {
+    if (seq === readSeq) stockReadLoading.value = false
+  }
+}
 
 const PAGE_SIZE = 20
 // 个股流走 /news/events 时间轴：窗口给 30 天（比 K 线页的 90 天克制，
@@ -578,6 +612,7 @@ const selectStock = (symbol) => {
   activeCategory.value = ''
   load()
   loadSentiment(symbol)
+  loadStockRead(symbol)
 }
 const toggleSearch = () => {
   searchOpen.value = !searchOpen.value
@@ -728,6 +763,24 @@ onUnmounted(stopAnalysisPolling)
 }
 .sentiment-metrics { display: inline-flex; gap: 12px; color: var(--color-text-primary); }
 .sentiment-verdict { color: var(--color-text-muted); }
+.stock-read {
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius-lg);
+  background: var(--color-accent-soft);
+}
+.stock-read-label {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-accent);
+}
+.stock-read-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--color-text-primary);
+}
 .progress-line {
   margin: 0 0 12px;
   font-size: 12px;
