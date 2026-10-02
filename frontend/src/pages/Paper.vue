@@ -122,16 +122,11 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="app-layout">
-    <header>
+  <div class="page">
+    <div class="page-head">
       <h1>模拟盘</h1>
-      <div class="header-actions">
-        <button type="button" class="nav-btn" @click="goStrategies">策略库</button>
-        <button type="button" class="nav-btn" @click="goDashboard">← 返回</button>
-      </div>
-    </header>
+    </div>
 
-    <main>
       <p class="page-hint">
         每个交易日 <strong>15:30</strong> 自动结算一次；切到多角色委员会的策略只在日线结算时决策。
         下面每条策略都直接回答四件事：<strong>在跑什么、赚没赚、今天动没动、下次什么时候</strong>。
@@ -267,16 +262,11 @@ onMounted(load)
           </div>
         </template>
       </section>
-    </main>
   </div>
 </template>
 
 <style scoped>
-.app-layout {
-  min-height: 100vh;
-  min-height: 100dvh;
-  background: var(--color-bg-page);
-}
+
 header {
   background: var(--color-bg-inverse);
   color: var(--color-text-inverse);
@@ -287,16 +277,8 @@ header {
   align-items: center;
 }
 header h1 { margin: 0; font-size: 20px; }
-.header-actions { display: flex; gap: 8px; }
-.nav-btn {
-  background: color-mix(in srgb, var(--color-text-inverse) 15%, transparent);
-  border: none;
-  color: var(--color-text-inverse);
-  padding: 6px 14px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  font-size: 13px;
-}
+
+
 .nav-btn:hover { background: color-mix(in srgb, var(--color-text-inverse) 25%, transparent); }
 
 main { max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }

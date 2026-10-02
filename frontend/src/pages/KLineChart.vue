@@ -298,12 +298,12 @@ const errorMessage = (e, fallback) => e?.response?.data?.message || fallback
 
 
 const SOURCE_META = {
-  1: { icon: '📢', label: '公告' },
-  2: { icon: '📰', label: '媒体' },
-  3: { icon: '📊', label: '研报' },
-  4: { icon: '💬', label: '舆情' }
+  1: { icon: 'megaphone', label: '公告' },
+  2: { icon: 'newspaper', label: '媒体' },
+  3: { icon: 'doc', label: '研报' },
+  4: { icon: 'globe', label: '舆情' }
 }
-const sourceMeta = (level) => SOURCE_META[level] || { icon: '📄', label: '资讯' }
+const sourceMeta = (level) => SOURCE_META[level] || { icon: 'doc', label: '资讯' }
 
 const eventCounts = computed(() => {
   const counts = { notice: 0, media: 0, report: 0 }
@@ -1144,10 +1144,12 @@ const macdColor = (h) => h == null
 
 <template>
   <div class="kline-page">
-    <header>
-      <button class="back" @click="router.back()">← 返回</button>
+    <div class="page-head">
+      <div class="page-actions" style="margin-right:auto">
+        <button type="button" class="btn quiet" @click="router.back()">← 返回</button>
+      </div>
       <h1>K 线图</h1>
-    </header>
+    </div>
 
     <div class="toolbar">
       <form class="symbol-form" @submit.prevent="onSubmit">
@@ -1358,7 +1360,8 @@ const macdColor = (h) => h == null
           >
             <div class="event-line">
               <span class="event-source">
-                {{ sourceMeta(event.sourceLevel).icon }} {{ event.sourceName || sourceMeta(event.sourceLevel).label }}
+                <AppIcon :name="sourceMeta(event.sourceLevel).icon" :size="13" :stroke-width="2" />
+                {{ event.sourceName || sourceMeta(event.sourceLevel).label }}
               </span>
               <span class="event-time num">{{ formatEventTime(event.publishedAt) }}</span>
               <span v-if="event.freshnessLabel" class="event-fresh num">{{ event.freshnessLabel }}</span>
@@ -1448,15 +1451,7 @@ header {
   flex-shrink: 0;
 }
 header h1 { margin: 0; font-size: 18px; flex: 1; }
-.back {
-  background: transparent;
-  border: 1px solid var(--color-border-control);
-  color: var(--color-text-inverse);
-  padding: 6px 12px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  font-size: 13px;
-}
+
 
 .toolbar {
   background: var(--color-bg-surface);
@@ -1809,7 +1804,10 @@ main > .market-notice { grid-area: notice; }
   font-size: 12px;
   color: var(--color-text-muted);
 }
-.event-source { color: var(--color-text-secondary); }
+.event-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px; color: var(--color-text-secondary); }
 .event-direction {
   margin-left: auto;
   padding: 1px 6px;

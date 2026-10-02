@@ -260,7 +260,6 @@ onUnmounted(() => {
 <template>
   <div class="chat-page">
     <header class="chat-header">
-      <button class="back-btn" @click="router.push('/dashboard')"><AppIcon name="chevron-left" :size="16" :stroke-width="2" /> 返回</button>
       <!-- 头像只是装饰：机器人身份已由右侧「智能助手」文字承载 -->
       <div class="bot-avatar"><AppIcon name="bot" :size="22" :stroke-width="2" /></div>
       <div class="bot-info">
@@ -328,8 +327,7 @@ onUnmounted(() => {
 .chat-page {
   display: flex;
   flex-direction: column;
-  /* 移动端地址栏会被算进 100vh，用 dvh 兜底 */
-  height: 100vh;
+  /* 壳内全高：桌面无顶栏取满 dvh；移动端扣掉固定顶栏（--shell-bar-h） */
   height: 100dvh;
   background: var(--color-bg-page);
   /* App.vue 的安装横幅固定在底部（bottom: 20px + 安全区，高约 68px），
@@ -345,18 +343,7 @@ onUnmounted(() => {
   gap: 12px;
   flex-shrink: 0;
 }
-.back-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  background: transparent;
-  border: 1px solid var(--color-border-control);
-  color: var(--color-text-inverse);
-  padding: 6px var(--space-3);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  font: var(--font-caption);
-}
+
 .bot-avatar {
   width: 38px;
   height: 38px;
@@ -568,3 +555,7 @@ onUnmounted(() => {
 }
 .send-btn:disabled { background: var(--color-accent-soft); color: var(--color-text-muted); cursor: not-allowed; }
 </style>
+
+@media (max-width: 1023px) {
+  .chat-page { height: calc(100dvh - var(--shell-bar-h)); }
+}

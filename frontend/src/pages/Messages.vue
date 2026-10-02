@@ -277,11 +277,12 @@ onUnmounted(() => {
 
 <template>
   <div class="messages-page">
-    <header class="page-header">
-      <button class="back-btn" @click="router.push('/dashboard')">← 返回</button>
+    <div class="page-head">
       <h1>消息中心</h1>
-      <button class="read-all-btn" @click="handleReadAll">全部已读</button>
-    </header>
+      <div class="page-actions">
+        <button type="button" class="btn quiet" @click="handleReadAll">全部已读</button>
+      </div>
+    </div>
 
     <!-- 这三个只是筛选按钮（同一份列表的不同视图），不是 ARIA tab 组件：
          没有 tabpanel，也就不加 role="tablist"/"tab"（加了反而要求方向键操作）。
@@ -414,25 +415,9 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
 }
-.page-header {
-  background: var(--color-bg-inverse);
-  color: var(--color-text-inverse);
-  padding: 14px 16px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-shrink: 0;
-}
-.page-header h1 { margin: 0; font-size: 18px; flex: 1; }
-.back-btn, .read-all-btn {
-  background: transparent;
-  border: 1px solid var(--color-border-control);
-  color: var(--color-text-inverse);
-  padding: 6px 12px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  font-size: 13px;
-}
+
+
+
 
 .tabs {
   display: flex;

@@ -122,11 +122,10 @@ onMounted(() => {
 
 <template>
   <div class="profile-page">
-    <header>
-      <button type="button" class="back-btn" @click="goBack"><span aria-hidden="true">←</span> 返回</button>
+    <div class="page-head">
       <h1>个人中心</h1>
-    </header>
-    <main>
+    </div>
+
       <!-- 基本信息 -->
       <section class="card">
         <h2>基本信息</h2>
@@ -202,24 +201,16 @@ onMounted(() => {
       <section class="card">
         <button type="button" class="btn btn-danger btn-full" @click="handleLogout">退出登录</button>
       </section>
-    </main>
   </div>
 </template>
 
 <style scoped>
 /* 100vh 在移动浏览器里会把地址栏高度算进去，补 100dvh 兜底 */
 .profile-page { min-height: 100vh; min-height: 100dvh; background: var(--color-bg-page); }
-/* 最外层 header：index.html 声明了 black-translucent，iOS 独立模式下内容会顶到状态栏下 */
-header {
-  background: var(--color-bg-inverse); color: var(--color-text-inverse);
-  padding: 16px 24px; padding-top: calc(16px + env(safe-area-inset-top, 0px));
-  display: flex; align-items: center; gap: 16px;
-}
-header h1 { margin: 0; font-size: 20px; }
-.back-btn { background: transparent; border: 1px solid var(--color-text-inverse); color: var(--color-text-inverse); padding: 6px 16px; border-radius: var(--radius-sm); cursor: pointer; }
-/* 旧值 rgba(255,255,255,0.1) 没有对应令牌；这里用 color-mix 从 --color-text-inverse
-   派生同样的 10% 白色叠层，不新增字面色值，渲染结果与原值一致 */
-.back-btn:hover { background: color-mix(in srgb, var(--color-text-inverse) 10%, transparent); }
+
+
+
+
 main { max-width: 600px; margin: 0 auto; padding: 24px 16px; }
 
 .card { background: var(--color-bg-surface); border-radius: var(--radius-lg); padding: 24px; margin-bottom: 16px; box-shadow: var(--shadow-1); }

@@ -225,15 +225,11 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="app-layout">
-    <header>
+  <div class="page">
+    <div class="page-head">
       <h1>记忆</h1>
-      <div class="header-actions">
-        <button type="button" class="nav-btn" @click="goDashboard">← 返回</button>
-      </div>
-    </header>
+    </div>
 
-    <main>
       <p class="intro">
         这里是你和助手之间被记住的内容。助手每次回答前都会参考它们，所以你可以随时查看、
         撤回；助手从解决问题的过程里总结的做法，也要由你确认后才算数。
@@ -440,16 +436,11 @@ onMounted(load)
           </template>
         </section>
       </template>
-    </main>
   </div>
 </template>
 
 <style scoped>
-.app-layout {
-  min-height: 100vh;
-  min-height: 100dvh;
-  background: var(--color-bg-page);
-}
+
 
 header {
   background: var(--color-bg-inverse);
@@ -463,14 +454,7 @@ header {
 
 header h1 { margin: 0; font-size: 20px; }
 
-.nav-btn {
-  background: color-mix(in srgb, var(--color-text-inverse) 15%, transparent);
-  border: none;
-  color: var(--color-text-inverse);
-  padding: 6px 14px;
-  border-radius: var(--radius-sm);
-  font-size: 13px;
-}
+
 
 .nav-btn:hover { background: color-mix(in srgb, var(--color-text-inverse) 25%, transparent); }
 

@@ -557,14 +557,13 @@ onUnmounted(() => {
 
 <template>
   <div class="app-layout">
-    <header>
+    <div class="page-head">
       <h1>策略详情</h1>
-      <div class="header-actions">
-        <button type="button" class="nav-btn" @click="goBack">← 返回策略库</button>
+      <div class="page-actions">
+        <button type="button" class="btn quiet" @click="goBack">← 返回策略库</button>
       </div>
-    </header>
+    </div>
 
-    <main>
       <!-- 状态互斥，顺序为：加载中 → 出错 → 未找到 → 有数据。
            加载失败时不再渲染任何"空"状态，
            否则会出现"没拿到数据"和"未找到该策略"同时成立的矛盾提示。 -->
@@ -1071,17 +1070,11 @@ onUnmounted(() => {
           </div>
         </section>
       </template>
-    </main>
   </div>
 </template>
 
 <style scoped>
-.app-layout {
-  /* 移动浏览器地址栏会算进 100vh，底部会被顶出可视区；补 100dvh 兜底 */
-  min-height: 100vh;
-  min-height: 100dvh;
-  background: var(--color-bg-page);
-}
+
 header {
   background: var(--color-bg-inverse);
   color: var(--color-text-inverse);
@@ -1093,20 +1086,8 @@ header {
   align-items: center;
 }
 header h1 { margin: 0; font-size: 20px; }
-.header-actions { display: flex; gap: 8px; }
-.nav-btn {
-  /* 深色导航上的半透明胶囊：语义层没有"深底上的浮起表面"这个角色，
-     用 color-mix 从 --color-text-inverse 派生，避免写死半透明白色。
-     不支持 color-mix 时该声明失效、背景回落为透明，白字直接压在深色导航上
-     仍是 17.06:1，不会出现读不清的文字。 */
-  background: color-mix(in srgb, var(--color-text-inverse) 15%, transparent);
-  border: none;
-  color: var(--color-text-inverse);
-  padding: 6px 14px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  font-size: 13px;
-}
+
+
 .nav-btn:hover { background: color-mix(in srgb, var(--color-text-inverse) 25%, transparent); }
 
 main { max-width: 820px; margin: 0 auto; padding: 24px 16px; }

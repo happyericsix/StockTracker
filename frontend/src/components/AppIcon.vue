@@ -34,7 +34,8 @@ const ICON_NAMES = [
   'trend-up', 'trend-down', 'chart', 'bot', 'book', 'database', 'smartphone',
   'bell', 'message', 'info', 'percent', 'sun', 'snow', 'sparkle',
   'arrow-down-right', 'chevron-right', 'chevron-left', 'close', 'check', 'wifi-off',
-  'search',
+  'search', 'menu', 'user', 'logout', 'home',
+  'megaphone', 'newspaper', 'doc', 'globe',
 ]
 
 if (import.meta.env.DEV && !ICON_NAMES.includes(props.name)) {
@@ -187,6 +188,60 @@ if (import.meta.env.DEV && !ICON_NAMES.includes(props.name)) {
     <template v-else-if="name === 'search'">
       <circle cx="11" cy="11" r="7" />
       <line x1="21" y1="21" x2="16.5" y2="16.5" />
+    </template>
+
+    <!-- 信源：公告（喇叭） -->
+    <template v-else-if="name === 'megaphone'">
+      <path d="M3 11l18-7-4 14-6-3-3 4-1-6z" />
+    </template>
+
+    <!-- 信源：媒体（报纸） -->
+    <template v-else-if="name === 'newspaper'">
+      <path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-4 0V9" />
+      <line x1="10" y1="6" x2="18" y2="6" />
+      <line x1="10" y1="10" x2="18" y2="10" />
+      <line x1="10" y1="14" x2="14" y2="14" />
+    </template>
+
+    <!-- 信源：研报（文档） -->
+    <template v-else-if="name === 'doc'">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+      <line x1="8" y1="13" x2="16" y2="13" />
+      <line x1="8" y1="17" x2="16" y2="17" />
+    </template>
+
+    <!-- 信源：舆情（地球） -->
+    <template v-else-if="name === 'globe'">
+      <circle cx="12" cy="12" r="10" />
+      <line x1="2" y1="12" x2="22" y2="12" />
+      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+    </template>
+
+    <!-- 菜单（三条线） -->
+    <template v-else-if="name === 'menu'">
+      <line x1="4" y1="6" x2="20" y2="6" />
+      <line x1="4" y1="12" x2="20" y2="12" />
+      <line x1="4" y1="18" x2="20" y2="18" />
+    </template>
+
+    <!-- 用户 -->
+    <template v-else-if="name === 'user'">
+      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+      <circle cx="12" cy="7" r="4" />
+    </template>
+
+    <!-- 退出 -->
+    <template v-else-if="name === 'logout'">
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+      <polyline points="16 17 21 12 16 7" />
+      <line x1="21" y1="12" x2="9" y2="12" />
+    </template>
+
+    <!-- 首页 -->
+    <template v-else-if="name === 'home'">
+      <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+      <polyline points="9 22 9 12 15 12 15 22" />
     </template>
 
     <!-- 断线/离线 -->

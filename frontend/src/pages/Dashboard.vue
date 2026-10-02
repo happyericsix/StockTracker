@@ -6,7 +6,6 @@ import StockSearchInput from '../components/StockSearchInput.vue'
 import AppIcon from '../components/AppIcon.vue'
 import QrLogin from '../components/QrLogin.vue'
 import { getStatus, syncFavorites } from '../api/ths.js'
-import { getPaperOverview } from '../api/strategy.js'
 import { prefetchStockNews } from '../api/news.js'
 import { useMarketStatus } from '../composables/useMarketStatus.js'
 import { messageBus } from '../composables/messageBus.js'
@@ -259,49 +258,11 @@ const goDetail = (sym) => {
   router.push('/chart/' + sym)
 }
 
-/**
- * 模拟盘状态：首页必须能一眼看出"它在跑"。
- *
- * <p>以前的失败方式不是算错，而是**用户根本不知道有这个功能** ——
- * 模拟盘藏在"策略库 → 某条策略 → 滚到底"，全站只有两行副标题提过它。
- * 所以这里在首页就把"运行中几条、今天结算了没、下次什么时候"摆出来。
- *
- * <p>读失败**不打扰**首页：静默降级为不显示那张卡的副标题，而不是弹一个错误 ——
- * 首页已经有很多别的信息，模拟盘状态只是"锦上添花"的那一块。
- */
-const paperStatus = ref(null)
-
-const loadPaperStatus = async () => {
-  try {
-    const res = await getPaperOverview()
-    const list = Array.isArray(res.data) ? res.data : []
-    const running = list.filter((item) => item.paperEnabled)
-    const today = new Date().toLocaleDateString('sv-SE')
-    paperStatus.value = {
-      running: running.length,
-      total: list.length,
-      settledToday: running.filter((item) => item.lastSettlement?.tradeDate === today).length,
-      nextNote: running[0]?.nextEvaluationNote || ''
-    }
-  } catch (e) {
-    paperStatus.value = null
-  }
-}
-
-const goAssistant = () => router.push('/assistant')
-const goNews = () => router.push('/news')
-const goStrategies = () => router.push('/strategies')
-const goPaper = () => router.push('/paper')
-const goMemory = () => router.push('/memory')
-const goMessages = () => router.push('/messages')
-const goAlerts = () => router.push('/alerts')
 const goAddAlert = (sym) => router.push({ path: '/alerts', query: { symbol: sym, new: '1' } })
-const goProfile = () => router.push('/profile')
 
 onMounted(() => {
   loadFavorites()
   loadThsStatus()
-  loadPaperStatus()
   // 市场状态与其他几项并行：它只用来把"这些价格是哪天的"说清楚，不该拖慢首页
   void market.load()
   messageBus.connect()
@@ -318,31 +279,11 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app-layout">
-    <header>
-      <h1>Stock Tracker</h1>
-      <div class="header-actions">
-        <button type="button" class="nav-btn assistant-nav" @click="goAssistant">
-          <AppIcon name="bot" :size="16" :stroke-width="2" /> 智能助手
-        </button>
-        <button type="button" class="nav-btn" @click="goMessages">
-          消息
-          <span
-            v-if="messageBus.unread > 0"
-            class="unread-badge num"
-            :aria-label="`${messageBus.unread} 条未读消息`"
-          >{{ messageBus.unread > 99 ? '99+' : messageBus.unread }}</span>
-        </button>
-        <button type="button" class="nav-btn" @click="goPaper">
-          模拟盘
-          <span v-if="paperStatus && paperStatus.running > 0" class="unread-badge num"
-            :aria-label="`${paperStatus.running} 条模拟盘在跑`">{{ paperStatus.running }}</span>
-        </button>
-        <button type="button" class="nav-btn" @click="goAlerts">预警</button>
-        <button type="button" class="nav-btn" @click="goProfile">我的</button>
-      </div>
-    </header>
-    <main>
+  <div class="page">
+    <div class="page-head">
+      <h1>自选行情</h1>
+    </div>
+
       <!-- 休市提示：整页最该先说清的一件事。
            休市日行情接口返回的仍是上一交易日的收盘价与涨跌幅，而"昨收"这个词
            本身说明不了"今天不开市"—— 用户报的正是这个。
@@ -354,67 +295,11 @@ onBeforeUnmount(() => {
         <span v-if="marketNotice.detail" class="market-detail">{{ marketNotice.detail }}</span>
       </p>
 
-      <section class="feature-grid">
-        <button type="button" class="feature-card assistant-entry" @click="goAssistant">
-          <span class="feature-icon"><AppIcon name="bot" :size="26" :stroke-width="2" /></span>
-          <span class="feature-copy">
-            <strong>智能助手</strong>
-            <span>自然语言查行情、生成交易策略、回测与模拟盘</span>
-          </span>
-          <span class="feature-arrow"><AppIcon name="chevron-right" :size="22" :stroke-width="2" /></span>
-        </button>
-
-        <button type="button" class="feature-card news-entry" @click="goNews">
-          <span class="feature-icon"><AppIcon name="search" :size="26" :stroke-width="2" /></span>
-          <span class="feature-copy">
-            <strong>资讯雷达</strong>
-            <span>搜全市场公告/媒体/研报，每条带可信度与时效标注</span>
-          </span>
-          <span class="feature-arrow"><AppIcon name="chevron-right" :size="22" :stroke-width="2" /></span>
-        </button>
-
-        <button type="button" class="feature-card strategy-entry" @click="goStrategies">
-          <span class="feature-icon"><AppIcon name="book" :size="26" :stroke-width="2" /></span>
-          <span class="feature-copy">
-            <strong>策略库</strong>
-            <span>统一管理策略、回测与模拟盘</span>
-          </span>
-          <span class="feature-arrow"><AppIcon name="chevron-right" :size="22" :stroke-width="2" /></span>
-        </button>
-
-        <button type="button" class="feature-card paper-entry" @click="goPaper">
-          <span class="feature-icon"><AppIcon name="chart" :size="26" :stroke-width="2" /></span>
-          <span class="feature-copy">
-            <strong>模拟盘</strong>
-            <!-- 有状态就报状态：一眼看出"它在跑、今天结算了没、下次什么时候" -->
-            <span v-if="paperStatus && paperStatus.running > 0">
-              运行中 {{ paperStatus.running }} 条 · 今日已结算 {{ paperStatus.settledToday }} 条<template
-                v-if="paperStatus.nextNote"
-              ><br />{{ paperStatus.nextNote }}</template>
-            </span>
-            <span v-else-if="paperStatus && paperStatus.total > 0">
-              还没有运行中的模拟盘 —— 打开看看哪条策略可以启动
-            </span>
-            <span v-else>用虚拟资金按真实规则跑策略：每天 15:30 结算一次</span>
-          </span>
-          <span class="feature-arrow"><AppIcon name="chevron-right" :size="22" :stroke-width="2" /></span>
-        </button>
-
-        <button type="button" class="feature-card memory-entry" @click="goMemory">
-          <span class="feature-icon"><AppIcon name="database" :size="26" :stroke-width="2" /></span>
-          <span class="feature-copy">
-            <strong>记忆</strong>
-            <span>看看助手记住了你什么，随时撤回</span>
-          </span>
-          <span class="feature-arrow"><AppIcon name="chevron-right" :size="22" :stroke-width="2" /></span>
-        </button>
-      </section>
-
       <!-- ========== 同花顺绑定 ==========
            已绑定 → 显示同步状态 + 重新同步按钮
            未绑定 → 提示绑定（扫码登录进来的用户会自动是已绑定状态，
                     所以这个卡片对他们来说直接就是"已绑定"，不用再绑） -->
-      <section v-if="thsBound === true" class="ths-card bound">
+      <section v-if="thsBound === true" class="ths-card">
         <div class="ths-info">
           <div class="ths-title">
             <span class="ths-dot ok" aria-hidden="true"></span>
@@ -552,7 +437,6 @@ onBeforeUnmount(() => {
           </li>
         </ul>
       </section>
-    </main>
 
     <!-- ========== 绑定同花顺弹窗（mode=bind：带 JWT，绑定到当前登录账号） ========== -->
     <div v-if="showBindModal" class="modal-mask" @click.self="closeBind">
@@ -575,210 +459,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.app-layout {
-  /* 100dvh 兜底：移动浏览器地址栏会算进 100vh，导致内容底部被顶出可视区 */
-  min-height: 100vh;
-  min-height: 100dvh;
-  background: var(--color-bg-page);
-}
-
-/* 用 `.app-layout > header` 而不是裸 `header`：
-   裸元素选择器会命中组件里**任何** header 元素 —— 行情卡里那个语义正确的
-   <header class="quote-head"> 就被这条规则染成了顶部导航的深色底 + 白字，
-   而卡片自己的 .quote-name 又把颜色设回深墨色，实测对比度 1:1（整行不可见）。
-   组件级样式表里不要写裸元素选择器，这是一类错误，不是一次意外。 */
-.app-layout > header {
-  background: var(--color-bg-inverse);
-  color: var(--color-text-inverse);
-  /* iOS 独立模式下内容会顶到状态栏底下，让出安全区 */
-  padding: calc(16px + env(safe-area-inset-top, 0px)) 24px 16px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.app-layout > header h1 {
-  margin: 0;
-  font: var(--font-heading);
-  /* 显式声明：不要依赖从 header 继承（旧脚手架模板里的 h1 颜色规则会把它覆盖成近黑色） */
-  color: var(--color-text-inverse);
-}
-
-.header-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.nav-btn {
-  /* 角标（消息未读数、模拟盘运行数）是 .nav-btn 的绝对定位子元素，
-     所以定位基准必须由 .nav-btn 自己提供。
-     旧实现只在「消息」按钮上加了 .badge-btn{position:relative}，「模拟盘」那个没有 ——
-     它的角标于是以**视口**为基准，跑到页面右上角，并给整页带来 6px 横向溢出。 */
-  position: relative;
-  background: rgb(255 255 255 / 0.15);
-  border: none;
-  color: var(--color-text-inverse);
-  padding: 6px 14px;
-  border-radius: var(--radius-sm);
-  font-size: 13px;
-  transition: background-color var(--duration-base) var(--ease-out);
-}
-
-.nav-btn:hover {
-  background: rgb(255 255 255 / 0.25);
-}
-
-.assistant-nav {
-  background: var(--color-accent);
-  font-weight: 600;
-}
-
-.assistant-nav:hover {
-  background: var(--color-accent-hover);
-}
-
-.unread-badge {
-  position: absolute;
-  top: -6px;
-  right: -6px;
-  background: var(--color-danger);
-  color: var(--color-text-on-accent);
-  /* 角标是全站唯一的 12px（--font-micro）用途：极短、扫一眼就够。
-     旧值 10px 低于小字号下限，且细体小字会糊成一片。 */
-  font: var(--font-micro);
-  line-height: 1;
-  padding: 3px 5px;
-  border-radius: var(--radius-pill);
-  min-width: 18px;
-  text-align: center;
-}
-
-/* 同上：用子选择器限定到页面级 main，避免以后在组件里再放一个 main 时被误染 */
-.app-layout > main {
-  max-width: 760px;
-  margin: 0 auto;
-  padding: var(--space-5) var(--space-4);
-  width: 100%;
-}
-
-.feature-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-  margin-bottom: 20px;
-}
-
-/* 卡片是动作 → 用真正的 button，键盘可达。
-   圆角与行情卡、自选股卡统一走 --radius-3xl(20px)，全站卡片只有一个圆角。 */
-.feature-card {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-  color: var(--color-text-on-accent);
-  border: none;
-  border-radius: var(--radius-3xl);
-  padding: var(--space-4) var(--space-5);
-  font: inherit;
-  text-align: left;
-  transition: transform var(--duration-base) var(--ease-out),
-    box-shadow var(--duration-base) var(--ease-out);
-}
-
-.feature-card:hover {
-  transform: translateY(-1px);
-}
-
-/* 渐变浅端要保证白字 >=4.5:1。旧值 #1677ff→#69b1ff 在浅端只有 2.25:1，
-   策略卡旧值 #722ed1→#b37feb 浅端只有 2.94:1 */
-.assistant-entry {
-  background: linear-gradient(135deg, var(--c-blue-800) 0%, var(--c-blue-700) 100%);
-  box-shadow: 0 8px 20px rgb(0 62 179 / 0.22);
-}
-
-.assistant-entry:hover {
-  box-shadow: 0 10px 24px rgb(0 62 179 / 0.3);
-}
-
-.strategy-entry {
-  background: linear-gradient(135deg, var(--c-purple-800) 0%, var(--c-purple-700) 100%);
-  box-shadow: 0 8px 20px rgb(83 29 171 / 0.22);
-}
-
-.strategy-entry:hover {
-  box-shadow: 0 10px 24px rgb(83 29 171 / 0.3);
-}
-
-/* 记忆卡：沿用项目原始色板里的绿色，深端 #135200 配白字 9.40:1、
-   浅端 #237804 配白字 5.59:1，两端都过 AA（渐变浅端最容易踩这个坑） */
-.memory-entry {
-  background: linear-gradient(135deg, var(--c-green-800) 0%, var(--c-green-700) 100%);
-  box-shadow: 0 8px 20px rgb(19 82 0 / 0.22);
-}
-
-.memory-entry:hover {
-  box-shadow: 0 10px 24px rgb(19 82 0 / 0.3);
-}
-
-/* 模拟盘卡：这条规则以前**根本不存在** —— 模板里有 class="paper-entry"，
-   但没有对应的样式，于是它既没有背景也没有阴影，却继承了 .feature-card 的
-   白字（--color-text-on-accent），实测白字压页面底 #f0f2f5 只有 1.12:1，
-   整张卡（含标题、副标题、emoji）在屏幕上不可见。
-   上一次评审把 /dashboard 的 4 张渐变卡整批排除在对比度测量之外，正好漏掉了这一张。
-   取橙色：不与另外三张撞色，两端对白字实测 8.09:1 / 5.43:1，都过 AA。 */
-.paper-entry {
-  background: linear-gradient(135deg, var(--c-orange-900) 0%, var(--c-orange-800) 100%);
-  box-shadow: 0 8px 20px rgb(135 56 0 / 0.22);
-}
-
-.paper-entry:hover {
-  box-shadow: 0 10px 24px rgb(135 56 0 / 0.3);
-}
-
-/* 图标槽：**没有**背景块、没有圆角。
-   原先这里是一个 46×46 的半透明白色圆角方块，四张渐变卡各一个 —— 它是"AI 生成感"
-   的典型构件：不承载任何信息，只是给图标垫一个形状。删掉之后图标直接与标题对齐，
-   卡片层次由渐变和文字自己承担，少一层没有含义的装饰。
-   图标用 2px 描边，因为旁边的标题是 600 字重（better-ui：描边要匹配文字的光学重量）。 */
-.feature-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  flex-shrink: 0;
-}
-
-.feature-copy {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  min-width: 0;
-}
-
-.feature-copy strong {
-  font: var(--font-heading);
-}
-
-/* 13px 而不是 12px：这是会折行的说明文字，不是徽章。
-   四张渐变的两端对白字实测 8.09–9.85:1，13px 也稳过 AA。 */
-.feature-copy span {
-  font: var(--font-caption);
-}
-
-.feature-arrow {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-}
-
-@media (max-width: 640px) {
-  .feature-grid {
-    grid-template-columns: 1fr;
-  }
-}
+/* 页面骨架（.page/.page-head）与导航已迁入 AppShell + style.css 全局层 */
 
 .search-section {
   display: flex;
@@ -1095,11 +776,6 @@ onBeforeUnmount(() => {
   gap: 16px;
   flex-wrap: wrap;
   box-shadow: var(--shadow-1);
-  border-left: 3px solid var(--color-warning-mark);
-}
-
-.ths-card.bound {
-  border-left-color: var(--color-success-mark);
 }
 
 .ths-title {

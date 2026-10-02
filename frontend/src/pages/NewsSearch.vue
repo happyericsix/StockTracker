@@ -1,13 +1,9 @@
 <template>
-  <div class="app-layout">
-    <header>
+  <div class="page">
+    <div class="page-head">
       <h1>资讯雷达</h1>
-      <div class="header-actions">
-        <button type="button" class="nav-btn" @click="goDashboard">← 返回</button>
-      </div>
-    </header>
+    </div>
 
-    <main>
       <p class="intro">
         全市场资讯搜索：按关键词或标的找事件，每条都带<b>可信度</b>（信源 + 措辞 + 交叉印证）
         与<b>时效</b>标注 —— 先看"这条该不该信、还新不新鲜"，再看 AI 解读。
@@ -72,7 +68,10 @@
       <ul v-if="results.length" class="result-list">
         <li v-for="event in results" :key="event.id" class="result-card">
           <div class="meta-line">
-            <span class="source">{{ sourceMeta(event.sourceLevel).icon }} {{ event.sourceName || sourceMeta(event.sourceLevel).label }}</span>
+            <span class="source">
+              <AppIcon :name="sourceMeta(event.sourceLevel).icon" :size="13" :stroke-width="2" />
+              {{ event.sourceName || sourceMeta(event.sourceLevel).label }}
+            </span>
             <span class="time num">{{ formatTime(event.publishedAt) }}</span>
             <span v-if="event.freshnessLabel" class="fresh num">{{ event.freshnessLabel }}</span>
             <span
@@ -113,13 +112,13 @@
       >{{ loadingMore ? '加载中…' : '加载更多' }}</button>
 
       <p class="notice">可信度评估的是传播链路（信源/措辞/印证），判不了事实真伪；AI 解读仅供参考，不构成投资建议。</p>
-    </main>
   </div>
 </template>
 
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import AppIcon from '../components/AppIcon.vue'
 import { searchNews } from '../api/news.js'
 
 const router = useRouter()
@@ -132,10 +131,10 @@ const LEVEL_OPTIONS = [
 ]
 const DAY_OPTIONS = [3, 7, 30, 90]
 const SOURCE_META = {
-  1: { icon: '📢', label: '公告' },
-  2: { icon: '📰', label: '媒体' },
-  3: { icon: '📄', label: '研报' },
-  4: { icon: '🌐', label: '舆情' },
+  1: { icon: 'megaphone', label: '公告' },
+  2: { icon: 'newspaper', label: '媒体' },
+  3: { icon: 'doc', label: '研报' },
+  4: { icon: 'globe', label: '舆情' },
 }
 
 const form = reactive({
@@ -158,7 +157,7 @@ const searched = ref(false)
 
 const hasMore = ref(false)
 
-const sourceMeta = (level) => SOURCE_META[level] || { icon: '·', label: '资讯' }
+const sourceMeta = (level) => SOURCE_META[level] || { icon: 'doc', label: '资讯' }
 
 const credibilityClass = (grade) => {
   if (grade === '高' || grade === '较高') return 'cred-good'
@@ -302,7 +301,7 @@ onMounted(() => {
   background: var(--color-bg-surface);
 }
 .meta-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
-.meta-line .source { color: var(--color-text-secondary); }
+.meta-line .source { color: var(--color-text-secondary); display: inline-flex; align-items: center; gap: 4px; }
 .meta-line .time { color: var(--color-text-muted); }
 .meta-line .fresh { color: var(--color-text-muted); }
 .credibility {

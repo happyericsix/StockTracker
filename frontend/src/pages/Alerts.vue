@@ -563,17 +563,13 @@ onMounted(async () => {
 
   <div class="alerts-page">
 
-    <header>
-
-      <button class="back-btn" @click="goBack"><AppIcon name="chevron-left" :size="16" :stroke-width="2" /> 返回</button>
-
+    <div class="page-head">
       <h1>预警设置</h1>
+      <div class="page-actions">
+        <button type="button" class="btn primary" @click="openAdd">+ 添加预警</button>
+      </div>
+    </div>
 
-      <button class="add-btn" @click="openAdd">+ 添加预警</button>
-
-    </header>
-
-    <main>
 
       <!-- 添加/编辑表单 -->
 
@@ -716,7 +712,7 @@ onMounted(async () => {
 
       </div>
 
-    </main>
+    
 
   </div>
 
@@ -732,59 +728,18 @@ onMounted(async () => {
   background: var(--color-bg-page);
 }
 
-/* 用子选择器限定到页面级 chrome。裸元素选择器会命中组件里**任何** header/main ——
-   Dashboard 那次"行情卡头部白字压深蓝、对比度 1:1"就是这么来的（见那里的注释）。
-   这里目前只有一个页面级 header/main，但那是"碰巧没事"，不是"构造上没事"。 */
-.alerts-page > header {
-  background: var(--color-bg-inverse);
-  color: var(--color-text-inverse);
-  /* iOS 独立模式（black-translucent）内容会顶到状态栏下，让出顶部安全区 */
-  padding: calc(var(--space-4) + env(safe-area-inset-top, 0px)) var(--space-5) var(--space-4);
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-}
 
-.alerts-page > header h1 {
-  margin: 0;
-  font: var(--font-heading);
-  color: var(--color-text-inverse);
-  flex: 1;
-}
 
-.back-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  background: transparent;
-  border: 1px solid var(--color-text-inverse);
-  color: var(--color-text-inverse);
-  padding: 6px var(--space-4);
-  border-radius: var(--radius-sm);
-  font: var(--font-ui);
-  cursor: pointer;
-}
 
-/* 原 #fa8c16 配白字只有 2.38:1（严重不达标），换警示色 5.43:1 */
-.add-btn {
-  background: var(--color-warning);
-  border: none;
-  color: var(--color-text-on-accent);
-  padding: 6px var(--space-4);
-  border-radius: var(--radius-sm);
-  font: var(--font-ui);
-  font-weight: 500;
-  cursor: pointer;
-}
+
+
+
+
 
 /* 悬停不再换更浅的橙（#ffa940 配白字只有 3.5:1），改为整体压暗，文字对比度只增不减 */
 .add-btn:hover { filter: brightness(0.88); }
 
-.alerts-page > main {
-  max-width: 700px;
-  margin: 0 auto;
-  padding: var(--space-5) var(--space-4);
-}
+
 
 /* ---------- 表单卡 ---------- */
 .form-card {
