@@ -93,6 +93,7 @@ python .env: DEEPSEEK_BASE_URL=http://localhost:8001  DEEPSEEK_MODEL=stock-analy
 | 脚本 | 干什么 | 依赖 |
 |---|---|---|
 | `build_dataset.py` | 拉导出接口 → 三任务样本 → train/val 切分（按**时间**切，防泄漏） | 仅 stdlib + urllib |
+| `replay_factory.py` | **第二个数据源**（2026-10-12）：对历史行情逐日重放委员会 → 决策样本 + T+N 对齐标签当场回填；断点续跑、token 硬顶 | 服务内模块 + LLM API |
 | `train_lora.py` | 调 LLaMA-Factory 跑 QLoRA；**无 GPU/未安装时明确拒绝运行**而不是装样子 | GPU + LLaMA-Factory |
 | `eval_domain.py` | 金标集评估任意 OpenAI 兼容端点（基座/微调/DeepSeek 都能评） | 仅 stdlib |
 | `cases.yaml` | 人审金标：方向 + 传闻 + 拒答三类用例（只放**人工确认过**的） | — |

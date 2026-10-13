@@ -1,0 +1,30 @@
+{
+ "symbol": "601988",
+ "start": "2025-01-02",
+ "end": "2025-01-31",
+ "freeze": "2025-02-01",
+ "days": 18,
+ "decisions": {
+  "buy": 1,
+  "sell": 0,
+  "hold": 17,
+  "hard_stop": 0,
+  "mismatch": 0
+ },
+ "proposals": {
+  "made": 3,
+  "applied": 1,
+  "rejected": 2,
+  "deferred": 0
+ },
+ "tokens": 419723,
+ "error": null,
+ "final_equity": 100271.1,
+ "track_a_return_pct": 0.27,
+ "track_a_max_drawdown_pct": 1.27,
+ "buy_hold_return_pct": 4.1,
+ "final_config_backtest": {
+  "error": "回放窗口不足 21 根，回测引擎下限"
+ },
+ "config_versions": 2
+}
