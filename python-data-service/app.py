@@ -7,6 +7,8 @@ import logging
 import asyncio
 import os
 import time
+
+import requests
 from contextlib import asynccontextmanager
 from datetime import date
 
@@ -20,6 +22,8 @@ from akshare_client import (get_quote, get_history, get_minute_kline, get_overvi
 # 两者本来就是这个进程的启动依赖，不存在"某个可选包缺失导致 app 起不来"的风险。
 # （与之对照：quant_model 导了 lightgbm/numpy 一票重依赖，所以它必须 lazy —— 见下面的注释。）
 import news_client
+import news_clustering
+import news_topics
 import news_understanding
 import sentiment_client
 # 交易日历：行情接口要回答"这个价是哪一天的"，前端要回答"今天休市、休到哪天"。
@@ -175,7 +179,7 @@ def _strategy_review_health():
         return strategy_review.describe()
     except Exception as e:  # noqa: BLE001
         logger.warning(f"strategy review health probe failed: {e}")
-        return {"error": "strategy review unavailable"}
+        return {"error": "策略复盘子系统暂不可用"}
 
 
 def _committee_health():
@@ -191,7 +195,7 @@ def _committee_health():
         return trading_committee.describe()
     except Exception as e:  # noqa: BLE001
         logger.warning(f"trading committee health probe failed: {e}")
-        return {"error": "trading committee unavailable"}
+        return {"error": "交易委员会子系统暂不可用"}
 
 
 def _contract_health():
@@ -202,7 +206,7 @@ def _contract_health():
         return ec.describe()
     except Exception as e:  # noqa: BLE001
         logger.warning(f"execution contract health probe failed: {e}")
-        return {"error": "execution contract unavailable"}
+        return {"error": "执行契约子系统暂不可用"}
 
 
 def _review_health():
@@ -217,7 +221,7 @@ def _review_health():
         return review.describe()
     except Exception as e:  # noqa: BLE001
         logger.warning(f"review health probe failed: {e}")
-        return {"error": "review unavailable"}
+        return {"error": "复盘子系统暂不可用"}
 
 
 def _audit_health():
@@ -233,7 +237,7 @@ def _audit_health():
         return tool_audit.describe()
     except Exception as e:  # noqa: BLE001 —— 健康检查不能因为子系统异常而挂掉
         logger.warning(f"audit health probe failed: {e}")
-        return {"error": "audit unavailable"}
+        return {"error": "审计子系统暂不可用"}
 
 
 def _objective_health():
@@ -249,7 +253,7 @@ def _objective_health():
         return objective.describe()
     except Exception as e:  # noqa: BLE001 —— 健康检查不能因为子系统异常而挂掉
         logger.warning(f"objective facts health probe failed: {e}")
-        return {"error": "objective facts unavailable"}
+        return {"error": "客观事实子系统暂不可用"}
 
 
 def _memory_health():
@@ -258,6 +262,12 @@ def _memory_health():
     为什么值得暴露：向量后端与 embedding 都是**可缺失的增强**，
     缺了不会报错、只会让检索退化成关键词 —— 那种"功能静默降级"最难排查。
     没有 key 时这里会明确显示 semantic_recall_enabled=False。
+
+    java_reachable 是 2026-10-06 记忆系统 P0 排查后补的：当时部署编排漏配
+    JAVA_BASE_URL，Python 容器里的默认 http://localhost:8080 指向自己，
+    所有记忆读回调用静默失败（fail-open 连 warning 都没有），而这里只看
+    embedding，导致 /health 显示 ok。探针只验证"HTTP 层能不能到达 Java"——
+    任何状态码（含 400/401）都算可达，只有连接异常才算断。
     """
     try:
         from agent import embeddings, vector_index
@@ -270,10 +280,29 @@ def _memory_health():
             "embedding_model": embedding_stats.get("model"),
             "embedding_cache_entries": embedding_stats.get("entries"),
             "index": index_stats,
+            "java_reachable": _java_memory_reachable(),
         }
     except Exception as e:  # noqa: BLE001 —— 健康检查本身不能因为子系统异常而挂掉
         logger.warning(f"memory health probe failed: {e}")
-        return {"error": "memory subsystem unavailable"}
+        return {"error": "记忆子系统暂不可用"}
+
+
+def _java_memory_reachable() -> bool:
+    """探测 Python → Java 记忆接口的连通性（只看传输层，不要求业务成功）。
+
+    任何 HTTP 状态码都算可达——包括 4xx/5xx：缺参 400、无 token 401、甚至被
+    全局异常处理器包成的 500，都证明请求到达了 Java（服务器上实测就是 500，
+    一开始写成 "<500 才算通" 导致探针误报 False，而真实记忆调用是通的）。
+    只有连接被拒/超时（requests 抛异常）才是真的断。
+    """
+    try:
+        from agent import memory_store
+
+        base = memory_store._base_url()
+        requests.get(f"{base}/api/v1/internal/memory/context", timeout=3)
+        return True
+    except Exception:  # noqa: BLE001 —— 连接被拒/超时 = 不可达
+        return False
 
 
 def _tools_health():
@@ -291,7 +320,7 @@ def _tools_health():
         return info
     except Exception as e:  # noqa: BLE001
         logger.warning(f"tool health probe failed: {e}")
-        return {"error": "tool layer unavailable"}
+        return {"error": "工具层暂不可用"}
 
 
 def _external_health():
@@ -309,7 +338,7 @@ def _external_health():
         return info
     except Exception as e:  # noqa: BLE001
         logger.warning(f"external health probe failed: {e}")
-        return {"error": "external layer unavailable"}
+        return {"error": "外部数据层暂不可用"}
 
 
 def _metering_health():
@@ -324,7 +353,7 @@ def _metering_health():
         return metering.snapshot()
     except Exception as e:  # noqa: BLE001
         logger.warning(f"metering health probe failed: {e}")
-        return {"error": "metering unavailable"}
+        return {"error": "计量子系统暂不可用"}
 
 
 @app.get("/api/v1/external/archive/{offload_id:path}")
@@ -673,10 +702,15 @@ async def agent_chat(req: Request):
         scopes = data.get("scopes")
         if not isinstance(scopes, list) or not scopes:
             scopes = None
+        # 聚焦对象（agent 互通 P2）：用户从资讯雷达"问 AI"进入的聚焦对话。
+        # 只认 {"type":"news_event","event_id":n}；其余形状忽略（run_agent 内 fail-open）。
+        focus = data.get("focus")
+        if not isinstance(focus, dict):
+            focus = None
         result = await asyncio.to_thread(
             react_agent.run_agent, user_id, message,
             history=history, session_id=session_id, memory_user_id=memory_user_id,
-            tool_mode=tool_mode, scopes=scopes, role=role
+            tool_mode=tool_mode, scopes=scopes, role=role, focus=focus
         )
         return result
     except Exception as e:
@@ -703,7 +737,7 @@ async def memory_consolidate(req: Request):
         return await asyncio.to_thread(consolidate.consolidate_session, user_id, session_key)
     except Exception as e:
         logger.error(f"memory consolidate error: {e}", exc_info=True)
-        return {"error": "consolidate failed"}
+        return {"error": "会话总结生成失败，请稍后重试"}
 
 
 @app.get("/api/v1/agent/diagnostic/{symbol}")
@@ -757,6 +791,39 @@ async def agent_diagnostic(symbol: str):
     except Exception as e:
         logger.error(f"agent diagnostic error for {symbol}: {e}", exc_info=True)
         return {"symbol": symbol, "error": "模型诊断暂不可用"}
+
+
+@app.post("/api/v1/strategies/validate-config")
+async def validate_strategy_config_endpoint(req: Request):
+    """轻量校验：只验 DSL 结构（不取数、不回测）。
+
+    策略编辑面板保存前由 Java 调用 —— 把"改坏了的规则"挡在落库之前，
+    而不是等下一次结算在痕迹里炸出一串 unknown/skip。
+    """
+    from agent.strategy_schema import validate_strategy_config
+    try:
+        data = await req.json()
+        cfg, err = validate_strategy_config(data.get("strategy_json", {}))
+        if err:
+            return {"valid": False, "error": _friendly_rule_error(err)}
+        return {"valid": True}
+    except Exception as e:
+        logger.error(f"strategy validate-config error: {e}", exc_info=True)
+        return {"valid": False, "error": "校验服务异常，请稍后重试"}
+
+
+def _friendly_rule_error(err: str) -> str:
+    """pydantic 的报错第一行是英文元信息（"1 validation error for StrategyConfig"），
+    人话在 "Value error, ..." 那行 —— 编辑面板要给用户看的是后者。找不到就退回第一行。"""
+    for line in str(err).splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Value error,"):
+            message = stripped[len("Value error,"):].strip()
+            # pydantic 会把 [type=..., input_value=...] 元数据追加在句尾 —— 那是给
+            # 开发者看的，用户只需要那句中文。截掉它。
+            bracket = message.find(" [type=")
+            return message[:bracket].strip() if bracket > 0 else message
+    return str(err).splitlines()[0] if str(err) else "规则结构无法识别"
 
 
 @app.post("/api/v1/strategies/backtest")
@@ -862,7 +929,7 @@ async def evaluate_bar_endpoint(req: Request):
             records = await asyncio.to_thread(get_history, symbol)
         if not records:
             # 无数据也要带口径：否则调用方只能猜这条记录属于哪个口径，或者干脆不记
-            return {"error": "insufficient history data", "signal": "hold", "matched_conditions": [],
+            return {"error": "历史 K 线数据不足，暂时无法评估", "signal": "hold", "matched_conditions": [],
                     "decision": ec.DECISION_SKIP, "skip_reason": ec.SKIP_DATA_UNAVAILABLE,
                     **ec.no_bar_facts(settlement_kind, ADJUST_MODE)}
         bar_time = str(records[-1].get("date", ""))
@@ -875,6 +942,16 @@ async def evaluate_bar_endpoint(req: Request):
             settlement_kind, ADJUST_MODE
         )
         result["bar_time"] = bar_time
+        # 盘中路径附带"盯盘事件"（纯代码检测，零 LLM 成本）：结算侧拿到非空 events
+        # 才会去调盯盘交易员（/agent/intraday-decide）。规则信号在这里降级为一条事件
+        # （rule_signal）—— agent 模式下"要不要按规则动"由盯盘 agent 判断。
+        if settlement_kind == ec.SETTLEMENT_REALTIME:
+            from agent import intraday_watch
+            day_records = await asyncio.to_thread(get_history, symbol)
+            events = intraday_watch.detect_events(
+                records, day_records or [], position, cfg.model_dump(),
+                signal=str(result.get("signal") or "").lower() or None)
+            result["events"] = events
         return result
     except Exception as e:
         logger.error(f"strategy evaluate-bar error: {e}", exc_info=True)
@@ -900,12 +977,43 @@ async def agent_decide_endpoint(req: Request):
         {"strategy_json": {...} | "symbol": "600519", "date": "2026-03-10",
          "settlement_kind": "daily", "position": {...}, "last_decision_at": "2026-03-06"}
 
-    <h3>它不受策略 DSL 约束，但 DSL 参与**门控**</h3>
-    `strategy_json` 里只有 `symbol` 会被委员会用到；entry/exit 条件**不参与决策**，
-    但会作为"召集门控"的一条触发理由（规则给出买/卖 = 值得开会）。
+    <h3>策略 DSL 的双重角色</h3>
+    `strategy_json` 的 entry/exit 条件**不约束决策**（决策是裁量制的），
+    但参与两处：①"召集门控"的一条触发理由（规则给出买/卖 = 值得开会）；
+    ②以 `strategy_intent` 进证据包（委员会知道自己在替哪套规则做裁量，偏离要给理由）。
     这是"把决策源从规则换成 agent"的落点：同一张策略记录，换的是**谁做决定**，
     而 `fingerprint.decision_mode` 会把这个区别写进每一条痕迹。
+
+    <h3>财务证据（fundamentals，fail-open）</h3>
+    本端点自己取最近报告期的财务摘要（数据源在 Python 侧，Java 不用改）：
+    24 小时 TTL 缓存（财报按季度披露，不需要每次开会都打数据源），
+    `AGENT_FUNDAMENTALS=0` 可整体关闭。取不到就不带这块，委员会照旧只看行情。
     """
+
+    # ==================== 财务摘要（fundamentals，带 TTL 缓存） ====================
+    # 财报按季度披露：24h 缓存足够新鲜，又避免每次开会都打东方财富。
+    # 失败/关闭返回 None（Python 侧 fail-open，缺席不是错误）。
+    _FUNDAMENTALS_TTL_SECONDS = 24 * 3600
+    if not hasattr(agent_decide_endpoint, "_fundamentals_cache"):
+        agent_decide_endpoint._fundamentals_cache = {}
+
+    def _fundamentals_quietly(symbol: str):
+        if os.getenv("AGENT_FUNDAMENTALS", "1").strip().lower() in ("0", "off", "false"):
+            return None
+        now = time.time()
+        cached = agent_decide_endpoint._fundamentals_cache.get(symbol)
+        if cached and now - cached[0] < _FUNDAMENTALS_TTL_SECONDS:
+            return cached[1]
+        try:
+            from akshare_client import get_financial_abstract
+            data = get_financial_abstract(symbol, periods=2)
+        except Exception as e:  # noqa: BLE001 —— 财务取不到不该挡住决策
+            logger.info("委员会财务摘要取数失败 symbol=%s（不带 fundamentals）：%s",
+                        symbol, type(e).__name__)
+            data = None
+        agent_decide_endpoint._fundamentals_cache[symbol] = (now, data)
+        return data
+
     from agent import execution_contract as ec
     from agent import trading_committee
     from agent.strategy_schema import validate_strategy_config
@@ -941,6 +1049,14 @@ async def agent_decide_endpoint(req: Request):
             # 而不是"上次结算的日子"（后者每天都有，定时器永远不会到期）。
             config=cfg.model_dump() if cfg else None,
             last_decision_at=data.get("last_decision_at"),
+            # 信息面证据（P3）：Java 从新闻库组装，非空才带（fail-open）
+            news_briefing=data.get("news_briefing") if isinstance(data.get("news_briefing"), dict) else None,
+            # 经验回流（P4）：这条策略自己的成交成绩单，非空才带（fail-open）
+            experience=data.get("experience") if isinstance(data.get("experience"), dict) else None,
+            # 组合上下文（P5）：本策略 + 该用户全部在跑策略的敞口，非空才带（fail-open）
+            portfolio=data.get("portfolio") if isinstance(data.get("portfolio"), dict) else None,
+            # 财务证据：本端点自取（TTL 缓存），失败/关闭为 None（fail-open）
+            fundamentals=await asyncio.to_thread(_fundamentals_quietly, symbol),
         )
         result["valid"] = True
         return result
@@ -952,6 +1068,172 @@ async def agent_decide_endpoint(req: Request):
                 "decision": ec.DECISION_SKIP, "skip_reason": ec.SKIP_DATA_UNAVAILABLE,
                 "signal": None,
                 **ec.no_bar_facts(settlement_kind, ADJUST_MODE, ec.DECISION_MODE_AGENT)}
+
+
+@app.post("/api/v1/agent/intraday-decide")
+async def intraday_decide_endpoint(req: Request):
+    """**盘中盯盘交易员**：事件触发的一次性判断（1 次 LLM 调用，秒级）。
+
+    与委员会的分工：委员会（/agent/decide）只在日线结算时开会、划授权边界；
+    本端点在盘中的量化事件（急涨急跌/量能异常/穿越均线/逼近止损线/规则信号……）
+    发生时被结算侧调用，在授权边界内给出 hold/buy/sell/partial_sell/flag。
+
+    请求体：
+        {"strategy_json": {...}, "symbol": "601988", "events": [{"type","detail"}],
+         "position": {"shares","entry_price","high_watermark"},          # 可空
+         "authorization": {"intraday_execution","allow_open","allow_close",
+                            "max_position_pct","notes"}}                  # 可空
+
+    面板（价格/量比/均线/持仓盈亏）由本端点自己取数计算 —— 调用方只透传事件，
+    不需要在两次请求之间维护面板状态。
+    """
+    from agent import intraday_watch
+    from akshare_client import get_history
+    from akshare_client import get_minute_kline
+    try:
+        data = await req.json()
+        symbol = str(data.get("symbol") or "").strip()
+        if not symbol:
+            return {"valid": False, "error": "symbol 不能为空"}
+        events = data.get("events")
+        if not isinstance(events, list) or not events:
+            return {"valid": False, "error": "events 不能为空（无事件不该调盯盘）"}
+        position = data.get("position")
+        if isinstance(position, dict) and "quantity" in position and "shares" not in position:
+            position = dict(position)
+            position["shares"] = position["quantity"]
+
+        config = data.get("strategy_json") or {}
+        minute_bars = await asyncio.to_thread(get_minute_kline, symbol, 1)
+        day_records = await asyncio.to_thread(get_history, symbol)
+        # news_shock 详情（P3）：Java 检测到 high impact 新闻时随请求带来，None = 与新闻无关
+        news_alert = data.get("news_alert") if isinstance(data.get("news_alert"), dict) else None
+        # 经验回流（P4）：这条策略自己的成交成绩单（轻量版），None = 不带
+        experience = data.get("experience") if isinstance(data.get("experience"), dict) else None
+        result = await asyncio.to_thread(
+            intraday_watch.intraday_decide, symbol, events, position,
+            data.get("authorization"), config, minute_bars or [], day_records or [],
+            news_alert=news_alert, experience=experience)
+        result["valid"] = True
+        return result
+    except Exception as e:
+        logger.error(f"intraday decide error: {e}", exc_info=True)
+        # 端点级异常按"没问成模型"处理：degraded=true，结算侧回落规则+授权路径
+        return {"valid": False, "degraded": True, "action": "hold", "size_fraction": 0.0,
+                "reason": f"盯盘端点异常：{type(e).__name__}", "watch_tokens": 0}
+
+
+# ==================== 周反思（P2 经验回流闭环，2026-10-12） ====================
+# 设计参考 TradingAgents（Apache-2.0）的 memory log：决策落日志 → 持有期到 → 结算
+# 实际收益并生成一段反思 → 下次决策回读。我们的差异：定量半环（5 日对账的成绩单）
+# 已经是确定性代码，LLM 只负责定性半环（"为什么错"），且产物是结构化教训、
+# 由 Java 落进教训库（MemoryLesson），**人不审核也只影响提示词权重、不影响账**。
+
+WEEKLY_REFLECTION_MAX = 3
+
+_WEEKLY_REFLECTION_SYSTEM = (
+    "你是这条策略的周复盘官。输入是本周的客观材料：定量战绩（每笔成交 N 个交易日后"
+    "回看的方向对错，样本可能很少）、成交记录、委员会决策过程（角色发言摘录）。"
+    f"请提炼**最多 {WEEKLY_REFLECTION_MAX} 条**本周教训。\n"
+    "要求：symptom 一句话点出重复出现的模式（犯错或做对都算）；reusable_rule 是一句"
+    "**可执行、可验证**的话（例如「首仓不超过现金 50%，等回踩确认再加仓」）——"
+    "不是投资结论，不预测行情；context 用两三句给出依据（引用战绩/成交/辩论里的具体"
+    "事实，不许编数字）；resolution 写这条教训打算怎么落实。没有足够事实支撑就少写"
+    "或不写 —— 宁缺毋滥。\n"
+    "只输出一个 JSON 对象，不要任何其他文字：\n"
+    '{"lessons": [{"symptom": "...", "context": "...", "resolution": "...", '
+    '"reusable_rule": "...", "confidence": 0.0-1.0}]}'
+)
+
+
+def _parse_weekly_lessons(text: str) -> list[dict]:
+    """确定性解析（保守优先，与 trading_decision 同一条纪律）：读不懂就当没有教训。"""
+    import json as _json
+    import re as _re
+
+    match = _re.search(r"\{.*\}", str(text or ""), _re.DOTALL)
+    if not match:
+        return []
+    try:
+        data = _json.loads(match.group(0))
+    except Exception:  # noqa: BLE001
+        return []
+    raw = data.get("lessons") if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        return []
+    lessons: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        symptom = str(item.get("symptom") or "").strip()
+        rule = str(item.get("reusable_rule") or "").strip()
+        if not symptom or not rule:
+            continue  # 缺 symptom + reusable_rule 的是散文，不是教训
+        try:
+            confidence = float(item.get("confidence"))
+        except (TypeError, ValueError):
+            confidence = None
+        lessons.append({
+            "symptom": symptom[:200],
+            "context": str(item.get("context") or "").strip()[:600] or None,
+            "resolution": str(item.get("resolution") or "").strip()[:600] or None,
+            "reusable_rule": rule[:300],
+            "confidence": max(0.0, min(1.0, confidence)) if confidence is not None else None,
+        })
+        if len(lessons) >= WEEKLY_REFLECTION_MAX:
+            break
+    return lessons
+
+
+def weekly_reflection_run(payload: dict, completion=None) -> dict:
+    """一次周反思（**1 次** LLM 调用）。永不抛异常：任何故障退化成"没有教训"。"""
+    import json as _json
+
+    import llm_service
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("strategy"), dict):
+        return {"ok": False, "lessons": [], "warnings": ["payload 缺少 strategy 字段"]}
+    checker = getattr(llm_service, "_is_available", None)
+    if callable(checker):
+        try:
+            if not checker():
+                return {"ok": False, "lessons": [], "warnings": ["模型服务不可用"]}
+        except Exception:  # noqa: BLE001 —— 探测失败不应阻止尝试
+            pass
+    call = completion or llm_service.chat_completion
+    try:
+        choice = call(
+            [{"role": "system", "content": _WEEKLY_REFLECTION_SYSTEM},
+             {"role": "user", "content": _json.dumps(payload, ensure_ascii=False, default=str)}],
+            temperature=0.2, max_tokens=800)
+        text = str((((choice or {}).get("message") or {}).get("content")) or "")
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "lessons": [], "warnings": [f"反思调用失败（{type(exc).__name__}）"]}
+    if "AI 服务暂不可用" in text:
+        return {"ok": False, "lessons": [], "warnings": ["模型服务占位响应"]}
+    warnings: list[str] = [] if text.strip() else ["模型返回空内容"]
+    return {"ok": True, "lessons": _parse_weekly_lessons(text), "warnings": warnings}
+
+
+@app.post("/api/v1/agent/weekly-reflection")
+async def weekly_reflection_endpoint(req: Request):
+    """**周反思**（P2，经验回流的定性半环）：本周战绩/成交/委员会过程 → ≤3 条结构化教训。
+
+    请求体（Java PaperTradingService 在周五复盘时组装）：
+        {"strategy": {...}, "experience": {...}?, "trades": [...]?, "committee": [...]?}
+
+    - 委员会记录缺一周不开会就没有原料 —— Java 侧门控在先，本端点不再判断；
+    - 产物是结构化教训（symptom/context/resolution/reusable_rule/confidence），
+      Java 落 MemoryLesson（taskType=weekly_reflection），随经验包回读给委员会；
+    - fail-open：任何失败返回 ok=false + 人话 warning，绝不抛异常。
+    """
+    try:
+        data = await req.json()
+        result = await asyncio.to_thread(weekly_reflection_run, data if isinstance(data, dict) else {})
+        return result
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"weekly reflection error: {e}", exc_info=True)
+        return {"ok": False, "lessons": [], "warnings": ["周反思端点异常"]}
 
 
 # ==================== 同花顺扫码登录 ====================
@@ -1236,8 +1518,11 @@ async def news_synthesize(req: Request):
         items = []
     if not isinstance(items, list):
         return _news_error("items 必须是数组", status_code=400)
-    if len(items) > NEWS_SYNTHESIS_MAX_ITEMS:
-        return _news_error(f"单次最多综合 {NEWS_SYNTHESIS_MAX_ITEMS} 条（收到 {len(items)} 条）",
+    mode = str(body.get("mode") or "")
+    # 市场综合的输入是"一屏快讯"，上限放宽到 60（个股综合仍是 40）
+    max_items = 60 if mode == "market" else NEWS_SYNTHESIS_MAX_ITEMS
+    if len(items) > max_items:
+        return _news_error(f"单次最多综合 {max_items} 条（收到 {len(items)} 条）",
                            status_code=400)
 
     quote = body.get("quote") if isinstance(body.get("quote"), dict) else None
@@ -1253,6 +1538,16 @@ async def news_synthesize(req: Request):
         except Exception as exc:  # noqa: BLE001 - 情绪是旁路上下文，失败不挡综合解读
             logger.warning("sentiment context unavailable for %s: %s",
                            symbol_for_sentiment, exc)
+    # 市场级综合（资讯雷达的"今日信息面"）：同一端点的另一个模式。
+    # 分流在取完 items 之后、取情绪之前——市场综合不需要个股情绪与行情上下文。
+    if mode == "market":
+        try:
+            data = await asyncio.to_thread(news_understanding.synthesize_market, items)
+        except Exception as e:
+            logger.error(f"news market synthesize error: {e}", exc_info=True)
+            return _news_error("AI 市场综合暂时不可用，请稍后再试")
+        return {"ok": True, "data": data}
+
     try:
         data = await asyncio.to_thread(
             news_understanding.synthesize_read,
@@ -1295,6 +1590,100 @@ async def news_body(req: Request):
         logger.error(f"news body fetch error: {exc}", exc_info=True)
         return {"ok": False, "error": "正文抓取失败，请稍后再试"}
     return {"ok": True, "data": {"body": text, "chars": len(text)}}
+
+
+# ==================== 事件线（N4 聚类 + N5 总编/撰稿，2026-10-09 新闻雷达升级）====================
+
+CLUSTER_MAX_ITEMS = news_clustering.MAX_INPUT_ITEMS
+
+
+@app.post("/api/v1/news/cluster")
+async def news_cluster(req: Request):
+    """把一批资讯聚成事件线（N4，**纯代码，不调模型**）。
+
+    请求体：`{"items":[{id,symbol,name,title,published_at,source_level,source_name,url,direction,plain_summary},…]}`
+    （`id` 是 Java 侧 news_events 主键，Python 不解释、随成员原样透传回去。）
+
+    响应：`{"ok":true,"data":{"clusters":[
+        {"title","members":[…原样条目…],"member_count","first_at","last_at",
+         "sources","source_count","symbols","directions"}],
+        "unclustered_count":n}}`
+
+    聚类是确定性纯函数：同一输入永远同一输出。LLM 综合是另一个端点
+    （`/news/topic-synthesize`），失败绝不影响本端点 —— 事件线本身没有 LLM 也成立。
+    """
+    try:
+        body = await req.json()
+    except Exception:
+        return _news_error("请求体不是合法 JSON", status_code=400)
+    if not isinstance(body, dict):
+        return _news_error("请求体必须是对象", status_code=400)
+    items = body.get("items")
+    if not isinstance(items, list) or not items:
+        return _news_error("items 必须是非空数组", status_code=400)
+    if not all(isinstance(item, dict) for item in items):
+        return _news_error("items 里每一项都必须是对象", status_code=400)
+    if len(items) > CLUSTER_MAX_ITEMS:
+        return _news_error(f"单次最多聚类 {CLUSTER_MAX_ITEMS} 条（收到 {len(items)} 条）",
+                           status_code=400)
+    try:
+        data = news_clustering.cluster_events(items)
+    except Exception as e:
+        logger.error(f"news cluster error: {e}", exc_info=True)
+        return _news_error("聚类服务暂时不可用，请稍后再试")
+    return {"ok": True, "data": data}
+
+
+TOPIC_SYNTHESIS_MAX_CLUSTERS = 30
+
+
+@app.post("/api/v1/news/topic-synthesize")
+async def news_topic_synthesize(req: Request):
+    """事件线综合（N5）：总编一次通览 / 单条线撰稿，一次 LLM 调用。
+
+    请求体（mode=editor）：`{"mode":"editor","clusters":[…cluster 端点的 clusters…]}`
+    响应：`{"ok":true,"data":{"ok":true,"topics":[{index,title,worth_deep,reason}]}}`
+
+    请求体（mode=writer）：`{"mode":"writer","topic":{"title":"…","items":[…成员…]}}`
+    响应：`{"ok":true,"data":{"ok":true,"title","story","outlook","direction","confidence","affected_symbols"}}`
+
+    内层 `data.ok=false` 表示 LLM 不可用或输出无法解析（Java 侧按
+    `editor_llm_unavailable` 留痕，事件线照常展示代码标题 —— fail-open）。
+    """
+    try:
+        body = await req.json()
+    except Exception:
+        return _news_error("请求体不是合法 JSON", status_code=400)
+    if not isinstance(body, dict):
+        return _news_error("请求体必须是对象", status_code=400)
+    mode = str(body.get("mode") or "").strip()
+    if mode not in ("editor", "writer"):
+        return _news_error("mode 只能是 editor 或 writer", status_code=400)
+
+    if mode == "editor":
+        clusters = body.get("clusters")
+        if not isinstance(clusters, list) or not clusters:
+            return _news_error("clusters 必须是非空数组", status_code=400)
+        if len(clusters) > TOPIC_SYNTHESIS_MAX_CLUSTERS:
+            return _news_error(
+                f"单次最多总览 {TOPIC_SYNTHESIS_MAX_CLUSTERS} 条事件线（收到 {len(clusters)} 条）",
+                status_code=400)
+        try:
+            data = await asyncio.to_thread(news_topics.editor_pass, clusters)
+        except Exception as e:
+            logger.error(f"news editor error: {e}", exc_info=True)
+            return _news_error("AI 总览暂时不可用，请稍后再试")
+        return {"ok": True, "data": data}
+
+    topic = body.get("topic")
+    if not isinstance(topic, dict):
+        return _news_error("topic 必须是对象", status_code=400)
+    try:
+        data = await asyncio.to_thread(news_topics.write_topic, topic)
+    except Exception as e:
+        logger.error(f"news topic writer error: {e}", exc_info=True)
+        return _news_error("AI 撰稿暂时不可用，请稍后再试")
+    return {"ok": True, "data": data}
 
 
 # ==================== 散户情绪（千股千评聚合指数）====================

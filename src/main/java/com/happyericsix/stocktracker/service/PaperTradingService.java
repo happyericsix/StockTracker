@@ -2,18 +2,22 @@ package com.happyericsix.stocktracker.service;
 
 import com.happyericsix.stocktracker.client.StrategyClient;
 import com.happyericsix.stocktracker.dto.MemoryFactRequest;
+import com.happyericsix.stocktracker.dto.MemoryLessonRequest;
+import com.happyericsix.stocktracker.dto.MemoryLessonsRequest;
 import com.happyericsix.stocktracker.dto.PaperAccountResponse;
 import com.happyericsix.stocktracker.dto.PaperEquityResponse;
 import com.happyericsix.stocktracker.dto.PaperOverviewResponse;
 import com.happyericsix.stocktracker.dto.PaperTradeResponse;
 import com.happyericsix.stocktracker.dto.PaperTradeTraceResponse;
 import com.happyericsix.stocktracker.entity.PaperAccount;
+import com.happyericsix.stocktracker.entity.PaperAuthorization;
 import com.happyericsix.stocktracker.entity.PaperEquitySnapshot;
 import com.happyericsix.stocktracker.entity.PaperTrade;
 import com.happyericsix.stocktracker.entity.PaperTradeTrace;
 import com.happyericsix.stocktracker.entity.Strategy;
 import com.happyericsix.stocktracker.entity.User;
 import com.happyericsix.stocktracker.repository.PaperAccountRepository;
+import com.happyericsix.stocktracker.repository.PaperAuthorizationRepository;
 import com.happyericsix.stocktracker.repository.PaperEquitySnapshotRepository;
 import com.happyericsix.stocktracker.repository.PaperTradeRepository;
 import com.happyericsix.stocktracker.repository.StrategyRepository;
@@ -21,6 +25,7 @@ import com.happyericsix.stocktracker.repository.UserRepository;
 import com.happyericsix.stocktracker.util.CnTime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -29,6 +34,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
 
 import java.math.BigDecimal;
@@ -38,6 +44,8 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @Service
@@ -65,13 +73,45 @@ public class PaperTradingService {
     private final MemoryFactService memoryFactService;
     private final MemoryService memoryService;
     /** 盘后复盘报告。允许为 null（单测），失败只是少一条消息。 */
-    private final PaperReviewReportService paperReviewReportService;
     /** 样本外验证（周频）。允许为 null：单测里没有这个替身，周任务本身也不该被单测触发。 */
     private final StrategyService strategyService;
     /** 预期登记/回填。允许为 null（单测）；失败只是少一次回填。 */
     private final ExpectationService expectationService;
+    /** 策略哨兵（健康监控 Phase 1）。允许为 null（单测）；它是结算后的附加题，绝不影响结算。 */
+    private final StrategyHealthWatchService healthWatchService;
+    /** 盘中授权（authorization 模式）：委员会开会产出边界，盘中规则引擎在边界内执行。 */
+    private final PaperAuthorizationRepository paperAuthorizationRepository;
+    /** 组合层：单日回撤熔断（挡新开仓）。允许为 null（单测）：调用处 fail-open。 */
+    private final PortfolioService portfolioService;
+
+    /**
+     * 新闻知识组装（agent 互通 P3，可空）：为委员会/盯盘提供信息面证据。
+     * 可空是为了单测可以不装它 —— 信息面是增强证据，缺失时决策照旧（fail-open）。
+     */
+    private final NewsBriefingService newsBriefingService;
+    /** 经验回流（P4）：给委员会/盯盘组装"这条策略自己的成交成绩单"。可选，null 判断兜住。 */
+    private final DecisionQualityService decisionQualityService;
+    /** 周反思（P2）：教训的落库与回读。可选，null 判断兜住（反思是旁路）。 */
+    private final MemoryLessonService memoryLessonService;
+    /** 成交推送旁路。允许为 null（单测）：推送失败绝不影响结算。 */
+    private final PushService pushService;
+    private final MessageService messageService;
     private final ObjectMapper mapper = new ObjectMapper();
     private final TransactionTemplate transactionTemplate;
+
+    // ===== 盘中盯盘 agent（事件驱动，2026-10-09）=====
+    /** 总开关：关掉后 agent 模式盘中回到"规则+授权"的旧行为。 */
+    @Value("${paper.intraday-watch.enabled:true}")
+    private boolean intradayWatchEnabled;
+    /** 每策略每日盯盘 LLM 调用预算（成本止损线，2026-10-09 产品决策：平衡档 20 次）。 */
+    @Value("${paper.intraday-watch.daily-budget:20}")
+    private int intradayWatchDailyBudget;
+    /** 同一事件类型的冷却窗口：一次急涨往往连着几根 bar 都"在触发"，不冷却会被同一件事叫醒多次。 */
+    private static final long WATCH_EVENT_COOLDOWN_MS = 15 * 60 * 1000L;
+    /** 事件冷却表：strategyId:eventType → 上次触发时刻。重启丢失无害（最多多问几次模型）。 */
+    private final Map<String, Long> watchEventLastFired = new ConcurrentHashMap<>();
+    /** 盯盘调用计数：strategyId:tradeDate → 次数。重启归零无害（预算是止损线不是账单）。 */
+    private final Map<String, Integer> watchCallCount = new ConcurrentHashMap<>();
 
     /**
      * 单一构造函数：**不要为了"测试方便"再加几个重载**。
@@ -89,9 +129,16 @@ public class PaperTradingService {
                                PlatformTransactionManager transactionManager,
                                MemoryFactService memoryFactService,
                                MemoryService memoryService,
-                               PaperReviewReportService paperReviewReportService,
                                StrategyService strategyService,
-                               ExpectationService expectationService) {
+                               ExpectationService expectationService,
+                               StrategyHealthWatchService healthWatchService,
+                               PaperAuthorizationRepository paperAuthorizationRepository,
+                               PortfolioService portfolioService,
+                               PushService pushService,
+                               NewsBriefingService newsBriefingService,
+                               DecisionQualityService decisionQualityService,
+                               MemoryLessonService memoryLessonService,
+                               MessageService messageService) {
         this.strategyRepository = strategyRepository;
         this.paperAccountRepository = paperAccountRepository;
         this.paperTradeRepository = paperTradeRepository;
@@ -101,9 +148,16 @@ public class PaperTradingService {
         this.userRepository = userRepository;
         this.memoryFactService = memoryFactService;
         this.memoryService = memoryService;
-        this.paperReviewReportService = paperReviewReportService;
         this.strategyService = strategyService;
         this.expectationService = expectationService;
+        this.healthWatchService = healthWatchService;
+        this.paperAuthorizationRepository = paperAuthorizationRepository;
+        this.portfolioService = portfolioService;
+        this.pushService = pushService;
+        this.newsBriefingService = newsBriefingService;
+        this.decisionQualityService = decisionQualityService;
+        this.memoryLessonService = memoryLessonService;
+        this.messageService = messageService;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
@@ -124,7 +178,15 @@ public class PaperTradingService {
         account = paperAccountRepository.save(account);
         strategyRepository.save(strategy);
 
-        PaperAccount evaluated = evaluateRealtimeStrategy(strategyId, ExecutionContract.TRIGGER_MANUAL);
+        // 启动即思考（2026-10-08）：agent 模式启动走**日线口径**的手动结算，而不是盘中路径。
+        // 盘中路径在没有任何授权时只会留下一条 awaiting_authorization 然后什么都不做 ——
+        // 实测（2026-10-06~08 国庆假期）启动后账户哑到下一个 15:30，盘中每 5 分钟
+        // 重复一条"等待授权"。日线口径会触发委员会门控的 first_decision（从未开过会 ⇒ 开会），
+        // 当场拿到第一份授权与第一次决策。当天没有 K 线（休市/数据未出）时，
+        // 这次尝试只留一条 no_bar 痕迹，不浪费模型调用，等下一次日线结算。
+        PaperAccount evaluated = isAgentMode(strategy)
+                ? evaluateStrategy(strategyId, CnTime.today(), ExecutionContract.TRIGGER_MANUAL)
+                : evaluateRealtimeStrategy(strategyId, ExecutionContract.TRIGGER_MANUAL);
         if (evaluated != null) {
             account = evaluated;
         }
@@ -154,23 +216,138 @@ public class PaperTradingService {
                 // 断点续跑的保证来自幂等守卫（existsByStrategyIdAndTradeDate、
                 // lastBarTime、痕迹 dedupe 键），不来自事务回滚。
                 PaperAccount settled = evaluateStrategy(strategyId, today);
-                // 盘后复盘放在结算落库**之后**：报告读的是已落库的痕迹与账户，
-                // 而报告这一步再怎么出问题，都不可能回滚掉当天的真实成交
-                // （发消息用的是自己的独立事务，见 MessageService.saveReport）。
-                if (settled != null && paperReviewReportService != null) {
-                    transactionTemplate.execute(status -> {
-                        Strategy fresh = strategyRepository.findById(strategyId).orElse(null);
-                        // 有事才说的日报没发 ⇒ 今天很安静。安静也要说一声：
-                        // "没消息"与"服务没在跑"在用户那边长得一模一样（实测反馈：
-                        // 不问 AI 都不知道有模拟盘这个功能）。所以每天必有一条简报。
-                        if (paperReviewReportService.composeDailyReport(fresh, settled, today) == null) {
-                            paperReviewReportService.composeDailyBriefing(fresh, settled, today);
-                        }
-                        return null;
-                    });
-                }
+                afterSettlement(strategy, settled, today);
             } catch (Exception e) {
                 log.error("Paper settlement failed for strategy id={}", strategy.getId(), e);
+            }
+        }
+    }
+
+    /**
+     * 结算后的哨兵检查：15:30 主路径与补跑重试共用。
+     *
+     * <p>2026-10-10 起这里**不再发日报/简报**：消息中心收窄为"预警 + 系统告警"，
+     * 复盘内容活在模拟盘页面（PaperReportController 实时取文本），同一件事
+     * 不说第二遍。结算终轮失败的系统告警（{@link #alertSettlementFailed}）仍走消息。
+     *
+     * <p>哨兵刻意放在结算落库**之后**、独立 try/catch：判据再多也不许碰坏结算结果。
+     * （它也只落库观察事件，不推消息 —— 页面上看。）
+     */
+    private void afterSettlement(Strategy strategy, PaperAccount settled, LocalDate today) {
+        if (settled == null) {
+            return;
+        }
+        if (healthWatchService != null) {
+            try {
+                healthWatchService.checkStrategy(strategy, settled, today);
+            } catch (Exception e) {
+                log.warn("Health watch failed for strategy id={}: {}", strategy.getId(), e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * 当天日线结算是否停在**中间态**（no_bar / data_unavailable）。
+     *
+     * <p>判据是当天最后一条日线痕迹：重试成功后新痕迹排在后面，中间态会被自然覆盖；
+     * 所以"最后一条还是中间态"就等于"这一天的结论还没出来，报告再等等"。
+     */
+    private boolean dailySettlementTransient(Long strategyId, LocalDate today) {
+        List<PaperTradeTrace> dailyTraces = paperTraceService.listForDay(strategyId, today).stream()
+                .filter(trace -> ExecutionContract.SETTLEMENT_DAILY.equals(trace.getSettlementKind()))
+                .toList();
+        if (dailyTraces.isEmpty()) {
+            return false;   // 连日线痕迹都没有（异常路径）：不算"仍失败"，告警交给异常本身
+        }
+        String lastSkip = dailyTraces.get(dailyTraces.size() - 1).getSkipReason();
+        return ExecutionContract.SKIP_NO_BAR.equals(lastSkip)
+                || ExecutionContract.SKIP_DATA_UNAVAILABLE.equals(lastSkip);
+    }
+
+    /**
+     * 重试**当天结算失败**的策略（no_bar / data_unavailable）。
+     *
+     * <h3>为什么必须重试（2026-10-08 实测）</h3>
+     * 日线源在 15:30 结算当口常还没发布当天的 bar（腾讯源当天 17:05 才有 10-08 的日线）。
+     * 不重试的后果是这一天的结算**永远缺失**：净值曲线少一格、委员会没开成会、
+     * 授权没落库 —— 模拟盘从启动那天起就"始终是初始资金 + N/A"。
+     *
+     * <p>只重试当天**确实失败过**的策略：成功结算过的绝不再碰 —— 重跑一次 agent
+     * 结算就是再花一次委员会的钱（一次约 2 万 token），而它今天已经说过话了。
+     * 成功后照常走报告与哨兵（与 15:30 主路径同一份 {@link #afterSettlement}）。
+     *
+     * <p>终轮（17:10 / 手动补跑）之后仍失败的策略，推一条系统级告警 ——
+     * 2026-10-09 事故的教训：那一天三次结算全失败、净值永久缺格，唯一的"通知"
+     * 却是一条抢跑的假日报。失败到最后一刻必须是用户能收到的那句真话。
+     *
+     * @param finalAttemptOfDay 是否当天最后一次尝试（17:10 那一轮与手动补跑传 true）：
+     *                          中间态结论（还是没有 bar）到这一刻就是定论，允许发报告。
+     *                          16:10 的中间轮传 false —— bar 可能只是还没发布，别抢跑。
+     * @return 给任务心跳的一句话摘要（补跑几只、几只仍失败）
+     */
+    public String retryFailedDailySettlements(boolean finalAttemptOfDay) {
+        LocalDate today = CnTime.today();
+        int retried = 0;
+        List<Strategy> stillFailing = new ArrayList<>();
+        for (Strategy strategy : strategyRepository.findByPaperEnabledTrue()) {
+            try {
+                boolean failedToday = paperTraceService.listForDay(strategy.getId(), today).stream()
+                        .anyMatch(trace -> ExecutionContract.SETTLEMENT_DAILY.equals(trace.getSettlementKind())
+                                && (ExecutionContract.SKIP_NO_BAR.equals(trace.getSkipReason())
+                                        || ExecutionContract.SKIP_DATA_UNAVAILABLE.equals(trace.getSkipReason())));
+                if (!failedToday) {
+                    continue;
+                }
+                retried++;
+                PaperAccount settled = evaluateStrategy(strategy.getId(), today);
+                afterSettlement(strategy, settled, today);
+                if (dailySettlementTransient(strategy.getId(), today)) {
+                    stillFailing.add(strategy);
+                }
+                log.info("Settlement retry (final={}) for strategy id={} on {} completed",
+                        finalAttemptOfDay, strategy.getId(), today);
+            } catch (Exception e) {
+                log.error("Settlement retry failed for strategy id={}", strategy.getId(), e);
+                stillFailing.add(strategy);   // 抛异常也是"今天没结算成"，同样要被看见
+            }
+        }
+        if (finalAttemptOfDay && !stillFailing.isEmpty()) {
+            alertSettlementFailed(stillFailing, today);
+        }
+        return String.format("补跑 %d 只策略，其中 %d 只当天仍未结算", retried, stillFailing.size());
+    }
+
+    /**
+     * 终轮结算失败的系统级告警（旁路）：失败只记日志，绝不影响结算本身。
+     * 消息走 PAPER_REPORT 类型（用户在"模拟盘复盘"里看系统故障，语义最贴），
+     * 幂等键带策略与日期 —— 手动补跑与 17:10 终轮不会推两条。
+     */
+    private void alertSettlementFailed(List<Strategy> strategies, LocalDate today) {
+        if (messageService == null) {
+            return;
+        }
+        for (Strategy strategy : strategies) {
+            try {
+                if (strategy.getUser() == null) {
+                    continue;
+                }
+                int attempts = paperTraceService.listForDay(strategy.getId(), today).stream()
+                        .filter(trace -> ExecutionContract.SETTLEMENT_DAILY.equals(trace.getSettlementKind()))
+                        .mapToInt(trace -> trace.getRepeatCount() == null ? 1 : trace.getRepeatCount())
+                        .sum();
+                String content = String.format(
+                        "【结算未完成】%s · %s · %s\n"
+                                + "今天的日线结算最终没有完成：到最后一轮重试（17:10）数据源仍未提供当日 K 线，"
+                                + "共尝试 %d 次。\n"
+                                + "影响：今天的净值曲线会缺一格，委员会未能开会，授权沿用上一次。\n"
+                                + "下一交易日 15:30 会自动重试；这通常是数据源当晚发布延迟，"
+                                + "持续多天出现才需要排查。",
+                        strategy.getName(), strategy.getSymbol(), today, attempts);
+                messageService.saveReport(strategy.getUser(), StrategyHealthWatchService.TYPE_STRATEGY_SENTINEL,
+                        "paper_settle_failed:" + strategy.getId() + ":" + today,
+                        strategy.getSymbol(), content);
+            } catch (Exception e) {
+                log.warn("结算失败告警推送失败 strategy id={}: {}", strategy.getId(), e.getMessage());
             }
         }
     }
@@ -208,15 +385,254 @@ public class PaperTradingService {
             } catch (Exception e) {
                 log.error("Weekly verification failed for strategy id={}", strategy.getId(), e);
             }
-            try {
-                if (paperReviewReportService != null) {
-                    PaperAccount account = paperAccountRepository.findByStrategyId(strategy.getId())
-                            .orElse(null);
-                    paperReviewReportService.composeIdleWeeklyReport(strategy, account, today);
+            // 周反思（P2，经验回流的定性半环）：本周开过委员会的 agent 策略，
+            // 把战绩/成交/辩论过程喂给一次 LLM 反思，教训落库供下次决策回读。
+            // 失败静默 —— 反思是旁路，绝不影响复盘主链路（与验证各自 try/catch 同一条纪律）。
+            if (isAgentMode(strategy)) {
+                try {
+                    weeklyReflectionQuietly(strategy);
+                } catch (Exception e) {
+                    log.info("Weekly reflection failed for strategy id={}（不影响复盘）：{}",
+                            strategy.getId(), e.toString());
                 }
-            } catch (Exception e) {
-                log.error("Weekly idle report failed for strategy id={}", strategy.getId(), e);
             }
+            // 空转期摘要不再推消息（消息中心收窄）：模拟盘页面需要时
+            // 通过 PaperReviewReportService.idleWeeklyText 实时取同一份内容。
+        }
+    }
+
+    /** 周反思教训的 taskType：落库与回读（experience v2）共用这一个键。 */
+    private static final String WEEKLY_REFLECTION_TASK_TYPE = "weekly_reflection";
+    /** 反思回看的窗口：本周（7 个自然日）的决策与成交。 */
+    private static final int REFLECTION_WINDOW_DAYS = 7;
+
+    // ---- 教训退出机制（2026-10-13）：让坏教训自己死掉 ----
+    /** 退役判定的最小样本：少于此数的胜率没有统计意义，不退（宁可留着也不小样本撤教训）。 */
+    private static final int LESSON_DEMOTE_MIN_TRADES = 4;
+    /** 退役的胜率上限（%）：教训出生后的 agent 成交胜率不高于此线 → 自动退役。 */
+    private static final double LESSON_DEMOTE_MAX_WIN_RATE = 30.0;
+
+    /**
+     * 教训退役判定（纯函数，供测试直接钉住阈值语义）。
+     *
+     * <p>语义：样本够（≥4 笔已判读）且胜率差（≤30%）才退。两个方向都保守——
+     * 小样本不退（3 笔 0% 也可能是运气），胜率不差不退（教训没被证伪就还有资格在场）。
+     */
+    static boolean shouldRetireLesson(int evaluated, Double winRatePct) {
+        if (winRatePct == null || evaluated < LESSON_DEMOTE_MIN_TRADES) {
+            return false;
+        }
+        return winRatePct <= LESSON_DEMOTE_MAX_WIN_RATE;
+    }
+
+    /**
+     * 教训退出机制：周反思**之前**先体检旧教训。
+     *
+     * <p>修的断路：教训自出生起随经验包无限期回流委员会，而它的"疗效"从没人复查过——
+     * 一条坏教训（例如"跌破 MA5 就跑"在趋势行情里反复打脸）会永远留在提示词里。
+     * 现在每周复查一次：教训出生后的 agent 成交已判读 ≥4 笔且胜率 ≤30% → 自动 retired。
+     *
+     * <p>纪律：① 只用这条策略的 agent 成交（教训只进 agent 路径）；② 小样本不退；
+     * ③ 失败静默（不影响周反思本体）；④ 复查发生在反思**之前**——新教训落库前，
+     * 旧教训已经完成了这周的生死判定，同一周内不会既退役又复活。
+     */
+    private void demoteLessonsByOutcomesQuietly(Strategy strategy) {
+        if (memoryLessonService == null || decisionQualityService == null
+                || strategy.getUser() == null || strategy.getUser().getId() == null) {
+            return;
+        }
+        try {
+            Long userId = strategy.getUser().getId();
+            List<Map<String, Object>> lessons = memoryLessonService.searchLessons(
+                    userId, strategy.getName() + " " + strategy.getSymbol(),
+                    WEEKLY_REFLECTION_TASK_TYPE, 5);
+            for (Map<String, Object> lesson : lessons) {
+                Long id = longOf(lesson.get("id"));
+                LocalDateTime recordedAt = parseRecordedAt(lesson.get("recordedAt"));
+                if (id == null || recordedAt == null) {
+                    continue;
+                }
+                Map<String, Object> outcome = decisionQualityService
+                        .agentOutcomeSince(strategy, recordedAt.toLocalDate());
+                int evaluated = intOf(outcome.get("evaluated"));
+                Double winRate = doubleOf(outcome.get("winRatePct"));
+                if (shouldRetireLesson(evaluated, winRate)) {
+                    memoryLessonService.retire(userId, id);
+                    log.info("教训自动退役 strategy id={} lesson id={}：出生后 agent 成交"
+                                    + " {} 笔已判读、胜率 {}%（≤{}% 阈值）——教训被后续战绩证伪",
+                            strategy.getId(), id, evaluated, winRate, LESSON_DEMOTE_MAX_WIN_RATE);
+                }
+            }
+        } catch (Exception e) {
+            log.info("教训退役评估失败 strategy id={}（不影响周反思）：{}",
+                    strategy.getId(), e.toString());
+        }
+    }
+
+    private static Long longOf(Object raw) {
+        return raw instanceof Number ? ((Number) raw).longValue() : null;
+    }
+
+    private static int intOf(Object raw) {
+        return raw instanceof Number ? ((Number) raw).intValue() : 0;
+    }
+
+    private static Double doubleOf(Object raw) {
+        return raw instanceof Number ? ((Number) raw).doubleValue() : null;
+    }
+
+    private static LocalDateTime parseRecordedAt(Object raw) {
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return LocalDateTime.parse(String.valueOf(raw));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 一次周反思（P2）：本周材料 → Python 一次 LLM 反思 → 教训落 MemoryLesson。
+     *
+     * <p>门控在先：本周没有委员会记录就不发请求（没有过程就没有教训的原料，
+     * 也省一次模型调用）。委员会的过程从痕迹的 snapshot_json 里取（roles 的
+     * 发言摘录是委员会自带的审计产物，见 trading_committee.as_audit）。
+     */
+    private void weeklyReflectionQuietly(Strategy strategy) {
+        if (strategy.getUser() == null) {
+            return;
+        }
+        // 教训退出机制：反思之前先体检旧教训（被后续战绩证伪的自动退役，
+        // 不再无限期回流进委员会提示词）。放在委员会记录门控之前——
+        // 即使本周没开会，上几周的教训也该完成这周的生死判定。
+        demoteLessonsByOutcomesQuietly(strategy);
+        LocalDate windowStart = CnTime.today().minusDays(REFLECTION_WINDOW_DAYS);
+        List<ObjectNode> committees = new ArrayList<>();
+        for (PaperTradeTrace trace : paperTraceService.listRecent(strategy.getId(), 40)) {
+            if (trace.getTradeDate() == null || trace.getTradeDate().isBefore(windowStart)) {
+                continue;
+            }
+            ObjectNode compact = compactCommitteeOf(trace);
+            if (compact != null) {
+                committees.add(compact);
+            }
+        }
+        if (committees.isEmpty()) {
+            log.debug("Weekly reflection skipped for strategy id={}：本周没有委员会记录", strategy.getId());
+            return;
+        }
+
+        ObjectNode payload = mapper.createObjectNode();
+        ObjectNode meta = payload.putObject("strategy");
+        meta.put("name", strategy.getName());
+        meta.put("symbol", strategy.getSymbol());
+        meta.put("decisionMode", ExecutionContract.normalizeDecisionMode(strategy.getDecisionMode()));
+        JsonNode experience = strategyExperienceQuietly(strategy);   // 定量半环做底座
+        if (experience != null) {
+            payload.set("experience", experience);
+        }
+        ArrayNode trades = payload.putArray("trades");
+        paperTradeRepository.findByStrategyIdOrderByTradeDateDescCreatedAtDesc(strategy.getId()).stream()
+                .filter(trade -> trade.getTradeDate() != null && !trade.getTradeDate().isBefore(windowStart))
+                .limit(10)
+                .forEach(trade -> {
+                    ObjectNode row = trades.addObject();
+                    row.put("date", trade.getTradeDate().toString());
+                    row.put("side", trade.getSide() == null ? "" : trade.getSide().toLowerCase());
+                    row.put("price", trade.getPrice() == null ? null : Money.price(trade.getPrice()));
+                    row.put("shares", trade.getShares() == null ? null : Money.price(trade.getShares()));
+                });
+        payload.set("committee", mapper.valueToTree(
+                committees.size() > 3 ? committees.subList(0, 3) : committees));
+
+        JsonNode response;
+        try {
+            response = strategyClient.weeklyReflection(payload);
+        } catch (Exception e) {
+            log.info("周反思调用失败 strategy id={}（不影响复盘）：{}", strategy.getId(), e.toString());
+            return;
+        }
+        if (response == null || !response.path("ok").asBoolean(false)) {
+            log.info("周反思未产出 strategy id={}：{}", strategy.getId(),
+                    response == null ? "无响应" : response.path("warnings").toString());
+            return;
+        }
+        JsonNode lessons = response.path("lessons");
+        if (!lessons.isArray() || lessons.isEmpty()) {
+            log.info("周反思完成 strategy id={}：本周无可提炼教训（宁缺毋滥是合法结果）", strategy.getId());
+            return;
+        }
+        if (memoryLessonService == null) {
+            return;
+        }
+        MemoryLessonsRequest request = new MemoryLessonsRequest();
+        request.setUserId(strategy.getUser().getId());
+        request.setSessionKey("weekly-reflection:strategy:" + strategy.getId());
+        List<MemoryLessonRequest> items = new ArrayList<>();
+        for (JsonNode lesson : lessons) {
+            MemoryLessonRequest item = new MemoryLessonRequest();
+            item.setTaskType(WEEKLY_REFLECTION_TASK_TYPE);
+            item.setSymptom(lesson.path("symptom").asText(""));
+            item.setContext(lesson.path("context").asText(""));
+            item.setResolution(lesson.path("resolution").asText(""));
+            item.setReusableRule(lesson.path("reusable_rule").asText(""));
+            item.setConfidence(lesson.path("confidence").isNumber()
+                    ? lesson.path("confidence").asDouble() : null);
+            item.setProvenance("agent");
+            items.add(item);
+        }
+        request.setLessons(items);
+        try {
+            memoryLessonService.saveLessons(request);
+            log.info("周反思落库 strategy id={}：{} 条教训", strategy.getId(), items.size());
+        } catch (Exception e) {
+            log.info("周反思教训落库失败 strategy id={}（不影响复盘）：{}",
+                    strategy.getId(), e.toString());
+        }
+    }
+
+    /**
+     * 从痕迹的 snapshot_json 里抽出委员会过程的紧凑投影：日期 + 结论 + 角色发言摘录。
+     * 兼容 committee 落在顶层或 extra 下两种历史位置；不是委员会痕迹返回 null。
+     */
+    private ObjectNode compactCommitteeOf(PaperTradeTrace trace) {
+        if (!ExecutionContract.DECISION_MODE_AGENT.equals(
+                ExecutionContract.normalizeDecisionMode(trace.getDecisionMode()))) {
+            return null;
+        }
+        try {
+            JsonNode snapshot = mapper.readTree(
+                    trace.getSnapshotJson() == null ? "{}" : trace.getSnapshotJson());
+            JsonNode committee = snapshot.path("committee");
+            if (!committee.isObject() || committee.isEmpty()) {
+                committee = snapshot.path("extra").path("committee");
+            }
+            if (!committee.isObject() || committee.isEmpty()) {
+                return null;   // agent 痕迹但没带辩论记录（如预算/门控跳过）：没有过程可反思
+            }
+            ObjectNode compact = mapper.createObjectNode();
+            compact.put("date", trace.getTradeDate().toString());
+            compact.put("decision", trace.getDecision() == null ? "" : trace.getDecision());
+            compact.put("signal", trace.getSignal() == null ? "" : trace.getSignal());
+            compact.put("skipReason", trace.getSkipReason() == null ? "" : trace.getSkipReason());
+            ArrayNode roles = compact.putArray("roles");
+            JsonNode rawRoles = committee.path("roles");
+            int kept = 0;
+            if (rawRoles.isArray()) {
+                for (JsonNode role : rawRoles) {
+                    ObjectNode row = roles.addObject();
+                    row.put("label", role.path("label").asText(role.path("role").asText("")));
+                    row.put("said", role.path("excerpt").asText(""));
+                    if (++kept >= 8) {
+                        break;
+                    }
+                }
+            }
+            compact.put("warnings", committee.path("warnings").toString());
+            return compact;
+        } catch (Exception e) {
+            return null;   // 单条痕迹解析失败只跳过它，不拖垮整轮反思
         }
     }
 
@@ -279,6 +695,7 @@ public class PaperTradingService {
         item.setPaperEnabled(Boolean.TRUE.equals(strategy.getPaperEnabled()));
         item.setDecisionMode(ExecutionContract.normalizeDecisionMode(strategy.getDecisionMode()));
         item.setDecisionModeSince(strategy.getDecisionModeSince());
+        item.setConfigUpdatedAt(strategy.getConfigUpdatedAt());
 
         PaperAccount account = paperAccountRepository.findByStrategyId(strategy.getId()).orElse(null);
         if (account != null) {
@@ -388,6 +805,27 @@ public class PaperTradingService {
     }
 
     private PaperAccount evaluateStrategy(Long strategyId, LocalDate today) {
+        return evaluateStrategy(strategyId, today, ExecutionContract.TRIGGER_CRON);
+    }
+
+    /**
+     * 切换决策来源后的第一次评估（同步，触发 = manual）。
+     *
+     * <p>只在切到 agent 且模拟盘在跑时由监听器调用：委员会门控自带 first_decision
+     * 触发（从未开过会 ⇒ 开会），这里把"第一次"从下一个 15:30 提前到"现在" ——
+     * 换决策者这个动作的意义就是"从现在起按新决策者来"，否则切换后的整个上午
+     * 盘中只会反复留下 awaiting_authorization（实测：一天 253 条同一结论）。
+     */
+    public PaperAccount evaluateOnDecisionModeSwitched(Long strategyId) {
+        return evaluateStrategy(strategyId, CnTime.today(), ExecutionContract.TRIGGER_MANUAL);
+    }
+
+    /**
+     * 日线结算。{@code trigger} 写进每一条痕迹：cron（15:30 定时）还是 manual
+     * （启动模拟盘 / 切换决策来源时立刻首会）—— 痕迹必须能回答"这次结算是谁发起的"，
+     * 手动触发的首会冒充成 cron 会让"为什么 10:02 有一条日线结算"变成悬案。
+     */
+    private PaperAccount evaluateStrategy(Long strategyId, LocalDate today, String trigger) {
         Strategy strategy = strategyRepository.findById(strategyId)
                 .orElseThrow(() -> new IllegalArgumentException("策略不存在"));
 
@@ -423,8 +861,15 @@ public class PaperTradingService {
             result = strategyClient.evaluateBar(strategy.getConfigJson(), strategy.getSymbol(),
                     today.toString(), position);
         } else if (isAgentMode(strategy)) {
+            // 信息面证据（P3）+ 经验回流（P4）+ 组合上下文（P5）三包并进委员会证据：
+            // 新闻知识、自己的成绩单、自己管着多大集中度。组装失败/为空都不带字段
+            // （Python 侧 fail-open）。统一走全量签名——签名组合到此为止。
+            JsonNode newsBriefing = committeeBriefingQuietly(strategy.getSymbol());
+            JsonNode experience = strategyExperienceQuietly(strategy);
+            JsonNode portfolio = portfolioContextQuietly(strategy, account);
             result = strategyClient.agentDecide(strategy.getConfigJson(), strategy.getSymbol(),
-                    today.toString(), position, lastBriefingDate(strategy.getId()));
+                    today.toString(), position, lastBriefingDate(strategy.getId()),
+                    newsBriefing, experience, portfolio);
         } else {
             result = strategyClient.evaluateBar(strategy.getConfigJson(), strategy.getSymbol(),
                     today.toString(), position);
@@ -433,7 +878,7 @@ public class PaperTradingService {
             // 之前这里只打一行日志：那天为什么没结算，除了翻日志没有别的办法查。
             log.warn("{} decision returned null for strategy id={}", decisionMode, strategy.getId());
             return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_DAILY,
-                    ExecutionContract.TRIGGER_CRON, today, null, null,
+                    trigger, today, null, null,
                     ExecutionContract.SKIP_DATA_UNAVAILABLE);
         }
         // 休市/数据未出：Python 端明确标记请求日无 bar 时，禁止用旧 bar 冒充当日成交
@@ -441,7 +886,7 @@ public class PaperTradingService {
             log.warn("Paper settlement skipped for strategy id={} on {}: bar missing (休市/数据未出)",
                     strategy.getId(), today);
             PaperTradeTrace trace = newTrace(strategy, account, ExecutionContract.SETTLEMENT_DAILY,
-                    ExecutionContract.TRIGGER_CRON, today, null, result);
+                    trigger, today, null, result);
             trace.setDecision(ExecutionContract.DECISION_SKIP);
             trace.setSkipReason(skipReasonOf(result, ExecutionContract.SKIP_NO_BAR));
             trace.setSignal(textOr(result.get("signal"), null));
@@ -450,9 +895,15 @@ public class PaperTradingService {
             return account;
         }
 
+        // 委员会带了授权输出就落库（最新一行生效）。失败无害：授权写不进去
+        // 只是盘中继续沿用上一次的边界，绝不让它影响本次结算本身。
+        if (isAgentMode(strategy)) {
+            saveAuthorization(strategy, result);
+        }
+
         PaperAccount settled = applyBarResult(strategy, account, result, today, null,
-                ExecutionContract.SETTLEMENT_DAILY, ExecutionContract.TRIGGER_CRON,
-                alreadyTradedToday);
+                ExecutionContract.SETTLEMENT_DAILY, trigger,
+                alreadyTradedToday, null);
         recordEquitySnapshot(strategy, settled, result, today);
         recordPaperFacts(strategy, settled, today);
         // 到期就回填预期（复用同一批净值快照，不额外查库）。
@@ -574,6 +1025,20 @@ public class PaperTradingService {
             if (series.hasData()) {
                 addFact(facts, subject, ObjectiveFactKeys.PAPER_FLAT_DAYS, series.flatDays(), at);
             }
+            // 里程碑（双层记忆，2026-10-09）：快照类遥测已不可见，用户记忆里
+            // 只留"值得记住的事" —— 首笔成交与清仓。判定基于取代链上的上一份持仓。
+            String milestone = positionMilestone(
+                    memoryFactService.activeFactValues(strategy.getUser().getId(), subject,
+                            List.of(ObjectiveFactKeys.PAPER_SHARES))
+                            .get(ObjectiveFactKeys.PAPER_SHARES),
+                    account.getShares());
+            if (milestone != null) {
+                MemoryFactRequest story = ObjectiveFactKeys.observationStory(
+                        subject, milestone + "（" + tradeDate + "）", at);
+                if (story != null) {
+                    facts.add(story);
+                }
+            }
             if (facts.isEmpty()) {
                 return;
             }
@@ -583,6 +1048,30 @@ public class PaperTradingService {
             log.warn("模拟盘客观事实入账失败 strategyId={}: {}",
                     strategy == null ? null : strategy.getId(), e.getMessage());
         }
+    }
+
+    /**
+     * 持仓状态变化 → 里程碑叙事；无里程碑返回 null。
+     * 独立成纯函数：里程碑判定是"什么时候算第一次"的语义，值得单测钉住。
+     */
+    static String positionMilestone(String previousSharesText, java.math.BigDecimal sharesNow) {
+        java.math.BigDecimal previous;
+        try {
+            previous = previousSharesText == null || previousSharesText.isBlank()
+                    ? java.math.BigDecimal.ZERO : new java.math.BigDecimal(previousSharesText.trim());
+        } catch (NumberFormatException e) {
+            previous = java.math.BigDecimal.ZERO;
+        }
+        java.math.BigDecimal now = sharesNow == null ? java.math.BigDecimal.ZERO : sharesNow;
+        boolean heldBefore = previous.signum() > 0;
+        boolean holdsNow = now.signum() > 0;
+        if (!heldBefore && holdsNow) {
+            return "模拟盘首笔成交，开始持仓";
+        }
+        if (heldBefore && !holdsNow) {
+            return "模拟盘已清仓";
+        }
+        return null;
     }
 
     private static void addFact(List<MemoryFactRequest> facts, String subject, String predicate,
@@ -601,24 +1090,34 @@ public class PaperTradingService {
         Strategy strategy = strategyRepository.findById(strategyId)
                 .orElseThrow(() -> new IllegalArgumentException("策略不存在"));
 
-        // agent 模式下**盘中不再问规则引擎**（2026-09-18 裁决，方案 A）。
-        //
-        // 换决策来源就是换决策者：之前这里无条件调 DSL，于是委员会当天说"不动"，
-        // 盘中的 DSL 信号照样能建仓 —— 决定被覆盖了，而"agent 段"的曲线里还混着
-        // DSL 触发的成交（痕迹会如实标成 rule，所以不算骗人，只是两段再也没法比较）。
-        // 代价写在明处：agent 模式下账户的最新价/净值在盘中不再刷新，只在每日结算后更新一次。
-        if (isAgentMode(strategy)) {
-            log.debug("Realtime check skipped for strategy id={}: decision_mode=agent "
-                    + "（只在日线结算时由委员会决策）", strategy.getId());
-            return null;
-        }
-
         var existingAccount = paperAccountRepository.findByStrategyId(strategy.getId());
         PaperAccount account = existingAccount.orElseGet(PaperAccount::new);
         boolean isNewAccount = existingAccount.isEmpty();
         initializeAccount(account, strategy);
         if (isNewAccount) {
             account = paperAccountRepository.save(account);
+        }
+
+        // ===== 盘中授权（authorization 模式，2026-10-06；2026-10-08 加止损硬通道）=====
+        // 改造前 agent 模式盘中直接短路（2026-09-18 方案 A：一天只剩 15:30 一决），
+        // 防的是"委员会说不动、盘中 DSL 照样建仓"的决定冲突。现在决定权以**授权**的
+        // 形式前置：委员会开会时划定边界（allow_open/allow_close/max_position_pct），
+        // 规则引擎在边界内自动执行——边界内的成交是委员会授权的执行，不是对它的覆盖。
+        // 授权是"自上次开会起"的持续状态：门控没开会的日子沿用旧授权，没有空窗
+        // （见 PaperAuthorization 的生命周期说明）。
+        //
+        // 2026-10-08 的教训（国庆后首个交易日大跌）：授权门控**不能挡止损**。
+        // 委员会边界管的是"机会"（开不开仓、平不平仓的权衡），止损管的是"生存"——
+        // stop_loss_pct / trailing_stop_pct 触发的卖出是账户层的硬风控，无论授权在不在、
+        // allow_close 是不是 false，都必须当天盘中执行，否则"委员会还没开会"就等于
+        // "没有止损"，大跌日的亏损一路裸奔到 15:30。所以 agent 模式现在也照常做盘中
+        // 规则评估（纯规则引擎调用，零 LLM 成本），只是**只有止损类卖出**可以越过门控。
+        PaperAuthorization authorization = null;
+        boolean intradayAuthorized = true;   // rule 模式：盘中本来就是规则自己的地盘
+        if (isAgentMode(strategy)) {
+            authorization = paperAuthorizationRepository.findLatest(strategy.getId()).orElse(null);
+            intradayAuthorized = authorization != null
+                    && Boolean.TRUE.equals(authorization.getIntradayExecution());
         }
 
         JsonNode position = buildPosition(account);
@@ -639,12 +1138,549 @@ public class PaperTradingService {
             return account;
         }
         account.setLastBarTime(barTime);
+
+        String pendingSignal = textOr(result.get("signal"), "").toLowerCase(Locale.ROOT);
+        boolean hardStopSell = isStopLossSell(result, pendingSignal);
+
+        // 授权缺失或被明确关闭：除止损外盘中不执行，但必须留下可见痕迹——
+        // "agent 模式为什么盘中没动静"是用户最先问的问题（去重键保证一天一行）。
+        // 顺带把账户按最新价标记一下（markToMarket）：组合熔断按当前净值判回撤，
+        // agent 账户若一直用昨收估值，大跌日熔断对它永远不触发。
+        if (!intradayAuthorized && !hardStopSell) {
+            markToMarket(strategy, account, result);
+            markFingerprintDecisionMode(result);
+            // 两种"不动"必须分开：从未授权（awaiting_authorization）与
+            // 委员会开会后明确关闭盘中执行（agent_intraday_disabled）——
+            // 后者是委员会的主动决定，混进"没开会"会让"为什么关掉"永远统计不出来。
+            String reason = authorization == null
+                    ? ExecutionContract.SKIP_AWAITING_AUTHORIZATION
+                    : ExecutionContract.SKIP_AGENT_INTRADAY_DISABLED;
+            return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME, trigger,
+                    CnTime.today(), barTime, result, reason);
+        }
+
+        // ===== 盘中盯盘 agent（agent 模式盘中的主决策者，2026-10-09）=====
+        // 事件（含 rule_signal —— 规则引擎的信号在这里降级为事件源）发生时叫起轻量
+        // 盯盘交易员（1 次 LLM、秒级），在授权边界内直接下单。返回 null 表示
+        // "这一节盯盘不参与"（无事件/全在冷却/LLM 降级）——落回下面的"规则+授权"
+        // 执行：盯盘是增强，不是单点，盘中绝不因 LLM 故障瘫痪。
+        // 止损（hardStopSell）刻意绕过盯盘直接走硬通道：生存线不等模型。
+        if (isAgentMode(strategy) && intradayAuthorized && !hardStopSell && intradayWatchEnabled) {
+            PaperAccount watched = runIntradayWatch(strategy, account, result, authorization,
+                    barTime, trigger);
+            if (watched != null) {
+                return watched;
+            }
+        }
+
+        // 组合熔断：该用户全部模拟盘当日总回撤超过阈值时，**新开仓**一律挡下
+        //（平仓不挡——熔断是把风险降下来，不是把出口锁死；止损卖出同属"降风险"，
+        // 自然也不挡）。规则与 agent 一视同仁：组合风险不关心这一单是谁决定的。
+        // 检查内部 fail-open（组合读挂了不停交易）。
+        if ("buy".equals(pendingSignal) && portfolioService != null
+                && strategy.getUser() != null
+                && portfolioService.haltsNewOpens(strategy.getUser().getId())) {
+            return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME, trigger,
+                    CnTime.today(), barTime, result, ExecutionContract.SKIP_PORTFOLIO_HALTED);
+        }
+
+        // 授权边界检查：信号方向越界就不执行。落 trace 的原因是
+        // outside_authorization 而不是 rule_not_met——"被边界挡下"与"市场没给机会"
+        // 必须分得开，委员会复盘时才能看到自己的边界挡了多少单。
+        // 唯一的例外是止损卖出（hardStopSell）：allow_close=false 挡不住它，
+        // 见上面"止损硬通道"的说明。
+        if (authorization != null) {
+            boolean openBlocked = "buy".equals(pendingSignal) && !Boolean.TRUE.equals(authorization.getAllowOpen());
+            boolean closeBlocked = "sell".equals(pendingSignal)
+                    && !Boolean.TRUE.equals(authorization.getAllowClose()) && !hardStopSell;
+            if (openBlocked || closeBlocked) {
+                markToMarket(strategy, account, result);
+                markFingerprintDecisionMode(result);
+                return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME, trigger,
+                        CnTime.today(), barTime, result, ExecutionContract.SKIP_OUTSIDE_AUTHORIZATION);
+            }
+        }
+        if (isAgentMode(strategy)) {
+            // 止损通道与授权通道分开标注：委员会复盘时要能分清"边界内的执行"
+            // 与"越过边界的硬止损"——后者是它下次开会该重新评估边界的信号。
+            markAuthorizedExecution(result, hardStopSell
+                    ? "intraday_hard_stop" : "intraday_authorized_execution");
+        }
         // 刻意**不**在这里写客观事实：本方法由每次价格刷新触发，
         // 在这里记会把取代链冲成一天上百个值（见 recordPaperFacts 的说明）。
         // alreadyTradedToday=false：盘中这条**就是**下单的那条路，
         // 它自己要跑的就是"能不能成交"的判断（重复成交由 dedupe 键与 T+1 守卫挡）。
         return applyBarResult(strategy, account, result, CnTime.today(), barTime,
-                ExecutionContract.SETTLEMENT_REALTIME, trigger, false);
+                ExecutionContract.SETTLEMENT_REALTIME, trigger, false,
+                authorization == null ? null : authorization.getMaxPositionPct());
+    }
+
+    /**
+     * 盯盘交易员的一次完整回合：过滤冷却 → 查预算 → 调 Python 盯盘端点 → 按动作执行。
+     *
+     * <p>返回值语义（调用方据此分流）：
+     * <ul>
+     *   <li>非 null：盯盘已给出**结论**（成交 / hold 留痕 / flag 标记），本节到此为止；</li>
+     *   <li>null：盯盘**不参与**本节（无事件 / 全在冷却 / 预算尽已留痕 / LLM 降级），
+     *       调用方落回"规则 + 授权"的执行路径。</li>
+     * </ul>
+     */
+    /** news_shock 的事件级冷却：同一条新闻 4 小时内只叫醒一次模型（类型冷却 15 分钟挡不住它）。 */
+    private static final long NEWS_SHOCK_COOLDOWN_MS = 4 * 60 * 60 * 1000L;
+    private final Map<String, Long> newsShockLastAlerted = new ConcurrentHashMap<>();
+
+    private PaperAccount runIntradayWatch(Strategy strategy, PaperAccount account, JsonNode result,
+                                          PaperAuthorization authorization, String barTime,
+                                          String trigger) {
+        JsonNode events = result.get("events");
+        boolean hasMarketEvents = events != null && events.isArray() && !events.isEmpty();
+        // news_shock（P3）：无盘中事件时，high impact 新闻也能单独叫醒盯盘；
+        // 有盘中事件时作为附加上下文一并给（同一根 bar 上"急跌 + 利空新闻"是强信号）。
+        JsonNode newsAlert = latestShockQuietly(strategy);
+        if (!hasMarketEvents) {
+            if (newsAlert == null) {
+                return null;   // 无事件无新闻：零成本，规则路径照旧
+            }
+            // 合成与 evaluate-bar 同形状的事件数组（filterCooledEvents 按 type 读）
+            ObjectNode withNews = mapper.createObjectNode();
+            ArrayNode synth = withNews.putArray("events");
+            synth.addObject().put("type", "news_shock");
+            ((ObjectNode) result).set("events", synth);
+            events = synth;
+        }
+        List<String> freshTypes = filterCooledEvents(strategy.getId(), events);
+        if (freshTypes.isEmpty()) {
+            return null;   // 全在冷却窗口内：同一件事不叫醒模型第二次
+        }
+        if (watchCallsUsed(strategy.getId()) >= intradayWatchDailyBudget) {
+            // 预算尽：留一行痕（dedupe 保证一天一行）说明"盯盘今天下班了"，
+            // 然后回落规则路径 —— 预算是成本止损线，不是"盘中停止工作"。
+            markToMarket(strategy, account, result);
+            markFingerprintDecisionMode(result);
+            markWatchAudit(result, freshTypes, "budget_exceeded", null);
+            traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                    ExecutionContract.TRIGGER_WATCH, CnTime.today(), barTime, result,
+                    ExecutionContract.SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED);
+            return null;
+        }
+
+        JsonNode watch;
+        try {
+            // 无新闻告警走旧签名（既有路径与测试桩不变）；有才带第 6 参；
+            // 经验回流（P4）：有成绩单时走全参签名（newsAlert 可为 null）
+            JsonNode experience = strategyExperienceQuietly(strategy);
+            if (experience != null) {
+                watch = strategyClient.intradayWatch(strategy.getConfigJson(), strategy.getSymbol(),
+                        events, buildPosition(account), authorizationNode(authorization),
+                        newsAlert, experience);
+            } else if (newsAlert == null) {
+                watch = strategyClient.intradayWatch(strategy.getConfigJson(), strategy.getSymbol(),
+                        events, buildPosition(account), authorizationNode(authorization));
+            } else {
+                watch = strategyClient.intradayWatch(strategy.getConfigJson(), strategy.getSymbol(),
+                        events, buildPosition(account), authorizationNode(authorization), newsAlert);
+            }
+        } catch (Exception e) {
+            log.warn("Intraday watch call failed for strategy id={}: {}", strategy.getId(), e.getMessage());
+            return null;   // 调用失败 = 没问成 → 降级回规则路径
+        }
+        if (watch == null || watch.path("degraded").asBoolean(false)) {
+            log.info("Intraday watch degraded for strategy id={} on {} — falling back to rule execution",
+                    strategy.getId(), barTime);
+            return null;   // LLM 不可用/端点异常 → 降级
+        }
+        watchCallCount.merge(strategy.getId() + ":" + CnTime.today(), 1, Integer::sum);
+
+        String action = textOr(watch.get("action"), "hold").toLowerCase(Locale.ROOT);
+        BigDecimal size = Money.ratePct(numberOr(watch.get("size_fraction"), null));
+        boolean actionableSize = size != null && size.signum() > 0 && size.compareTo(BigDecimal.ONE) <= 0;
+        markToMarket(strategy, account, result);
+        markFingerprintDecisionMode(result);
+        markWatchAudit(result, freshTypes, action, watch);
+
+        // "buy 但没给有效仓位"是自相矛盾的输出：按 hold 处理（与全委会的 decision=skip 纪律同源）
+        if ((ExecutionContract.DECISION_BUY.equals(action) || "partial_sell".equals(action))
+                && !actionableSize) {
+            log.warn("Intraday watch action={} but no usable size_fraction for strategy id={} — hold",
+                    action, strategy.getId());
+            action = "hold";
+        }
+
+        switch (action) {
+            case "hold" -> {
+                // 模型看过了、决定不动（含否决规则信号）—— 这正是要审计的分歧
+                return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                        ExecutionContract.TRIGGER_WATCH, CnTime.today(), barTime, result,
+                        ExecutionContract.SKIP_WATCH_HOLD);
+            }
+            case "flag" -> {
+                notifyWatchFlag(strategy, result, freshTypes, watch);
+                return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                        ExecutionContract.TRIGGER_WATCH, CnTime.today(), barTime, result,
+                        ExecutionContract.SKIP_WATCH_HOLD);
+            }
+            case "buy", "sell", "partial_sell" -> {
+                // 方向边界：越界的建议不执行（留痕 + 推送），委员会复盘时能看到
+                // 自己的边界挡了多少次盯盘建议
+                boolean openBlocked = "buy".equals(action)
+                        && authorization != null && !Boolean.TRUE.equals(authorization.getAllowOpen());
+                boolean closeBlocked = !("buy".equals(action))
+                        && authorization != null && !Boolean.TRUE.equals(authorization.getAllowClose());
+                if (openBlocked || closeBlocked) {
+                    notifyWatchFlag(strategy, result, freshTypes, watch);
+                    return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                            ExecutionContract.TRIGGER_WATCH, CnTime.today(), barTime, result,
+                            ExecutionContract.SKIP_OUTSIDE_AUTHORIZATION);
+                }
+                // 组合熔断与规则路径同一道闸：盯盘的开仓建议不豁免
+                if ("buy".equals(action) && portfolioService != null && strategy.getUser() != null
+                        && portfolioService.haltsNewOpens(strategy.getUser().getId())) {
+                    return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                            ExecutionContract.TRIGGER_WATCH, CnTime.today(), barTime, result,
+                            ExecutionContract.SKIP_PORTFOLIO_HALTED);
+                }
+                // 合成执行响应：signal/size_fraction 来自盯盘，价格/指纹/快照沿用同一根 bar。
+                // 下面的 applyBarResult 会照旧走完整执行纪律（整手/佣金/T+1/三层仓位夹取）。
+                ObjectNode synth = mapper.createObjectNode();
+                synth.put("signal", "buy".equals(action) ? "buy" : "sell");
+                if (result.has("price")) {
+                    synth.set("price", result.get("price"));
+                }
+                synth.put("size_fraction",
+                        "partial_sell".equals(action) ? size.doubleValue()
+                                : ("buy".equals(action) ? size.doubleValue() : 1.0));
+                // matched_conditions 进痕迹的 reason 列：盯盘动作 + 触发它的事件一眼可读
+                ArrayNode conditions = synth.putArray("matched_conditions");
+                conditions.add("watch_" + action);
+                freshTypes.forEach(conditions::add);
+                if (result.has("fingerprint")) {
+                    synth.set("fingerprint", result.get("fingerprint"));
+                }
+                if (result.has("snapshot")) {
+                    synth.set("snapshot", result.get("snapshot"));
+                }
+                return applyBarResult(strategy, account, synth, CnTime.today(), barTime,
+                        ExecutionContract.SETTLEMENT_REALTIME, ExecutionContract.TRIGGER_WATCH,
+                        false, authorization == null ? null : authorization.getMaxPositionPct());
+            }
+            default -> {
+                log.warn("Unknown watch action '{}' for strategy id={} — hold", action, strategy.getId());
+                return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                        ExecutionContract.TRIGGER_WATCH, CnTime.today(), barTime, result,
+                        ExecutionContract.SKIP_WATCH_HOLD);
+            }
+        }
+    }
+
+
+    /** 委员会的信息面证据包（P3）：组装失败/为空都返回 null（不带字段，fail-open）。 */
+    private JsonNode committeeBriefingQuietly(String symbol) {
+        if (newsBriefingService == null) {
+            return null;
+        }
+        try {
+            JsonNode briefing = newsBriefingService.committeeBriefing(symbol);
+            return NewsBriefingService.isEmptyBriefing(briefing) ? null : briefing;
+        } catch (Exception e) {
+            log.info("委员会信息面证据组装失败 symbol={}（不影响决策）：{}", symbol, e.toString());
+            return null;
+        }
+    }
+
+    /**
+     * 策略的经验包（P4 经验回流 + P2 定性半环）：定量成绩单（胜率/对齐收益）为主，
+     * 有周反思教训时附带最近 2 条（symptom + 可执行规则）—— 委员会既能看见
+     * "错了多少"，也能看见"为什么错、下次怎么做"。无成交/组装失败都返回 null
+     * （fail-open）；教训查询失败只少一块，绝不让经验包整体失败。
+     */
+    private JsonNode strategyExperienceQuietly(Strategy strategy) {
+        if (decisionQualityService == null) {
+            return null;
+        }
+        try {
+            Map<String, Object> experience = decisionQualityService.strategyExperience(strategy, 6);
+            if (experience == null || experience.isEmpty()) {
+                return null;
+            }
+            ObjectNode node = mapper.valueToTree(experience);
+            attachRecentLessons(strategy, node);
+            return node;
+        } catch (Exception e) {
+            log.info("策略经验包组装失败 strategy id={}（不影响决策）：{}",
+                    strategy.getId(), e.toString());
+            return null;
+        }
+    }
+
+    /** 经验包 v2 的定性半环：最近 2 条周反思教训（active 优先，打分交给教训服务）。 */
+    private void attachRecentLessons(Strategy strategy, ObjectNode experience) {
+        if (memoryLessonService == null || strategy.getUser() == null) {
+            return;
+        }
+        try {
+            List<Map<String, Object>> lessons = memoryLessonService.searchLessons(
+                    strategy.getUser().getId(),
+                    strategy.getName() + " " + strategy.getSymbol(),
+                    WEEKLY_REFLECTION_TASK_TYPE, 2);
+            if (lessons == null || lessons.isEmpty()) {
+                return;
+            }
+            ArrayNode rows = experience.putArray("lessons");
+            for (Map<String, Object> lesson : lessons) {
+                ObjectNode row = rows.addObject();
+                row.put("symptom", String.valueOf(lesson.getOrDefault("symptom", "")));
+                row.put("reusableRule", String.valueOf(lesson.getOrDefault("reusableRule", "")));
+            }
+            experience.put("lessonsNote",
+                    "以下是过去周反思提炼的教训（历史经验的定性半环，供参考不是禁令）。");
+        } catch (Exception e) {
+            log.debug("教训回读失败 strategy id={}（经验包照常，只是少了定性半环）：{}",
+                    strategy.getId(), e.toString());
+        }
+    }
+
+    /**
+     * 组合上下文（P5，参考 TradingAgents 的 PortfolioContext）：委员会不该只看见
+     * 这一条策略 —— 同一个行情，"满仓单票"和"三成仓位还有两条策略在跑"该给不同答案。
+     * 内容：本策略现金/持仓占比 + 该用户全部在跑策略的敞口清单。纯读库、零 LLM；
+     * 组装失败返回 null（fail-open）。
+     */
+    private JsonNode portfolioContextQuietly(Strategy strategy, PaperAccount account) {
+        if (strategy.getUser() == null) {
+            return null;
+        }
+        try {
+            ObjectNode node = mapper.createObjectNode();
+            node.put("note", "账户与组合上下文：你管的不只这一条策略——评估集中度与仓位比例时以此为准。");
+
+            ObjectNode self = node.putObject("thisStrategy");
+            self.put("cash", Money.amount(orZero(account.getCash())));
+            if (account.getShares() != null && account.getShares().signum() > 0
+                    && account.getLastPrice() != null && account.getEquity() != null
+                    && account.getEquity().signum() > 0) {
+                java.math.BigDecimal positionValue = account.getShares().multiply(account.getLastPrice());
+                self.put("shares", Money.price(account.getShares()));
+                self.put("positionValue", Money.amount(positionValue));
+                self.put("positionSharePct", positionValue
+                        .divide(account.getEquity(), 4, java.math.RoundingMode.HALF_UP)
+                        .multiply(java.math.BigDecimal.valueOf(100))
+                        .setScale(1, java.math.RoundingMode.HALF_UP));
+            } else {
+                self.put("shares", 0);
+                self.put("positionSharePct", 0);
+            }
+
+            ObjectNode portfolio = node.putObject("userPortfolio");
+            java.util.List<Strategy> running = strategyRepository
+                    .findByUserIdOrderByUpdatedAtDesc(strategy.getUser().getId()).stream()
+                    .filter(s -> Boolean.TRUE.equals(s.getPaperEnabled()))
+                    .toList();
+            portfolio.put("strategiesRunning", running.size());
+            ArrayNode positions = portfolio.putArray("openPositions");
+            java.math.BigDecimal totalPositionValue = java.math.BigDecimal.ZERO;
+            java.math.BigDecimal totalEquity = java.math.BigDecimal.ZERO;
+            for (Strategy s : running) {
+                PaperAccount a = paperAccountRepository.findByStrategyId(s.getId()).orElse(null);
+                if (a == null || a.getShares() == null || a.getShares().signum() <= 0
+                        || a.getLastPrice() == null) {
+                    continue;
+                }
+                java.math.BigDecimal pv = a.getShares().multiply(a.getLastPrice());
+                totalPositionValue = totalPositionValue.add(pv);
+                if (a.getEquity() != null) {
+                    totalEquity = totalEquity.add(a.getEquity());
+                }
+                ObjectNode row = positions.addObject();
+                row.put("name", s.getName());
+                row.put("symbol", s.getSymbol());
+                row.put("positionValue", Money.amount(pv));
+            }
+            portfolio.put("totalPositionValue", Money.amount(totalPositionValue));
+            if (totalEquity.signum() > 0) {
+                portfolio.put("allStrategiesPositionPct", totalPositionValue
+                        .divide(totalEquity, 4, java.math.RoundingMode.HALF_UP)
+                        .multiply(java.math.BigDecimal.valueOf(100))
+                        .setScale(1, java.math.RoundingMode.HALF_UP));
+            }
+            return node;
+        } catch (Exception e) {
+            log.info("组合上下文组装失败 strategy id={}（不影响决策）：{}",
+                    strategy.getId(), e.toString());
+            return null;
+        }
+    }
+
+    /**
+     * 盯盘的 news_shock（P3）：该标的近 24h 的 high impact 已判方向新闻，
+     * 带 4 小时事件级冷却（同一条新闻反复触发只叫醒一次）。
+     * 检测失败/无新闻/服务未装配都返回 null（零成本）。
+     */
+    private JsonNode latestShockQuietly(Strategy strategy) {
+        if (newsBriefingService == null) {
+            return null;
+        }
+        try {
+            JsonNode shock = newsBriefingService.latestShock(strategy.getSymbol(), 24);
+            if (shock == null) {
+                return null;
+            }
+            String shockKey = strategy.getId() + ":news:" + shock.path("id").asLong();
+            long now = System.currentTimeMillis();
+            Long last = newsShockLastAlerted.get(shockKey);
+            if (last != null && now - last < NEWS_SHOCK_COOLDOWN_MS) {
+                return null;
+            }
+            newsShockLastAlerted.put(shockKey, now);
+            return shock;
+        } catch (Exception e) {
+            log.debug("news_shock 检测失败 symbol={}（忽略）：{}", strategy.getSymbol(), e.toString());
+            return null;
+        }
+    }
+
+    /** 事件冷却：同一事件类型在窗口内只叫醒模型一次（一次急涨往往连着几根 bar 都"在触发"）。 */
+    private List<String> filterCooledEvents(Long strategyId, JsonNode events) {        List<String> fresh = new ArrayList<>();
+        long now = System.currentTimeMillis();
+        for (JsonNode event : events) {
+            String type = event.path("type").asText("");
+            if (type.isBlank()) {
+                continue;
+            }
+            String key = strategyId + ":" + type;
+            Long last = watchEventLastFired.get(key);
+            if (last != null && now - last < WATCH_EVENT_COOLDOWN_MS) {
+                continue;
+            }
+            watchEventLastFired.put(key, now);
+            fresh.add(type);
+        }
+        return fresh;
+    }
+
+    private int watchCallsUsed(Long strategyId) {
+        return watchCallCount.getOrDefault(strategyId + ":" + CnTime.today(), 0);
+    }
+
+    /** 授权边界给模型看的形状（Python 侧 authorization 字段，口径以 PaperAuthorization 为准）。 */
+    private ObjectNode authorizationNode(PaperAuthorization authorization) {
+        ObjectNode node = mapper.createObjectNode();
+        if (authorization == null) {
+            node.putNull("intraday_execution");
+            return node;
+        }
+        node.put("intraday_execution", Boolean.TRUE.equals(authorization.getIntradayExecution()));
+        node.put("allow_open", Boolean.TRUE.equals(authorization.getAllowOpen()));
+        node.put("allow_close", Boolean.TRUE.equals(authorization.getAllowClose()));
+        node.put("max_position_pct", authorization.getMaxPositionPct() == null
+                ? 1.0 : authorization.getMaxPositionPct().doubleValue());
+        if (authorization.getNotes() != null) {
+            node.put("notes", authorization.getNotes());
+        }
+        return node;
+    }
+
+    /** 把盯盘的判断写进响应快照的 extra：痕迹因此能回答"盯盘看到了什么、说了什么"。 */
+    private static void markWatchAudit(JsonNode result, List<String> eventTypes, String action,
+                                       JsonNode watch) {
+        try {
+            JsonNode snapshot = result.get("snapshot");
+            if (!(snapshot instanceof ObjectNode snap)) {
+                return;
+            }
+            JsonNode extra = snap.get("extra");
+            if (!(extra instanceof ObjectNode ex)) {
+                return;
+            }
+            ObjectNode audit = ex.putObject("intraday_watch");
+            audit.put("events", String.join(",", eventTypes));
+            audit.put("action", action);
+            if (watch != null) {
+                audit.put("reason", watch.path("reason").asText(""));
+                audit.put("confidence", watch.path("confidence").asDouble(0.0));
+                audit.put("tokens", watch.path("watch_tokens").asInt(0));
+                if (watch.has("warnings")) {
+                    audit.set("warnings", watch.get("warnings"));
+                }
+            }
+        } catch (Exception e) {
+            // 旁路：审计标记失败不该影响盯盘本身
+        }
+    }
+
+    /** flag（盯盘标记给 15:30 委员会）与越界建议的推送旁路：失败只记日志。 */
+    private void notifyWatchFlag(Strategy strategy, JsonNode result, List<String> eventTypes,
+                                 JsonNode watch) {
+        if (pushService == null || strategy.getUser() == null) {
+            return;
+        }
+        try {
+            String reason = watch == null ? "" : watch.path("reason").asText("");
+            pushService.push(strategy.getUser().getUsername(),
+                    "盯盘标记：" + strategy.getName() + " " + strategy.getSymbol(),
+                    String.format("事件 %s；盯盘判断：%s（不下单，已标记给 15:30 委员会）",
+                            String.join("/", eventTypes), reason));
+        } catch (Exception e) {
+            log.debug("watch flag push failed for strategy {}: {}", strategy.getId(), e.getMessage());
+        }
+    }
+
+    /**
+     * 这个信号是不是**止损类卖出**（硬风控，不受授权门控约束）。
+     *
+     * <p>只认引擎在 {@code matched_conditions} 里点名的那两类：{@code stop_loss_pct}
+     * （相对成本亏到线）与 {@code trailing_stop_pct}（从最高水位回撤到线）。
+     * {@code take_profit_pct} 刻意不算——止盈是收益端的取舍，可以交给委员会权衡；
+     * 止损是生存底线，不能等。
+     */
+    private static boolean isStopLossSell(JsonNode result, String signal) {
+        if (!"sell".equals(signal)) {
+            return false;
+        }
+        JsonNode matched = result == null ? null : result.get("matched_conditions");
+        if (matched == null || !matched.isArray()) {
+            return false;
+        }
+        for (JsonNode condition : matched) {
+            String type = condition.asText("");
+            if ("stop_loss_pct".equals(type) || "trailing_stop_pct".equals(type)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 盘中标记市值：agent 模式**不交易**的那些 tick 也要按最新价刷新估值。
+     *
+     * <p>为什么必须做：组合熔断（PortfolioService）按账户当前净值判定单日回撤，
+     * agent 账户若盘中一直沿用上一次结算的估值，大跌日熔断对它永远不触发——
+     * 等 15:30 才发现回撤超限，熔断已经没有意义。这也是对原设计"agent 模式盘中
+     * 不刷新净值"的一次**有意放宽**：净值**曲线**不受影响（快照仍只在日线结算写，
+     * 一天一格），变的只是账户的当前读数与最高水位。
+     *
+     * <p>刻意不写 lastSignal / lastEvalAt / 客观事实：那三个字段说的是"决策"，
+     * 而这里只是估值；把它们刷了会把"委员会还没决策"装成"决策过但没动"。
+     */
+    private PaperAccount markToMarket(Strategy strategy, PaperAccount account, JsonNode result) {
+        try {
+            BigDecimal price = Money.price(priceOf(result));
+            if (price == null || price.signum() <= 0 || !isHolding(account)) {
+                return account;   // 空仓账户的净值就是现金，没有可标记的
+            }
+            BigDecimal equityBefore = orZero(account.getEquity());
+            BigDecimal priceBefore = orZero(account.getLastPrice());
+            updateEquityAndHighWatermark(account, price);
+            account.setLastPrice(price);
+            if (account.getEquity().compareTo(equityBefore) != 0 || price.compareTo(priceBefore) != 0) {
+                return paperAccountRepository.save(account);
+            }
+            return account;
+        } catch (Exception e) {
+            // 旁路：估值刷不进去只是让熔断晚一步看见，绝不影响主流程
+            log.debug("mark-to-market failed for strategy id={}: {}",
+                    strategy == null ? null : strategy.getId(), e.getMessage());
+            return account;
+        }
     }
 
     /**
@@ -667,6 +1703,87 @@ public class PaperTradingService {
             log.debug("读取上次开会日期失败 strategyId={}: {}", strategyId, e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * 把委员会输出里的 authorization 落库（只追加，最新一行生效）。
+     *
+     * <p>没有 authorization 字段就什么都不做——授权只在**有新授权**时更新：
+     * 门控没开会、预算耗尽、LLM 不可用，这些日子旧授权继续有效（没有空窗）。
+     * 这也是"委员会明确关掉盘中执行"（intraday_execution=false）能生效的原因：
+     * 关闭同样是一次带 authorization 的输出。
+     */
+    private void saveAuthorization(Strategy strategy, JsonNode result) {
+        try {
+            JsonNode auth = result == null ? null : result.get("authorization");
+            if (auth == null || !auth.isObject()) {
+                return;
+            }
+            boolean intraday = auth.path("intraday_execution").asBoolean(false);
+            boolean allowOpen = auth.has("allow_open")
+                    ? auth.path("allow_open").asBoolean(intraday) : intraday;
+            boolean allowClose = auth.has("allow_close")
+                    ? auth.path("allow_close").asBoolean(true) : true;
+            double rawPct = auth.path("max_position_pct").asDouble(1.0);
+            double clamped = Math.min(1.0, Math.max(0.0, Double.isNaN(rawPct) ? 1.0 : rawPct));
+            paperAuthorizationRepository.save(PaperAuthorization.builder()
+                    .user(strategy.getUser())
+                    .strategy(strategy)
+                    .intradayExecution(intraday)
+                    .allowOpen(allowOpen)
+                    .allowClose(allowClose)
+                    .maxPositionPct(Money.quantize(clamped, Money.RETURN_SCALE))
+                    .notes(clipText(textOr(auth.get("notes"), null), 500))
+                    .build());
+            log.info("Saved intraday authorization for strategy id={}: intraday={} open={} close={} maxPct={}",
+                    strategy.getId(), intraday, allowOpen, allowClose, clamped);
+        } catch (Exception e) {
+            log.warn("Authorization save failed for strategy id={}: {}",
+                    strategy.getId(), e.getMessage());
+        }
+    }
+
+    /**
+     * 把"授权内的规则执行"标记进响应：fingerprint 的 decision_mode 改回 agent
+     * （决定权持有者是委员会的授权，曲线因此保持 agent 段连续可比，trigger=event
+     * 已经能区分这是盘中路径），snapshot.extra 记一笔供审计辨认"这单是边界内自动执行的"
+     * （{@code intraday_authorized_execution}）还是"越过边界的硬止损"
+     * （{@code intraday_hard_stop}）。
+     */
+    private void markAuthorizedExecution(JsonNode result, String extraKey) {
+        try {
+            markFingerprintDecisionMode(result);
+            JsonNode snapshot = result.get("snapshot");
+            JsonNode extra = snapshot == null ? null : snapshot.get("extra");
+            if (extra instanceof tools.jackson.databind.node.ObjectNode ex) {
+                ex.put(extraKey, true);
+            }
+        } catch (Exception e) {
+            log.debug("Failed to mark authorized execution: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 只把响应指纹的 decision_mode 改成 agent：agent 模式策略的**被挡下的**盘中 tick
+     * 也要正确落"决策者=多角色委员会"——规则引擎的响应指纹默认写着 rule，
+     * 不改的话那一行痕迹会把 agent 策略记成规则策略。
+     */
+    private static void markFingerprintDecisionMode(JsonNode result) {
+        try {
+            JsonNode fingerprint = result.get("fingerprint");
+            if (fingerprint instanceof tools.jackson.databind.node.ObjectNode fp) {
+                fp.put("decision_mode", ExecutionContract.DECISION_MODE_AGENT);
+            }
+        } catch (Exception e) {
+            log.debug("Failed to mark fingerprint decision mode: {}", e.getMessage());
+        }
+    }
+
+    private static String clipText(String text, int limit) {
+        if (text == null) {
+            return null;
+        }
+        return text.length() <= limit ? text : text.substring(0, limit);
     }
 
     /**
@@ -698,7 +1815,7 @@ public class PaperTradingService {
     private PaperAccount applyBarResult(Strategy strategy, PaperAccount account,
                                         JsonNode result, LocalDate tradeDate, String barTime,
                                         String settlementKind, String trigger,
-                                        boolean alreadyTradedToday) {
+                                        boolean alreadyTradedToday, BigDecimal sizeCap) {
         JsonNode config = parseConfig(strategy.getConfigJson());
         JsonNode risk = config.get("risk");
         // 费率一律走 BigDecimal：它们是"乘在钱上的数"，用 double 相乘会把二进制误差
@@ -734,14 +1851,44 @@ public class PaperTradingService {
             positionType = "percent";
         }
 
-        String signal = textOr(result.get("signal"), "").toLowerCase(Locale.ROOT);
+        // 委员会的盘中授权上限（三层夹取的最后一层：策略 size_pct → agent size → 授权 max）。
+        // 只会收紧不会放宽：授权是"边界"，不是"加成"。full 仓位在授权 <100% 时
+        // 降级为 percent 语义，否则"上限"对 full 策略就成了空话。
+        if (sizeCap != null && sizeCap.signum() >= 0) {
+            boolean capTighter = "percent".equals(positionType)
+                    ? sizePct.compareTo(sizeCap) > 0
+                    : sizeCap.compareTo(BigDecimal.ONE) < 0;
+            if (capTighter) {
+                positionType = "percent";
+                sizePct = sizeCap;
+                log.info("Position capped by authorization for strategy id={}: {}",
+                        strategy.getId(), sizeCap);
+            }
+        }
+
+        String rawSignal = textOr(result.get("signal"), "").toLowerCase(Locale.ROOT);
+        String signal = rawSignal;
+        // decision 是两侧共同的**最终裁决**字段（规则引擎的 _hold_facts 与委员会的 decide
+        // 都会带）：decision=skip 表示"看过但不动"——委员会输出被截断只剩规范行、
+        // size_fraction=0、HOLD、门控没开会、预算耗尽，全都落在这里。
+        // 结算侧必须认它：只看 signal 会把"读不懂就不动"反转成意外成交
+        // （signal=buy 但 size=0 的响应会被按配置仓位全额买入）。规则路径不受影响：
+        // 规则引擎的 decision=skip 只在 signal=hold 时出现。痕迹仍记模型原话方向（rawSignal）。
+        String decision = textOr(result.get("decision"), "").toLowerCase(Locale.ROOT);
+        if (ExecutionContract.DECISION_SKIP.equals(decision)
+                && (ExecutionContract.DECISION_BUY.equals(signal)
+                        || ExecutionContract.DECISION_SELL.equals(signal))) {
+            log.warn("Paper: decision=skip overrides signal={} for strategy id={} on {} "
+                    + "(size=0/输出截断/HOLD)，本节不下单", signal, strategy.getId(), tradeDate);
+            signal = "";
+        }
         BigDecimal price = Money.price(priceOf(result));
 
         // 痕迹在**结算开始前**就建好（含账户的"结算前"状态与这根 bar 的证据）：
         // 这样每一条提前返回的分支都只是补上"结论 + 原因"，不会有哪条路悄悄漏掉痕迹。
         PaperTradeTrace trace = newTrace(strategy, account, settlementKind, trigger, tradeDate,
                 barTime, result);
-        trace.setSignal(signal.isEmpty() ? null : signal);
+        trace.setSignal(rawSignal.isEmpty() ? null : rawSignal);
         trace.setMatchedConditions(joinMatchedConditions(result.get("matched_conditions")));
 
         // 没有可用价格就**不结算**（原样返回，什么都不改）。
@@ -750,8 +1897,12 @@ public class PaperTradingService {
         // 于是"净值 = 现金 + 股数 × 0" = 现金 —— 一次瞬时取数失败就把持仓市值抹掉，
         // 而净值现在还会写进客观事实通道被长期记住。跳过才是正确行为：
         // 宁可不结算（并留下 skip 原因），也不要写一个错的净值。
+        //
+        // 原因优先采纳引擎/委员会给出的 skip_reason（如 agent_budget_exceeded ——
+        // 预算分支的响应本来就没有 price，记成 invalid_price 会把"预算耗尽"永远藏起来），
+        // 没有才按"取数失败 / 无效价格"兜底。
         if (price == null || price.signum() <= 0) {
-            String reason = ExecutionContract.normalizeSkipReason(
+            String reason = skipReasonOf(result,
                     result.has("error") ? ExecutionContract.SKIP_DATA_UNAVAILABLE
                             : ExecutionContract.SKIP_INVALID_PRICE);
             log.warn("Skipping paper settlement for strategy id={} on {}: no usable price "
@@ -833,7 +1984,10 @@ public class PaperTradingService {
             account.setAvgCost(fill);
             account.setCash(cashAfter);
             account.setHighWatermark(fill);
-            account.setLastBuyBar(barTime);   // T+1 同交易日卖出守卫（realtime 按 bar 时间判断）
+            // T+1 同交易日卖出守卫（realtime 按 bar 时间判断）。日线结算的 barTime 为 null，
+            // 之前直接存 null 会让"当天日线买入、同日稍后盘中路径卖出"绕过 T+1 ——
+            // 判定要求 lastBuyBar 非空且前 10 位（自然日）相同，所以这里落 tradeDate 本身。
+            account.setLastBuyBar(barTime != null ? barTime : tradeDate.toString());
             trade = buildTrade(strategy, account, tradeDate, "BUY", fill, shares, reason);
         } else if ("sell".equals(signal) && isHolding(account)) {
             // T+1：A 股当日买入当日不可卖（barTime 带日期时按自然日判断）
@@ -848,16 +2002,40 @@ public class PaperTradingService {
                 log.warn("Invalid fill price for sell on strategy id={}", strategy.getId());
                 return skip(account, trace, ExecutionContract.SKIP_INVALID_PRICE);
             } else {
-                BigDecimal shares = Money.price(account.getShares());
+                BigDecimal held = account.getShares();
+                BigDecimal shares = held;
+                boolean partialSell = false;
+                // agent 的减仓意图（size_fraction ∈ (0,1)）：按比例减、**向下取整到整手**。
+                // 注意这里用的是原始 size_fraction，不被策略 size_pct/授权上限夹取 ——
+                // 那两层是"开仓上限"，不该反过来限制卖出比例。取整后不足一手时按全仓卖出：
+                // "减 30%"减到不足一手时，留 87 股比清仓更奇怪（A股无法卖零股）。
+                BigDecimal sellFraction = agentSizeFraction(strategy, result);
+                if (sellFraction != null && sellFraction.compareTo(BigDecimal.ONE) < 0) {
+                    BigDecimal partial = held.multiply(sellFraction)
+                            .divide(lot, 0, RoundingMode.DOWN).multiply(lot);
+                    if (partial.signum() > 0 && partial.compareTo(held) < 0) {
+                        shares = partial;
+                        partialSell = true;
+                        log.info("Agent partial sell: fraction={} → {} of {} shares for strategy id={}",
+                                sellFraction, shares.stripTrailingZeros().toPlainString(),
+                                held.stripTrailingZeros().toPlainString(), strategy.getId());
+                    }
+                }
                 BigDecimal turnover = shares.multiply(fill);
                 BigDecimal fee = commissionFee(turnover, commission);
                 BigDecimal stampAmount = Money.amount(turnover.multiply(stampTax));
                 BigDecimal cashAfter = Money.amount(cash.add(turnover).subtract(fee).subtract(stampAmount));
                 account.setCash(cashAfter);
-                account.setShares(BigDecimal.ZERO.setScale(Money.PRICE_SCALE));
-                account.setAvgCost(BigDecimal.ZERO.setScale(Money.PRICE_SCALE));
-                account.setHighWatermark(BigDecimal.ZERO.setScale(Money.PRICE_SCALE));
-                account.setLastBuyBar(null);
+                if (partialSell) {
+                    // 部分减仓：成本与最高水位口径不变（成本按买入时点摊定，剩余持仓照旧跟踪），
+                    // lastBuyBar 保留 —— 剩余份额的 T+1 语义仍以最近一次买入日为准。
+                    account.setShares(Money.price(held.subtract(shares)));
+                } else {
+                    account.setShares(BigDecimal.ZERO.setScale(Money.PRICE_SCALE));
+                    account.setAvgCost(BigDecimal.ZERO.setScale(Money.PRICE_SCALE));
+                    account.setHighWatermark(BigDecimal.ZERO.setScale(Money.PRICE_SCALE));
+                    account.setLastBuyBar(null);
+                }
                 trade = buildTrade(strategy, account, tradeDate, "SELL", fill, shares, reason);
             }
         } else if ("buy".equals(signal) || "sell".equals(signal)) {
@@ -876,28 +2054,59 @@ public class PaperTradingService {
         account.setLastSignal(signal);
         account.setLastEvalAt(LocalDateTime.now());
 
-        if (trade != null) {
-            trace.setDecision(trade.getSide().toLowerCase(Locale.ROOT));
-            fillAccountAfter(trace, account);
-            PaperTradeTrace savedTrace = paperTraceService.record(trace);
-            if (savedTrace != null) {
-                trade.setTraceId(savedTrace.getId());
+        // 成交落库（痕迹 → 成交 → 账户 → 策略）必须在**同一个短事务**里：
+        // 之前三段各自独立提交，崩溃发生在"成交已落、账户未落"之间时，重跑同一根 bar
+        // 会按旧账户状态（shares=0）再买一次 —— 成交表双行、账户单份持仓。
+        // Python 调用此刻早已完成，这里没有网络等待，短事务不存在占连接等网络的问题
+        // （与"结算整体不包长事务"的纪律不冲突：那是防 Python 的 60s 阻塞）。
+        final PaperTrade tradeRef = trade;
+        final PaperAccount accountRef = account;   // account 在事务结束后会被重新赋值，lambda 只认这份
+        account = transactionTemplate.execute(status -> {
+            if (tradeRef != null) {
+                trace.setDecision(tradeRef.getSide().toLowerCase(Locale.ROOT));
+                fillAccountAfter(trace, accountRef);
+                PaperTradeTrace savedTrace = paperTraceService.record(trace);
+                if (savedTrace != null) {
+                    tradeRef.setTraceId(savedTrace.getId());
+                }
+                paperTradeRepository.save(tradeRef);
+            } else {
+                // 信号是 hold：这一根 bar 的结论是"按策略不动"。
+                // 原因由**引擎**给（它有指标值）：`rule_not_met` 与 `warmup` 是两件事，
+                // 前者是"验证过、规则没动"，后者是"指标还没算出来、这段没有样本"。
+                trace.setDecision(ExecutionContract.DECISION_SKIP);
+                trace.setSkipReason(skipReasonOf(result, ExecutionContract.SKIP_RULE_NOT_MET));
+                fillAccountAfter(trace, accountRef);
+                paperTraceService.record(trace);
             }
-            paperTradeRepository.save(trade);
-        } else {
-            // 信号是 hold：这一根 bar 的结论是"按策略不动"。
-            // 原因由**引擎**给（它有指标值）：`rule_not_met` 与 `warmup` 是两件事，
-            // 前者是"验证过、规则没动"，后者是"指标还没算出来、这段没有样本"。
-            trace.setDecision(ExecutionContract.DECISION_SKIP);
-            trace.setSkipReason(skipReasonOf(result, ExecutionContract.SKIP_RULE_NOT_MET));
-            fillAccountAfter(trace, account);
-            paperTraceService.record(trace);
+            PaperAccount saved = paperAccountRepository.save(accountRef);
+            strategy.setLastPaperEvalAt(saved.getLastEvalAt());
+            strategyRepository.save(strategy);
+            return saved;
+        });
+        if (tradeRef != null) {
+            notifyFill(strategy, tradeRef);   // 推送旁路：事务外，失败只记日志
         }
-        account = paperAccountRepository.save(account);
-
-        strategy.setLastPaperEvalAt(account.getLastEvalAt());
-        strategyRepository.save(strategy);
         return account;
+    }
+
+    /** 成交回执推送（旁路）：失败只记日志。用户没配推送时是空操作。 */
+    private void notifyFill(Strategy strategy, PaperTrade trade) {
+        if (pushService == null || strategy.getUser() == null) {
+            return;
+        }
+        try {
+            String side = "BUY".equalsIgnoreCase(trade.getSide()) ? "买入" : "卖出";
+            String title = String.format("模拟盘成交：%s %s", strategy.getName(), side);
+            String body = String.format("%s %s %s 股 @ %s（%s 模式）",
+                    trade.getTradeDate(), trade.getSymbol(),
+                    trade.getShares() == null ? "-" : trade.getShares().stripTrailingZeros().toPlainString(),
+                    trade.getPrice() == null ? "-" : trade.getPrice().toPlainString(),
+                    ExecutionContract.normalizeDecisionMode(strategy.getDecisionMode()));
+            pushService.push(strategy.getUser().getUsername(), title, body);
+        } catch (Exception e) {
+            log.debug("fill push failed for strategy {}: {}", strategy.getId(), e.getMessage());
+        }
     }
 
     /**
@@ -906,8 +2115,7 @@ public class PaperTradingService {
      * <p>这是"7 条静默 return"的统一改写：以前它们对调用方完全不可见，
      * 现在每一条都会留下一行带原因的痕迹。
      */
-    private PaperAccount skip(PaperAccount account, PaperTradeTrace trace, String skipReason) {
-        trace.setDecision(ExecutionContract.DECISION_SKIP);
+    private PaperAccount skip(PaperAccount account, PaperTradeTrace trace, String skipReason) {        trace.setDecision(ExecutionContract.DECISION_SKIP);
         trace.setSkipReason(ExecutionContract.normalizeSkipReason(skipReason));
         fillAccountAfter(trace, account);
         paperTraceService.record(trace);
@@ -958,7 +2166,10 @@ public class PaperTradingService {
         trace.setFillBasis(ExecutionContract.normalize(
                 result == null ? null : textOrStatic(result.get("fill_basis"), null),
                 ExecutionContract.FILL_BASES));
-        trace.setBarClose(Money.price(result == null ? null : numberOrNull(result.get("price"))));
+        // bar_close 与净值快照的 close_price 走同一个取价口径（priceOf：优先成交参考价、
+        // 缺失回落 snapshot.bar.close）—— 之前这里只取 result.price，result.price 缺失的
+        // 那天两张表的"close"一个 null 一个有值，对账时对不上。
+        trace.setBarClose(Money.price(result == null ? null : priceOf(result)));
         trace.setEngineVersion(textOrStatic(fingerprint == null ? null : fingerprint.get("engine_version"), null));
         trace.setAdjustMode(ExecutionContract.normalize(
                 textOrStatic(fingerprint == null ? null : fingerprint.get("adjust_mode"), null),
