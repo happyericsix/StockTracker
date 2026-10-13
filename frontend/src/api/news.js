@@ -31,6 +31,9 @@ export const getStockEvents = (symbol, days = 90) =>
  * ⚠️ 拿不到时后端返回 `data = null`（不是错误）：**"这次给不出结论"是合法状态**，
  * 调用方应当隐藏整块，而不是显示一段空话。
  */
+// 市场级综合（雷达页顶部"今日信息面"）：近 48h 快讯按主题关联；服务端 10 分钟缓存
+export const getMarketRead = () => request.get('/news/market-read')
+
 export const getStockRead = (symbol, days = 90) =>
   request.get('/news/stock-read', { params: { symbol, days } })
 
@@ -72,8 +75,18 @@ export const searchNews = (payload) => request.post('/news/search', payload)
  *
  * <p>资讯雷达的"大盘"标签读的是库；库里的全市场内容只有 refresh 落过才有。
  * 所以大盘流首次为空时前端会自动触发一次（幂等：去重键保证重复刷新不重复入库）。
+ * 定时采集（后端 NewsIngestJob）上线后这里是兜底手段，常态供给不再依赖它。
  */
 export const refreshNews = () => request.post('/news/refresh')
+
+/**
+ * 某时刻之后的新资讯条数（"新消息"横幅，仿新闻 App 红点）。
+ *
+ * `since` 用 ISO 本地时间（如 2026-10-12T09:00:00）；前端记上次浏览时间戳、
+ * 分钟级轮询这里，有新增提示"N 条新资讯，点击载入"。
+ */
+export const countNewsSince = (since) =>
+  request.get('/news/count-since', { params: { since } })
 
 /**
  * 取资讯原文正文（懒抓取：服务端首抓落库，之后命中库）。
@@ -82,3 +95,16 @@ export const refreshNews = () => request.post('/news/refresh')
  * 调用方据此降级为"摘要 + 原文链接"，抓不到正文不代表资讯坏了。
  */
 export const getEventBody = (id) => request.post(`/news/events/${id}/body`)
+
+/**
+ * 事件线列表（雷达页"事件线"区块）：同一事件的多条报道聚成的故事。
+ *
+ * `summary` 为 null 表示还没撰稿（skipReason 说明原因）—— 聚类是纯代码产物，
+ * 没有 LLM 事件线也成立，前端照常展示成员列表。
+ * 带 symbol 时后端按 symbols JSON 包含过滤（600519 自动折算 SH600519）。
+ */
+export const getNewsTopics = (days = 7, symbol = '') =>
+  request.get('/news/topics', { params: { days, symbol } })
+
+/** 事件线详情：线本体 + 成员资讯（时间倒序，形状与 events 同一套卡片）。 */
+export const getTopicDetail = (id) => request.get(`/news/topics/${id}`)

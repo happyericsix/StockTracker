@@ -1,21 +1,14 @@
 <script setup>
 /**
- * 信息提示：把"常驻页面的大段说明文字"收进一个小 ⓘ 图标里，点开才看。
- *
- * <h3>为什么是组件而不是 title 属性</h3>
- * 原生 title 悬停提示在触屏上不存在、延迟一秒、样式不可控，而这里的说明
- * （免责声明、口径说明）在手机上同样需要能看到。点击切换在鼠标和触屏上
- * 行为一致，Esc 与点击外部都能关。
- *
- * <h3>为什么面板点击自身也关闭</h3>
- * 读完了点一下就走，不必去找那个小图标。说明文字不做交互（不可选中链接等），
- * 所以整块可点不会有误触。
+ * 信息提示：把"常驻页面的大段说明文字"收进一个小 ⓘ 里，点开才看。
+ * 逻辑自旧版原样移植：点击切换（触屏/鼠标一致），Esc 与点外部关，
+ * 点面板自身也关（读完了点一下就走）。
  */
 import { ref, watch, onBeforeUnmount } from 'vue'
-import AppIcon from './AppIcon.vue'
+import { Info } from 'lucide-vue-next'
 
 defineProps({
-  /** 提示正文。只用纯文本——这里不该承载富文本，需要强调就在原文里用引号 */
+  /** 提示正文。只用纯文本 */
   text: { type: String, required: true },
   /** 无障碍名称，说明这个 ⓘ 是关于什么的 */
   label: { type: String, default: '说明' },
@@ -36,59 +29,24 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onDocPointerDo
 </script>
 
 <template>
-  <span ref="rootEl" class="info-tip">
+  <span ref="rootEl" class="relative inline-flex items-center">
     <button
       type="button"
-      class="info-tip-btn"
+      class="flex h-[22px] w-[22px] items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-accent-soft hover:text-accent"
       :aria-expanded="open"
       :aria-label="label"
       @click="open = !open"
       @keydown.escape="open = false"
     >
-      <AppIcon name="info" :size="14" :stroke-width="2" />
+      <Info :size="14" :stroke-width="2" aria-hidden="true" />
     </button>
-    <span v-if="open" class="info-tip-panel" role="note" @click="open = false">{{ text }}</span>
+    <!-- 面板锚在图标下方、靠左对齐：靠右的标题用居中会把面板顶出屏幕 -->
+    <span
+      v-if="open"
+      class="absolute left-0 top-[calc(100%+6px)] z-30 w-max max-w-[280px] cursor-pointer rounded-lg border border-border bg-surface p-2.5 text-left text-[12.5px] leading-relaxed text-ink-2"
+      style="box-shadow: var(--shadow-pop)"
+      role="note"
+      @click="open = false"
+    >{{ text }}</span>
   </span>
 </template>
-
-<style scoped>
-.info-tip {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-}
-.info-tip-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--color-text-muted);
-  cursor: pointer;
-  transition: color var(--duration-fast) var(--ease-out),
-              background-color var(--duration-fast) var(--ease-out);
-}
-.info-tip-btn:hover { color: var(--color-accent); background: var(--color-accent-soft); }
-/* 面板锚在图标下方，靠左对齐图标而不是居中：靠右的标题用居中会把面板顶出屏幕 */
-.info-tip-panel {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  z-index: 20;
-  width: max-content;
-  max-width: 280px;
-  padding: 10px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  background: var(--color-bg-surface);
-  box-shadow: var(--shadow-2);
-  font: var(--font-caption);
-  line-height: 1.6;
-  color: var(--color-text-secondary);
-  text-align: left;
-  cursor: pointer;
-}
-</style>

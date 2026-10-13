@@ -1,9 +1,15 @@
 <script setup>
+/**
+ * 智能助手（全页对话）。逻辑自旧版原样移植：乐观气泡按内容定位替换、
+ * 90 秒兜底计时（超时=推送断了，不是模型在想）、跨天分隔条、IME 组合态不发送。
+ */
 import { ref, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
+import { Bot } from 'lucide-vue-next'
 import { sendChat, getChatHistory } from '../api/messages.js'
 import { messageBus } from '../composables/messageBus.js'
-import AppIcon from '../components/AppIcon.vue'
+import { renderMarkdown } from '../utils/markdown.js'
+import Button from '../components/ui/button.vue'
 
 const router = useRouter()
 const messages = ref([])
@@ -19,13 +25,7 @@ let unsubscribe = null
 let unsubscribeReconnect = null
 let typingTimer = null
 
-/**
- * "正在输入"的兜底时限。
- *
- * 为什么必须有：Java 侧调 Python 的超时是 60 秒，超时后它会用兜底文案**推送**一条消息，
- * 所以正常情况下 90 秒还没收到回复，说明不是模型在想，而是**推送链路断了** ——
- * 那时如果只把气泡留在那里转，用户唯一能做的就是干等。
- */
+/** "正在输入"的兜底时限：90 秒还没收到回复说明推送链路断了，不是模型在想 */
 const TYPING_TIMEOUT_MS = 90000
 
 const scrollToBottom = async () => {
@@ -33,93 +33,40 @@ const scrollToBottom = async () => {
   if (listEl.value) listEl.value.scrollTop = listEl.value.scrollHeight
 }
 
+// 时间标度：今天只显示时分；跨天带日期，跨年带年份
 const formatTime = (iso) => {
   if (!iso) return ''
   const d = new Date(iso)
   if (isNaN(d.getTime())) return ''
   const pad = (n) => String(n).padStart(2, '0')
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  const now = new Date()
+  const sameDay = d.getFullYear() === now.getFullYear()
+    && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()
+  if (sameDay) return hm
+  if (d.getFullYear() === now.getFullYear()) {
+    return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`
+  }
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`
 }
 
-const escapeHtml = (text) => text
-  .replace(/&/g, '&amp;')
-  .replace(/</g, '&lt;')
-  .replace(/>/g, '&gt;')
-  .replace(/"/g, '&quot;')
-  .replace(/'/g, '&#39;')
+const dayKey = (iso) => {
+  const d = new Date(iso)
+  return isNaN(d.getTime()) ? `invalid-${iso}` : `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
+}
 
-const renderInline = (text) => text
-  .replace(/`([^`\n]+)`/g, '<code>$1</code>')
-  .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
-  .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-
-const renderMarkdown = (raw) => {
-  if (!raw || typeof raw !== 'string') return ''
-  const lines = escapeHtml(raw).split('\n')
-  const blocks = []
-  let paragraph = []
-  let list = null
-  let codeLines = null
-
-  const flushParagraph = () => {
-    if (paragraph.length === 0) return
-    blocks.push(`<p>${paragraph.map(renderInline).join('<br>')}</p>`)
-    paragraph = []
+const dayLabel = (iso) => {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return ''
+  const now = new Date()
+  const sameDay = dayKey(iso) === `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`
+  if (sameDay) return '今天'
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+  if (dayKey(iso) === `${yesterday.getFullYear()}-${yesterday.getMonth()}-${yesterday.getDate()}`) {
+    return '昨天'
   }
-  const flushList = () => {
-    if (!list) return
-    blocks.push(`<ul>${list.join('')}</ul>`)
-    list = null
-  }
-
-  for (const line of lines) {
-    if (codeLines !== null) {
-      if (/^```/.test(line)) {
-        blocks.push(`<pre><code>${codeLines.join('\n')}</code></pre>`)
-        codeLines = null
-      } else {
-        codeLines.push(line)
-      }
-      continue
-    }
-
-    if (/^```/.test(line)) {
-      flushParagraph()
-      flushList()
-      codeLines = []
-      continue
-    }
-
-    const heading = line.match(/^(#{1,6})\s+(.+)$/)
-    if (heading) {
-      flushParagraph()
-      flushList()
-      const level = heading[1].length
-      blocks.push(`<h${level}>${renderInline(heading[2])}</h${level}>`)
-      continue
-    }
-
-    const bullet = line.match(/^\s*[-*+]\s+(.+)$/)
-    if (bullet) {
-      flushParagraph()
-      if (!list) list = []
-      list.push(`<li>${renderInline(bullet[1])}</li>`)
-      continue
-    }
-
-    if (line.trim() === '') {
-      flushParagraph()
-      flushList()
-      continue
-    }
-
-    flushList()
-    paragraph.push(line)
-  }
-
-  flushParagraph()
-  flushList()
-  return blocks.join('')
+  if (d.getFullYear() === now.getFullYear()) return `${d.getMonth() + 1}月${d.getDate()}日`
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`
 }
 
 const loadHistory = async () => {
@@ -128,7 +75,7 @@ const loadHistory = async () => {
     const list = res.data || []
     messages.value = Array.isArray(list) ? list : []
     await scrollToBottom()
-  } catch (e) {
+  } catch {
     // 后端未就绪时静默，聊天记录为空
   }
 }
@@ -141,8 +88,7 @@ const onBusMessage = (msg) => {
     notice.value = ''
   }
   if (msg.type === 'CHAT_BOT' || msg.type === 'CHAT_USER') {
-    // 乐观气泡 id 是本地 'local-<ts>'，与服务端 SSE 回显的数据库自增 id 永不相等，
-    // 纯按 id 替换永远不命中 → 同一条消息会渲染两份。改为按内容定位替换。
+    // 乐观气泡 id 与数据库 id 永不相等，按内容定位替换
     if (msg.type === 'CHAT_USER' && pendingLocalId.value) {
       const pendingIndex = messages.value.findIndex((m) => m.id === pendingLocalId.value)
       if (pendingIndex !== -1 && messages.value[pendingIndex].content === msg.content) {
@@ -166,7 +112,6 @@ const clearTypingWatch = () => {
   }
 }
 
-/** 发出消息后启动兜底计时：超时不是"模型还在想"，而是推送断了 */
 const startTypingWatch = () => {
   clearTypingWatch()
   typingTimer = setTimeout(async () => {
@@ -177,7 +122,6 @@ const startTypingWatch = () => {
   }, TYPING_TIMEOUT_MS)
 }
 
-/** SSE 断线重连成功：断线期间的推送不会补发，必须自己再拉一次 */
 const onReconnect = async () => {
   clearTypingWatch()
   typing.value = false
@@ -197,12 +141,11 @@ const getStrategyId = (msg) => {
   try {
     const meta = typeof msg.metadata === 'string' ? JSON.parse(msg.metadata) : msg.metadata
     return meta && meta.strategyId ? String(meta.strategyId) : null
-  } catch (e) {
+  } catch {
     return null
   }
 }
 
-const goStrategies = () => router.push('/strategies')
 const goStrategy = (msg) => {
   const id = getStrategyId(msg)
   router.push(id ? `/strategies/${id}` : '/strategies')
@@ -218,7 +161,7 @@ const send = async () => {
     type: 'CHAT_USER',
     content: text,
     createdAt: new Date().toISOString(),
-    read: true
+    read: true,
   }
   pendingLocalId.value = tempMsg.id
   messages.value.push(tempMsg)
@@ -229,7 +172,7 @@ const send = async () => {
   startTypingWatch()
   try {
     await sendChat(text)
-  } catch (e) {
+  } catch {
     pendingLocalId.value = null
     typing.value = false
     clearTypingWatch()
@@ -258,307 +201,108 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="chat-page">
-    <header class="chat-header">
-      <!-- 头像只是装饰：机器人身份已由右侧「智能助手」文字承载 -->
-      <div class="bot-avatar"><AppIcon name="bot" :size="22" :stroke-width="2" /></div>
-      <div class="bot-info">
-        <!-- 本页唯一的一级标题：原来是无标题的 div，页面标题大纲里什么都没有 -->
-        <h1 class="bot-name">智能助手</h1>
-        <div class="bot-status">在线 · 行情分析中</div>
+  <!-- 壳内全高：桌面扣容器上下留白；移动端再扣掉顶栏（52px） -->
+  <div class="mx-auto flex h-[calc(100dvh-100px)] w-full max-w-[760px] flex-col lg:h-[calc(100dvh-48px)]">
+    <header class="flex items-center gap-3 pb-3">
+      <span class="flex h-10 w-10 items-center justify-center rounded-full bg-accent text-on-accent">
+        <Bot :size="21" :stroke-width="1.75" aria-hidden="true" />
+      </span>
+      <div>
+        <h1 class="text-[16px] font-semibold text-ink">智能助手</h1>
+        <div class="text-[12px] text-ink-3">在线 · 行情分析中</div>
       </div>
     </header>
 
-    <div class="chat-body" ref="listEl">
-      <div v-if="messages.length === 0 && !typing" class="chat-empty">
-        <div class="empty-icon"><AppIcon name="bot" :size="44" :stroke-width="1.5" /></div>
-        <p>问我行情、资讯或策略</p>
-        <p class="empty-hint">例：茅台现在多少钱</p>
+    <div ref="listEl" class="flex flex-1 flex-col gap-3.5 overflow-y-auto overscroll-contain px-1 pb-2">
+      <div v-if="messages.length === 0 && !typing" class="mt-12 flex flex-col items-center gap-2 text-center">
+        <span class="flex h-14 w-14 items-center justify-center rounded-full bg-surface-2 text-ink-3">
+          <Bot :size="30" :stroke-width="1.5" aria-hidden="true" />
+        </span>
+        <p class="text-[14px] text-ink-2">问我行情、资讯或策略</p>
+        <p class="text-[12.5px] text-ink-3">例：茅台现在多少钱</p>
       </div>
 
-      <div
-        v-for="m in messages"
-        :key="m.id"
-        class="msg-row"
-        :class="m.type === 'CHAT_USER' ? 'mine' : 'theirs'"
-      >
-        <div v-if="m.type !== 'CHAT_USER'" class="avatar"><AppIcon name="bot" :size="18" :stroke-width="2" /></div>
-        <div class="bubble-wrap">
-        <div v-if="m.type !== 'CHAT_USER'" class="bubble markdown-body" v-html="renderMarkdown(m.content)"></div>
-        <div v-else class="bubble">{{ m.content }}</div>
-          <div class="time num">{{ formatTime(m.createdAt) }}</div>
-          <div v-if="m.type !== 'CHAT_USER' && (getStrategyId(m) || hasStrategyContent(m.content))" class="strategy-action">
-            <button class="strategy-btn" @click="goStrategy(m)">{{ getStrategyId(m) ? '查看回测与策略详情' : '查看策略库' }}</button>
+      <template v-for="(m, i) in messages" :key="m.id">
+        <!-- 跨天分隔条 -->
+        <div
+          v-if="i === 0 || dayKey(m.createdAt) !== dayKey(messages[i - 1].createdAt)"
+          class="flex items-center gap-2.5 py-1 text-[11px] text-ink-3 select-none [&::after]:h-px [&::after]:flex-1 [&::after]:bg-border [&::before]:h-px [&::before]:flex-1 [&::before]:bg-border"
+        >{{ dayLabel(m.createdAt) }}</div>
+        <div class="flex max-w-[78%] items-start gap-2" :class="m.type === 'CHAT_USER' ? 'flex-row-reverse self-end' : ''">
+          <span
+            v-if="m.type !== 'CHAT_USER'"
+            class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent-soft text-accent"
+          >
+            <Bot :size="16" :stroke-width="1.75" aria-hidden="true" />
+          </span>
+          <div class="flex flex-col gap-0.5">
+            <div
+              v-if="m.type !== 'CHAT_USER'"
+              class="md-body rounded-xl rounded-tl-sm border border-border bg-surface px-3.5 py-2.5 text-[13.5px] leading-relaxed text-ink"
+              v-html="renderMarkdown(m.content)"
+            ></div>
+            <div
+              v-else
+              class="whitespace-pre-wrap break-words rounded-xl rounded-tr-sm bg-accent px-3.5 py-2.5 text-[13.5px] leading-relaxed text-on-accent"
+            >{{ m.content }}</div>
+            <div class="num px-1 text-[10px] text-ink-3" :class="m.type === 'CHAT_USER' ? 'text-right' : ''">{{ formatTime(m.createdAt) }}</div>
+            <div v-if="m.type !== 'CHAT_USER' && (getStrategyId(m) || hasStrategyContent(m.content))" class="mt-1">
+              <button
+                type="button"
+                class="rounded-lg border border-border bg-surface-2 px-2.5 py-1 text-[12px] text-ink-2 transition-colors hover:border-accent hover:text-accent"
+                @click="goStrategy(m)"
+              >{{ getStrategyId(m) ? '查看回测与策略详情' : '查看策略库' }}</button>
+            </div>
           </div>
+          <span
+            v-if="m.type === 'CHAT_USER'"
+            class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-[12px] font-medium text-ink-2"
+          >我</span>
         </div>
-        <div v-if="m.type === 'CHAT_USER'" class="avatar mine-avatar">我</div>
+      </template>
+
+      <div v-if="typing" class="flex items-start gap-2">
+        <span class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent-soft text-accent">
+          <Bot :size="16" :stroke-width="1.75" aria-hidden="true" />
+        </span>
+        <div class="flex items-center gap-1 rounded-xl rounded-tl-sm border border-border bg-surface px-4 py-3.5">
+          <span class="typing-dot"></span><span class="typing-dot" style="animation-delay: 0.2s"></span><span class="typing-dot" style="animation-delay: 0.4s"></span>
+        </div>
       </div>
 
-      <div v-if="typing" class="msg-row theirs">
-        <div class="avatar"><AppIcon name="bot" :size="18" :stroke-width="2" /></div>
-        <div class="bubble typing-bubble">
-          <span></span><span></span><span></span>
-        </div>
-      </div>
-
-      <p v-if="notice" class="chat-notice">
-        <span>{{ notice }}</span>
-        <button class="notice-dismiss" type="button" @click="notice = ''">知道了</button>
+      <p v-if="notice" class="flex items-center justify-center gap-2 rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 text-left text-[12px] text-warn">
+        <span class="flex-1">{{ notice }}</span>
+        <button type="button" class="shrink-0 rounded-md border border-border px-2 py-0.5 text-[12px] text-ink-2" @click="notice = ''">知道了</button>
       </p>
-      <p v-if="error" class="chat-error">{{ error }}</p>
+      <p v-if="error" class="text-center text-[12px] text-up">{{ error }}</p>
     </div>
 
-    <footer class="chat-input-bar">
+    <footer class="mt-2 flex gap-2 pb-[env(safe-area-inset-bottom)]">
       <input
         v-model="input"
-        class="chat-input"
+        class="h-[40px] min-w-0 flex-1 rounded-full border border-border bg-surface px-4 text-[13.5px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none focus:ring-2 focus:ring-[color:var(--ring)]"
         aria-label="输入消息"
         placeholder="输入消息，回车发送…"
         @keydown.enter="onEnter"
         @compositionstart="composing = true"
         @compositionend="composing = false"
-      />
-      <button class="send-btn" :disabled="sending" @click="send">发送</button>
+      >
+      <Button variant="primary" class="rounded-full px-5" :disabled="sending" @click="send">发送</Button>
     </footer>
+    <p class="mt-1.5 text-center text-[11px] text-ink-3">AI 回复仅供参考，不构成投资建议</p>
   </div>
 </template>
 
 <style scoped>
-.chat-page {
-  display: flex;
-  flex-direction: column;
-  /* 壳内全高：桌面无顶栏取满 dvh；移动端扣掉固定顶栏（--shell-bar-h） */
-  height: 100dvh;
-  background: var(--color-bg-page);
-  /* App.vue 的安装横幅固定在底部（bottom: 20px + 安全区，高约 68px），
-     这里在页面底部预留 88px，保证横幅出现时不会盖住固定的 .chat-input-bar */
-  padding-bottom: 88px;
-}
-.chat-header {
-  background: var(--color-bg-inverse);
-  color: var(--color-text-inverse);
-  padding: 12px 16px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-shrink: 0;
-}
-
-.bot-avatar {
-  width: 38px;
-  height: 38px;
-  border-radius: 50%;
-  /* 纯装饰圆底：改用达标主色，避免 #1677ff 配白字只有 4.10:1 */
-  background: var(--color-accent);
-  color: var(--color-text-on-accent);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-.bot-info { display: flex; flex-direction: column; }
-.bot-name { font: var(--font-ui); font-weight: 600; }
-/* 11px 低于小字号下限，提到 12px（--font-micro） */
-.bot-status { font: var(--font-micro); color: var(--color-text-inverse-muted); margin-top: 1px; }
-
-.chat-body {
-  flex: 1;
-  overflow-y: auto;
-  padding: 16px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-.chat-empty {
-  text-align: center;
-  color: var(--color-text-muted);
-  margin-top: 40px;
-}
-/* 图标居中由布局负责，不再靠 font-size 撑一个字形 */
-.empty-icon { display: flex; justify-content: center; margin-bottom: var(--space-2); color: var(--color-text-muted); }
-/* 旧值 #bbb 对灰底只有 1.71:1，全站最差的一处 */
-.empty-hint { font: var(--font-caption); margin-top: var(--space-1); color: var(--color-text-muted); }
-
-.msg-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  max-width: 78%;
-}
-.msg-row.mine { align-self: flex-end; flex-direction: row-reverse; }
-.avatar {
-  width: 34px;
-  height: 34px;
-  border-radius: 50%;
-  background: var(--color-accent);
-  color: var(--color-text-on-accent);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-/* 「我」这个头像是文字而不是图标，所以字号留在这里 */
-.mine-avatar { background: var(--color-warning); font: var(--font-ui); }
-
-.bubble-wrap { display: flex; flex-direction: column; gap: 3px; }
-.bubble {
-  padding: 9px 13px;
-  font-size: 14px;
-  line-height: 1.5;
-  word-break: break-word;
-  white-space: pre-wrap;
-}
-.msg-row.theirs .bubble {
-  background: var(--color-bg-surface);
-  border-radius: 4px 12px 12px 12px;
-  color: var(--color-text-primary);
-  box-shadow: var(--shadow-1);
-}
-.msg-row.mine .bubble {
-  /* 旧值 #1677ff 配白字只有 4.10:1，不达 AA */
-  background: var(--color-accent);
-  border-radius: 12px 4px 12px 12px;
-  color: var(--color-text-on-accent);
-}
-.bubble.markdown-body {
-  white-space: normal;
-  line-height: 1.6;
-}
-.bubble.markdown-body :deep(p) { margin: 4px 0; }
-.bubble.markdown-body :deep(h1),
-.bubble.markdown-body :deep(h2),
-.bubble.markdown-body :deep(h3),
-.bubble.markdown-body :deep(h4),
-.bubble.markdown-body :deep(h5),
-.bubble.markdown-body :deep(h6) {
-  margin: 10px 0 4px;
-  line-height: 1.4;
-  font-weight: 600;
-}
-.bubble.markdown-body :deep(h1) { font-size: 17px; }
-.bubble.markdown-body :deep(h2) { font-size: 16px; }
-.bubble.markdown-body :deep(h3) { font-size: 15px; }
-.bubble.markdown-body :deep(h4),
-.bubble.markdown-body :deep(h5),
-.bubble.markdown-body :deep(h6) { font-size: 14px; }
-.bubble.markdown-body :deep(ul) {
-  margin: 4px 0;
-  padding-left: 18px;
-}
-.bubble.markdown-body :deep(li) { margin: 2px 0; }
-.bubble.markdown-body :deep(code) {
-  background: var(--color-border);
-  border-radius: 3px;
-  padding: 1px 4px;
-  font-size: 12px;
-}
-.bubble.markdown-body :deep(pre) {
-  margin: 8px 0;
-  background: var(--color-bg-subtle);
-  border-radius: var(--radius-sm);
-  padding: 8px 10px;
-  overflow-x: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.bubble.markdown-body :deep(pre code) {
-  background: transparent;
-  padding: 0;
-}
-.time { font-size: 10px; color: var(--color-text-muted); }
-.msg-row.mine .time { text-align: right; }
-
-.strategy-action { margin-top: 4px; }
-.strategy-btn {
-  background: var(--color-bg-subtle);
-  color: var(--color-success);
-  border: 1px solid var(--color-success-mark);
-  border-radius: var(--radius-sm);
-  padding: 3px 10px;
-  font-size: 12px;
-  cursor: pointer;
-}
-.strategy-btn:hover { background: var(--color-bg-page); }
-
-.typing-bubble { display: flex; align-items: center; gap: 4px; }
-.typing-bubble span {
+.typing-dot {
   width: 6px;
   height: 6px;
-  border-radius: 50%;
-  background: var(--color-text-placeholder);
-  animation: blink 1.2s infinite;
+  border-radius: 9999px;
+  background: var(--ink-3);
+  animation: typing 1.2s infinite ease-in-out;
 }
-.typing-bubble span:nth-child(2) { animation-delay: 0.2s; }
-.typing-bubble span:nth-child(3) { animation-delay: 0.4s; }
-@keyframes blink {
-  0%, 60%, 100% { opacity: 0.25; }
-  30% { opacity: 1; }
-}
-
-.chat-error { color: var(--color-danger); font-size: 12px; text-align: center; }
-
-/* 兜底提示（例如"超时未收到回复"）：比错误轻、比静默重 —— 用户至少知道发生了什么 */
-.chat-notice {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  justify-content: center;
-  font-size: 12px;
-  color: var(--color-warning);
-  background: var(--color-bg-subtle);
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  padding: 6px 10px;
-  text-align: left;
-}
-
-.notice-dismiss {
-  flex-shrink: 0;
-  font-size: 12px;
-  color: var(--color-text-secondary);
-  background: transparent;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  padding: 2px 8px;
-  cursor: pointer;
-}
-
-.notice-dismiss:hover { border-color: var(--color-border-strong); }
-
-.chat-input-bar {
-  display: flex;
-  gap: 8px;
-  padding: 10px 12px;
-  background: var(--color-bg-surface);
-  border-top: 1px solid var(--color-border);
-  flex-shrink: 0;
-  /* 固定底栏避开 iOS 手势条 */
-  margin-bottom: env(safe-area-inset-bottom, 0px);
-}
-.chat-input {
-  flex: 1;
-  border: 1px solid var(--color-border-control);
-  border-radius: 18px;
-  padding: 9px 14px;
-  font-size: 14px;
-}
-/* 焦点：删掉 outline:none，交给全局 2px 主色焦点环；边框变色只作第二通道 */
-.chat-input:focus-visible { border-color: var(--color-accent); }
-.send-btn {
-  background: var(--color-accent);
-  color: var(--color-text-on-accent);
-  border: none;
-  border-radius: 18px;
-  padding: 0 20px;
-  font-size: 14px;
-  cursor: pointer;
-}
-.send-btn:disabled { background: var(--color-accent-soft); color: var(--color-text-muted); cursor: not-allowed; }
-
-/* 移动端：壳给 .shell-main 加了顶栏高度的 padding-top，聊天页若仍是整屏高，
-   输入栏会被顶出视口 56px —— 这里把高度减去顶栏。
-   （这段曾被误写在 style 块之外，编译器静默丢弃、样式不生效。） */
-@media (max-width: 1023px) {
-  .chat-page { height: calc(100dvh - var(--shell-bar-h)); }
+@keyframes typing {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
 }
 </style>

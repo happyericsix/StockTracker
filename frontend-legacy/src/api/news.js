@@ -1,0 +1,110 @@
+import request from './request.js'
+
+/**
+ * 个股事件时间轴（公告/媒体/研报，按发布时间倒序）+ **后台解读的进度**。
+ *
+ * 后端对应 `NewsController` 的 `GET /api/v1/news/events?symbol=&days=`，
+ * 返回 `Result<StockNewsTimelineResponse>` —— `request.js` 的响应拦截器已经把
+ * `Result` 信封剥掉，所以 `res.data` 是 `{events, analyzing, analyzedCount, total, pendingCount}`。
+ *
+ * <h3>2026-09-20：从"裸数组"改成"带进度的信封"</h3>
+ * 这条接口以前会在返回**之前**同步做完"兜底抓取 + 最多 6 次批量 LLM 解读"，
+ * 用户点进来先空等几秒、一个字的正文都没有。现在它只读库并立刻返回，
+ * 抓取与解读交给后端后台，进度靠上面这三个字段告诉前端：
+ *
+ * - `analyzing`  是否**仍有**在途任务 → 决定要不要继续轮询（false 就该停，否则是一个永远转下去的圈）
+ * - `analyzedCount` / `total` → 显示"已解读 x/y"，让等待有形状
+ * - `pendingCount` → 这一轮预计会补多少条
+ *
+ * ⚠️ 仍然可能偏慢的只有**第一次**：库里没有这只票的数据时要等后端抓上游。
+ * 所以调用方一律软失败（`.catch`），不要让它挡住 K 线的渲染。
+ */
+export const getStockEvents = (symbol, days = 90) =>
+  request.get('/news/events', { params: { symbol, days } })
+
+/**
+ * 个股「当前怎么看」：后端读完这批事件之后给出的一段连贯判断。
+ *
+ * 与逐条解读的分工：事件流给每条一个方向标签，这个给**综合**结论 ——
+ * 用户的原话是"你要去阅读实时的新闻去更新你的想法，而不是一个新闻一个想法"。
+ *
+ * ⚠️ 拿不到时后端返回 `data = null`（不是错误）：**"这次给不出结论"是合法状态**，
+ * 调用方应当隐藏整块，而不是显示一段空话。
+ */
+// 市场级综合（雷达页顶部"今日信息面"）：近 48h 快讯按主题关联；服务端 10 分钟缓存
+export const getMarketRead = () => request.get('/news/market-read')
+
+export const getStockRead = (symbol, days = 90) =>
+  request.get('/news/stock-read', { params: { symbol, days } })
+
+/**
+ * 预取一只票的资讯时间轴（**故意吞掉所有错误**）。
+ *
+ * <h3>为什么值得单独写一个函数</h3>
+ * 首屏慢的那几秒里，一半是"后端要临时去抓上游"。而用户点进个股页之前
+ * 一定先在首页的自选/搜索里**看过这只票**——那个时刻正是可以提前把抓取与解读
+ * 挂上去的时候。等真正跳转过去时，库已经是热的。
+ *
+ * <p>用 `GET /news/events` 而不是 `stock-read`：后者要多花一次综合解读的模型调用，
+ * 而用户可能只是划过、并不会点进去。前者会顺带把"抓 + 补解读"发到后台
+ * （受每标的 5 分钟冷却约束，重复调用不会重复花钱）。
+ *
+ * <p>刻意不返回 Promise：调用方在跳转之前不应该等它。
+ */
+export const prefetchStockNews = (symbol, days = 90) => {
+  if (!symbol) return
+  getStockEvents(symbol, days).catch(() => {
+    // 预取失败完全无所谓：真正进页面时会照常再拉一次
+  })
+}
+
+/**
+ * 全市场资讯搜索（N4 搜索页）。
+ *
+ * 后端 `POST /api/v1/news/search`，body 形状见 `NewsSearchRequest`：
+ * {keyword?, symbol?, types?, days=7, scope?, page=0, size=20}。
+ * 返回 `Result<Page<NewsEventResponse>>` —— 拦截器剥掉 Result 后
+ * `res.data` 是 Spring Data 的 Page：`.content / .totalPages / .totalElements`。
+ * 响应里每条带 credibility/credibilityGrade/credibilityReasons（落库的静态评估）
+ * 与 freshnessLabel/freshHours（响应时实时计算的新鲜度）。
+ */
+export const searchNews = (payload) => request.post('/news/search', payload)
+
+/**
+ * 手动增量刷新全市场资讯（抓上游 → 去重落库）。
+ *
+ * <p>资讯雷达的"大盘"标签读的是库；库里的全市场内容只有 refresh 落过才有。
+ * 所以大盘流首次为空时前端会自动触发一次（幂等：去重键保证重复刷新不重复入库）。
+ * 定时采集（后端 NewsIngestJob）上线后这里是兜底手段，常态供给不再依赖它。
+ */
+export const refreshNews = () => request.post('/news/refresh')
+
+/**
+ * 某时刻之后的新资讯条数（"新消息"横幅，仿新闻 App 红点）。
+ *
+ * `since` 用 ISO 本地时间（如 2026-10-12T09:00:00）；前端记上次浏览时间戳、
+ * 分钟级轮询这里，有新增提示"N 条新资讯，点击载入"。
+ */
+export const countNewsSince = (since) =>
+  request.get('/news/count-since', { params: { since } })
+
+/**
+ * 取资讯原文正文（懒抓取：服务端首抓落库，之后命中库）。
+ *
+ * 失败时 data 为空、message 是人话原因（不在白名单/JS 渲染页）——
+ * 调用方据此降级为"摘要 + 原文链接"，抓不到正文不代表资讯坏了。
+ */
+export const getEventBody = (id) => request.post(`/news/events/${id}/body`)
+
+/**
+ * 事件线列表（雷达页"事件线"区块）：同一事件的多条报道聚成的故事。
+ *
+ * `summary` 为 null 表示还没撰稿（skipReason 说明原因）—— 聚类是纯代码产物，
+ * 没有 LLM 事件线也成立，前端照常展示成员列表。
+ * 带 symbol 时后端按 symbols JSON 包含过滤（600519 自动折算 SH600519）。
+ */
+export const getNewsTopics = (days = 7, symbol = '') =>
+  request.get('/news/topics', { params: { days, symbol } })
+
+/** 事件线详情：线本体 + 成员资讯（时间倒序，形状与 events 同一套卡片）。 */
+export const getTopicDetail = (id) => request.get(`/news/topics/${id}`)

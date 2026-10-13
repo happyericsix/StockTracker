@@ -1,54 +1,48 @@
 <script setup>
 /**
- * 应用壳：左侧导航 + 内容区。2026-10 重构，取代各页自带的顶部深色条。
+ * 应用壳：墨色侧栏（两主题恒定，本产品的身份锚点）+ 内容区。
  *
- * <h3>为什么是壳而不是每页各画一个头部</h3>
- * 旧结构每页一套 `.app-layout > header` + "← 返回"按钮——导航是全局事实，
- * 却由十个页面各自实现，样式漂移只是时间问题。壳一处实现、全站一致，
- * 这正是 Operate 模式要求的"同一视觉词汇跨屏"（impeccable operate.md）。
- *
- * <h3>布局</h3>
- * - 桌面（≥1024px）：固定左侧栏。第二中性层底色（比内容面稍冷），
- *   accent 只出现在"当前选中"与徽章，不做装饰。
- * - 移动（<1024px）：顶栏（菜单 + 标题 + 消息铃铛）+ 左滑抽屉。
- *   结构性响应（侧栏折叠成抽屉）而不是流式字号（operate.md 的响应式规则）。
- * - 抽屉开合 200ms ease-in-out（emil：屏幕内移动用强 ease-in-out，<300ms）。
- *
- * <h3>导航徽章的取数</h3>
- * 未读数来自 messageBus（SSE 单例，与消息中心共用）；模拟盘运行数来自
- * /paper/overview。都是软失败：拿不到就不显示徽章，绝不让导航等数据。
+ * 逻辑全部从旧壳原样移植（零漂移）：
+ * - 市场状态三态（宁缺毋错：拿不到显示"…"，不编造"开市"）
+ * - 徽章取数：未读数来自 messageBus（SSE 单例），模拟盘运行数来自 /paper/overview，
+ *   都是软失败：拿不到就不显示徽章，绝不让导航等数据
+ * - /paper/overview 返回的是数组（每条带 paperEnabled），顶层没有 running 字段
+ * - 切页即收移动端抽屉；登出时断开两条 SSE 总线
  */
 import { ref, computed, onMounted, watch } from 'vue'
-import { RouterView, useRoute, useRouter } from 'vue-router'
-import AppIcon from './AppIcon.vue'
+import { RouterView, RouterLink, useRoute, useRouter } from 'vue-router'
+import {
+  CandlestickChart, Radar, Bot, BookOpen, TrendingUp, Bell, MessageSquare,
+  Database, Menu, LogOut, Sun, Moon,
+} from 'lucide-vue-next'
 import { messageBus } from '../composables/messageBus.js'
+import { quoteBus } from '../composables/quoteBus.js'
 import { useMarketStatus } from '../composables/useMarketStatus.js'
 import { sessionBadgeFor } from '../utils/marketStatus.js'
+import { useTheme } from '../composables/useTheme.js'
 import { getProfile } from '../api/user.js'
 import { getPaperOverview } from '../api/strategy.js'
 
 const route = useRoute()
 const router = useRouter()
+const { toggle: toggleTheme } = useTheme()
 
 /** 导航唯一配置：图标、标题、徽章都从这一份来，桌面侧栏与移动抽屉共用 */
 const navItems = [
-  { to: '/dashboard', icon: 'chart', label: '首页' },
-  { to: '/news', icon: 'search', label: '资讯雷达' },
-  { to: '/assistant', icon: 'bot', label: '智能助手' },
-  { to: '/strategies', icon: 'book', label: '策略库' },
-  { to: '/paper', icon: 'trend-up', label: '模拟盘', badge: () => paperRunning.value },
-  { to: '/alerts', icon: 'bell', label: '预警' },
-  { to: '/messages', icon: 'message', label: '消息', badge: () => messageBus.unread, badgeKind: 'loud' },
-  { to: '/memory', icon: 'database', label: '记忆' },
+  { to: '/dashboard', icon: CandlestickChart, label: '首页' },
+  { to: '/news', icon: Radar, label: '资讯雷达' },
+  { to: '/assistant', icon: Bot, label: '智能助手' },
+  { to: '/strategies', icon: BookOpen, label: '策略库' },
+  { to: '/paper', icon: TrendingUp, label: '模拟盘', badge: () => paperRunning.value },
+  { to: '/alerts', icon: Bell, label: '预警' },
+  { to: '/messages', icon: MessageSquare, label: '消息', badge: () => messageBus.unread, badgeKind: 'loud' },
+  { to: '/memory', icon: Database, label: '记忆' },
 ]
 
+const isActive = (to) => route.path === to || route.path.startsWith(`${to}/`)
+
 // ---------- 市场状态（壳底一行，与行情卡同一单例） ----------
-// 注意导出名是 load：composable 没有 refresh。这里曾想当然写成 refresh，
-// 运行时抛 TypeError 并中断 onMounted 后续的 messageBus.connect() —— 深链
-// 直开非首页时 SSE 全挂，正是那次全面审查抓出来的 P0。
 const { status: marketStatus, load: refreshMarket } = useMarketStatus()
-// 三态，宁缺毋错：状态没到（加载中/拉取失败）显示中性的"…"，
-// 不拿"开市"兜底 —— 把"不知道"渲染成"开市"是市场状态模块自己明令禁止的。
 const marketBadge = computed(() => {
   if (marketStatus.value == null) return '…'
   return sessionBadgeFor(marketStatus.value) || '开市'
@@ -70,8 +64,6 @@ const paperRunning = ref(0)
 const loadPaper = async () => {
   try {
     const res = await getPaperOverview()
-    // /paper/overview 返回的是**数组**，每条带 paperEnabled 布尔；
-    // 顶层没有 running 字段（曾想当然读 res.data?.running，徽章因此永不显示）
     const list = Array.isArray(res.data) ? res.data : []
     paperRunning.value = list.filter((item) => item?.paperEnabled).length
   } catch {
@@ -81,7 +73,6 @@ const loadPaper = async () => {
 
 // ---------- 移动端抽屉 ----------
 const drawerOpen = ref(false)
-const openDrawer = () => { drawerOpen.value = true }
 const closeDrawer = () => { drawerOpen.value = false }
 const onNavKeydown = (e) => {
   if (e.key === 'Escape') closeDrawer()
@@ -89,6 +80,7 @@ const onNavKeydown = (e) => {
 
 const logout = () => {
   messageBus.disconnect()
+  quoteBus.disconnect()
   localStorage.removeItem('token')
   router.push('/login')
 }
@@ -107,75 +99,126 @@ onMounted(() => {
   messageBus.connect()
 })
 
-// 切页即收抽屉：抽屉是临时导航，路由变化说明导航已完成。
-// 组件作用域内的 watch 随组件卸载自动停止，不必手动清理。
+// 切页即收抽屉：抽屉是临时导航，路由变化说明导航已完成
 watch(() => route.path, closeDrawer)
 </script>
 
 <template>
-  <div class="shell">
-    <!-- 移动端顶栏：菜单 + 当前页 + 消息铃铛 -->
-    <div class="shell-mobile-bar">
-      <button type="button" class="shell-icon-btn" aria-label="打开导航" @click="openDrawer">
-        <AppIcon name="menu" :size="20" :stroke-width="2" />
+  <div class="min-h-screen">
+    <!-- 移动端顶栏（<1024px）：菜单 + 标题 + 消息铃铛 -->
+    <header
+      class="sticky top-0 z-30 flex h-13 items-center gap-2 border-b border-border bg-[color:var(--bg)]/85 px-3 backdrop-blur lg:hidden"
+    >
+      <button
+        type="button"
+        class="flex h-9 w-9 items-center justify-center rounded-lg text-ink-2 hover:bg-surface-2 hover:text-ink"
+        aria-label="打开导航"
+        @click="drawerOpen = true"
+      >
+        <Menu :size="20" :stroke-width="2" aria-hidden="true" />
       </button>
-      <span class="bar-title">Stock Tracker</span>
-      <RouterLink to="/messages" class="shell-icon-btn" aria-label="消息中心">
-        <AppIcon name="message" :size="20" :stroke-width="2" />
-        <span v-if="badgeText(messageBus.unread)" class="shell-nav-badge num">
-          {{ badgeText(messageBus.unread) }}
-        </span>
+      <span class="flex-1 truncate text-[15px] font-semibold text-ink">Stock Tracker</span>
+      <RouterLink
+        to="/messages"
+        class="relative flex h-9 w-9 items-center justify-center rounded-lg text-ink-2 hover:bg-surface-2 hover:text-ink"
+        aria-label="消息中心"
+      >
+        <MessageSquare :size="20" :stroke-width="2" aria-hidden="true" />
+        <span
+          v-if="badgeText(messageBus.unread)"
+          class="num absolute -right-0.5 -top-0.5 rounded-full bg-up px-1.5 text-[10.5px] font-semibold leading-4 text-white"
+        >{{ badgeText(messageBus.unread) }}</span>
       </RouterLink>
-    </div>
+    </header>
 
     <!-- 侧栏（桌面常驻 / 移动抽屉，同一份 DOM） -->
-    <nav class="shell-sidebar" :class="{ open: drawerOpen }" aria-label="主导航" @keydown="onNavKeydown">
-      <RouterLink to="/dashboard" class="shell-brand" @click="closeDrawer">
-        <span class="brand-mark"><AppIcon name="chart" :size="22" :stroke-width="2.2" /></span>
-        Stock Tracker
+    <nav
+      class="fixed inset-y-0 left-0 z-40 flex w-[232px] flex-col border-r border-sidebar-border bg-sidebar transition-transform duration-200 lg:translate-x-0"
+      :class="drawerOpen ? 'translate-x-0' : '-translate-x-full'"
+      aria-label="主导航"
+      @keydown="onNavKeydown"
+    >
+      <RouterLink to="/dashboard" class="flex items-center gap-2.5 px-4 pb-2 pt-5" @click="closeDrawer">
+        <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-sidebar-accent-soft text-sidebar-accent">
+          <CandlestickChart :size="19" :stroke-width="1.75" aria-hidden="true" />
+        </span>
+        <span class="text-[15px] font-semibold tracking-wide text-white">Stock Tracker</span>
       </RouterLink>
 
-      <div class="shell-nav">
+      <div class="flex-1 space-y-0.5 overflow-y-auto px-3 pb-3 pt-2">
         <RouterLink
           v-for="item in navItems"
           :key="item.to"
           :to="item.to"
-          class="shell-nav-item"
+          class="group flex h-9 items-center gap-2.5 rounded-lg px-2.5 text-[13px] transition-colors"
+          :class="isActive(item.to)
+            ? 'bg-sidebar-accent-soft font-medium text-sidebar-accent'
+            : 'text-sidebar-dim hover:bg-white/[0.04] hover:text-sidebar-ink'"
           @click="closeDrawer"
         >
-          <AppIcon :name="item.icon" :size="18" :stroke-width="2" />
+          <component :is="item.icon" :size="16.5" :stroke-width="1.75" aria-hidden="true" />
           {{ item.label }}
           <span
             v-if="item.badge && badgeText(item.badge())"
-            class="shell-nav-badge num"
-            :class="{ quiet: item.badgeKind !== 'loud' }"
+            class="num ml-auto rounded-full px-1.5 text-[10.5px] font-semibold leading-4"
+            :class="item.badgeKind === 'loud' ? 'bg-up text-white' : 'bg-sidebar-accent-soft text-sidebar-accent'"
           >{{ badgeText(item.badge()) }}</span>
         </RouterLink>
       </div>
 
-      <div class="shell-side-foot">
-        <p class="shell-market-line" role="status">
-          <!-- 语义状态点：开市=实心绿，其余（休市/未开盘/午间休市/已收盘）=灰 -->
-          <span class="shell-market-dot" :class="{ live: marketBadge === '开市' }" aria-hidden="true"></span>
+      <div class="space-y-1 border-t border-sidebar-border px-3 pb-4 pt-3">
+        <p class="flex h-8 items-center gap-2 px-2.5 text-[12px] text-sidebar-dim" role="status">
+          <!-- 语义状态点：开市=呼吸的实心暖点，其余（休市/未开盘/午间休市/已收盘/未知）=静态灰 -->
+          <span
+            class="h-1.5 w-1.5 rounded-full"
+            :class="marketBadge === '开市' ? 'live-dot bg-[#3ed598]' : 'bg-sidebar-dim/60'"
+            aria-hidden="true"
+          ></span>
           {{ marketBadge }}
         </p>
-        <!-- 用户行 = 进入个人中心 + 退出登录，两个独立交互元素平铺，
-             不把按钮嵌进链接里（interactive 嵌 interactive 违反 HTML 规范） -->
-        <div class="shell-user-row">
-          <RouterLink to="/profile" class="shell-user-link" @click="closeDrawer">
-            <AppIcon name="user" :size="18" :stroke-width="2" />
-            <span class="who">{{ username || '我的' }}</span>
+        <div class="flex items-center gap-1">
+          <!-- 用户行 = 进入个人中心 + 退出登录，两个独立交互元素平铺 -->
+          <RouterLink
+            to="/profile"
+            class="flex h-9 min-w-0 flex-1 items-center gap-2 rounded-lg px-2.5 text-[13px] text-sidebar-dim transition-colors hover:bg-white/[0.04] hover:text-sidebar-ink"
+            @click="closeDrawer"
+          >
+            <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/[0.08] text-[11px] font-semibold text-sidebar-ink">
+              {{ (username || '我').slice(0, 1).toUpperCase() }}
+            </span>
+            <span class="truncate">{{ username || '我的' }}</span>
           </RouterLink>
-          <button type="button" class="shell-logout" aria-label="退出登录" @click="logout">
-            <AppIcon name="logout" :size="16" :stroke-width="2" />
+          <button
+            type="button"
+            class="flex h-9 w-9 items-center justify-center rounded-lg text-sidebar-dim transition-colors hover:bg-white/[0.04] hover:text-sidebar-ink"
+            aria-label="切换深浅主题"
+            @click="toggleTheme"
+          >
+            <Sun :size="15" :stroke-width="1.75" class="dark:hidden" aria-hidden="true" />
+            <Moon :size="15" :stroke-width="1.75" class="hidden dark:block" aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            class="flex h-9 w-9 items-center justify-center rounded-lg text-sidebar-dim transition-colors hover:bg-white/[0.04] hover:text-sidebar-ink"
+            aria-label="退出登录"
+            @click="logout"
+          >
+            <LogOut :size="15" :stroke-width="1.75" aria-hidden="true" />
           </button>
         </div>
       </div>
     </nav>
-    <div v-if="drawerOpen" class="shell-mask" aria-hidden="true" @click="closeDrawer"></div>
+    <div
+      v-if="drawerOpen"
+      class="fixed inset-0 z-30 bg-[color:var(--overlay)] lg:hidden"
+      aria-hidden="true"
+      @click="closeDrawer"
+    ></div>
 
-    <div class="shell-main">
-      <RouterView />
-    </div>
+    <main class="lg:pl-[232px]">
+      <div class="mx-auto max-w-[1200px] px-4 py-6 sm:px-6 lg:px-8">
+        <RouterView />
+      </div>
+    </main>
   </div>
 </template>

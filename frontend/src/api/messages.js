@@ -24,8 +24,14 @@ export const markRead = (id) => request.put(`/messages/${id}/read`)
 /** 全部标记已读 */
 export const markAllRead = () => request.put('/messages/read-all')
 
-/** 发送聊天消息（后端异步处理，回复通过 SSE 推送） */
-export const sendChat = (message) => request.post('/chat/send', { message })
+/**
+ * 发送聊天消息（后端异步处理，回复通过 SSE 推送）。
+ * `focus` 可选（agent 互通 P2）：聚焦对象 `{type:'news_event', eventId:321}` ——
+ * 从资讯雷达"问 AI"进入的聚焦对话，后端把这条新闻的事实注入 agent 上下文。
+ * 后端无状态：聚焦期间每条消息都带 focus，退出聚焦即不再带。
+ */
+export const sendChat = (message, focus = null) =>
+  request.post('/chat/send', focus ? { message, focus } : { message })
 
 /** 获取聊天历史 */
 export const getChatHistory = () => request.get('/chat/history')

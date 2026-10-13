@@ -1,9 +1,16 @@
 <script setup>
+/**
+ * 个人中心。逻辑自旧版原样移植：推送第二通道（留空=不改已存 Key）、
+ * LLM 用量 14 天迷你柱、THS 绑定/解绑、修改密码校验。
+ */
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { getProfile, changePassword } from '../api/user.js'
+import { getProfile, changePassword, updateProfile, testPush } from '../api/user.js'
+import { getLlmUsage } from '../api/paper.js'
 import { messageBus } from '../composables/messageBus.js'
 import QrLogin from '../components/QrLogin.vue'
+import Badge from '../components/ui/badge.vue'
+import Button from '../components/ui/button.vue'
 import { getStatus, unbind, syncFavorites } from '../api/ths.js'
 
 const router = useRouter()
@@ -25,7 +32,7 @@ const loadThsStatus = async () => {
     thsBound.value = !!d.bound
     thsLastSync.value = d.lastSyncAt
     thsLastError.value = d.lastError || ''
-  } catch (e) {
+  } catch {
     thsBound.value = false
   }
 }
@@ -35,7 +42,7 @@ const onBindSuccess = async () => {
   try {
     const res = await syncFavorites()
     thsMsg.value = `同步完成：新增 ${res.data.added} 只`
-  } catch (e) {
+  } catch {
     thsMsg.value = '绑定成功，但同步失败，可回首页手动重试'
   }
   await loadThsStatus()
@@ -66,15 +73,13 @@ const pwdSuccess = ref('')
 const fetchProfile = async () => {
   try {
     const res = await getProfile()
-    // 响应形状由 api/request.js 的拦截器统一处理（Result 信封会被剥掉），
-    // 所以这里直接读 res.data，不必再判断后端属于哪一种形状。
     const payload = res.data
     if (payload) {
       profile.value = payload
+      loadPushFromProfile()
     }
-  } catch (e) {
-    // 后端不可达时保持空态：全站没有任何地方写入过 user_profile 这个 key，
-    // 旧的 localStorage 兜底分支永远走不到，已删。
+  } catch {
+    // 后端不可达时保持空态
   }
 }
 
@@ -93,7 +98,7 @@ const handleChangePassword = async () => {
   try {
     await changePassword({
       oldPassword: passwordForm.value.oldPassword,
-      newPassword: passwordForm.value.newPassword
+      newPassword: passwordForm.value.newPassword,
     })
     pwdSuccess.value = '密码修改成功'
     passwordForm.value = { oldPassword: '', newPassword: '', confirmPassword: '' }
@@ -112,151 +117,234 @@ const handleLogout = () => {
   router.push('/login')
 }
 
+// ---- 消息推送（Bark / Server酱）：站内消息之外的第二通道 ----
+const pushForm = ref({ pushChannel: '', pushTarget: '' })
+const pushMsg = ref('')
+const pushBusy = ref(false)
+const PUSH_CHANNEL_OPTIONS = [
+  { value: '', label: '关闭（只用站内消息）' },
+  { value: 'bark', label: 'Bark（iOS）' },
+  { value: 'serverchan', label: 'Server酱（微信）' },
+]
+
+const loadPushFromProfile = () => {
+  pushForm.value.pushChannel = profile.value.pushChannel || ''
+  pushForm.value.pushTarget = ''
+}
+
+const handleSavePush = async () => {
+  pushMsg.value = ''
+  pushBusy.value = true
+  try {
+    const payload = { pushChannel: pushForm.value.pushChannel }
+    // 留空 = 不改已保存的 key（避免"只是换个通道"把 key 抹掉）
+    if (pushForm.value.pushTarget.trim()) payload.pushTarget = pushForm.value.pushTarget.trim()
+    const res = await updateProfile(payload)
+    profile.value = res.data || profile.value
+    loadPushFromProfile()
+    pushMsg.value = '推送配置已保存'
+  } catch (e) {
+    pushMsg.value = e.response?.data?.message || '保存失败，请稍后重试'
+  } finally {
+    pushBusy.value = false
+  }
+}
+
+const handleTestPush = async () => {
+  pushMsg.value = ''
+  if (!pushForm.value.pushChannel || !pushForm.value.pushTarget.trim()) {
+    pushMsg.value = '测试前请先选择通道并填写目标'
+    return
+  }
+  pushBusy.value = true
+  try {
+    const res = await testPush({
+      pushChannel: pushForm.value.pushChannel,
+      pushTarget: pushForm.value.pushTarget.trim(),
+    })
+    pushMsg.value = res.data?.sent ? '已发送，去手机上看看收到没' : '发送失败：检查地址/Key 是否抄对'
+  } catch (e) {
+    pushMsg.value = e.response?.data?.message || '测试请求失败'
+  } finally {
+    pushBusy.value = false
+  }
+}
+
+const handleDisablePush = async () => {
+  pushMsg.value = ''
+  pushBusy.value = true
+  try {
+    const res = await updateProfile({ pushChannel: '', pushTarget: '' })
+    profile.value = res.data || profile.value
+    loadPushFromProfile()
+    pushMsg.value = '已关闭推送（站内消息不受影响）'
+  } catch (e) {
+    pushMsg.value = e.response?.data?.message || '操作失败'
+  } finally {
+    pushBusy.value = false
+  }
+}
+
+// ---- LLM 用量（整站成本口径）----
+const llmUsage = ref(null)
+const loadLlmUsage = async () => {
+  try {
+    const res = await getLlmUsage(30)
+    llmUsage.value = res.data || null
+  } catch {
+    llmUsage.value = null
+  }
+}
+const llmDailySeries = () => {
+  const rows = (llmUsage.value?.byDay || []).slice(-14)
+  const max = Math.max(1, ...rows.map((r) => Number(r.llmTokens) || 0))
+  return rows.map((r) => ({ ...r, heightPct: Math.round(((Number(r.llmTokens) || 0) / max) * 100) }))
+}
+
 onMounted(() => {
   fetchProfile()
   loadThsStatus()
+  loadLlmUsage()
 })
 </script>
 
 <template>
-  <div class="page">
-    <div class="page-head">
-      <h1>个人中心</h1>
+  <div>
+    <div class="mb-5">
+      <h1 class="text-[20px] font-semibold text-ink">个人中心</h1>
     </div>
 
-      <!-- 基本信息 -->
-      <section class="card">
-        <h2>基本信息</h2>
-        <div class="info-grid">
-          <div class="info-item">
-            <span class="label">用户名</span>
-            <span class="value">{{ profile.username || '-' }}</span>
-          </div>
+    <!-- 基本信息 -->
+    <section class="mb-4 rounded-xl border border-border bg-surface p-5">
+      <h2 class="mb-3.5 text-[15px] font-semibold text-ink">基本信息</h2>
+      <div class="flex items-center justify-between border-b border-border py-2 last:border-b-0">
+        <span class="text-[13.5px] text-ink-2">用户名</span>
+        <span class="text-[13.5px] font-medium text-ink">{{ profile.username || '-' }}</span>
+      </div>
+    </section>
+
+    <!-- 消息推送 -->
+    <section class="mb-4 rounded-xl border border-border bg-surface p-5">
+      <h2 class="text-[15px] font-semibold text-ink">消息推送</h2>
+      <p class="mb-3.5 mt-1 text-[12.5px] leading-relaxed text-ink-3">
+        模拟盘成交、预警触发时推送到手机。推送只是第二通道——站内消息永远可用。
+      </p>
+      <div class="flex flex-col gap-3">
+        <label class="flex flex-col gap-1">
+          <span class="text-[12px] text-ink-2">通道</span>
+          <select
+            v-model="pushForm.pushChannel"
+            class="h-[34px] rounded-lg border border-border bg-bg px-2.5 text-[13px] text-ink focus:border-accent focus:outline-none"
+          >
+            <option v-for="opt in PUSH_CHANNEL_OPTIONS" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+          </select>
+        </label>
+        <label v-if="pushForm.pushChannel" class="flex flex-col gap-1">
+          <span class="text-[12px] text-ink-2">{{ pushForm.pushChannel === 'bark' ? 'Bark 服务器地址（如 https://api.day.app/xxxxx）' : 'Server酱 SendKey（如 SCTxxxxx）' }}</span>
+          <input
+            v-model.trim="pushForm.pushTarget"
+            type="text"
+            :placeholder="pushForm.pushChannel === 'bark' ? 'https://api.day.app/你的Key' : 'SCTxxxxxxxxxxxx'"
+            autocomplete="off"
+            class="h-[34px] w-full rounded-lg border border-border bg-bg px-3 font-mono text-[12.5px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none focus:ring-2 focus:ring-[color:var(--ring)]"
+          >
+        </label>
+        <div class="flex flex-wrap gap-2">
+          <Button v-if="pushForm.pushChannel" size="sm" variant="primary" :loading="pushBusy" @click="handleSavePush">保存配置</Button>
+          <Button v-if="pushForm.pushChannel" size="sm" :disabled="pushBusy" @click="handleTestPush">发条测试</Button>
+          <Button v-if="profile.pushChannel" size="sm" variant="ghost" :disabled="pushBusy" @click="handleDisablePush">关闭推送</Button>
         </div>
-      </section>
+        <p v-if="profile.pushChannel && !pushForm.pushChannel" class="text-[12.5px] text-ink-2">
+          当前已启用：{{ profile.pushChannel === 'bark' ? 'Bark' : 'Server酱' }}（Key 已保存，不在页面回显）
+        </p>
+        <p v-if="pushMsg" class="text-[12.5px] text-accent" role="status">{{ pushMsg }}</p>
+      </div>
+    </section>
 
-      <!-- 同花顺绑定 -->
-      <section class="card">
-        <h2>同花顺账号</h2>
+    <!-- LLM 用量 -->
+    <section v-if="llmUsage && (llmUsage.totals?.usageEvents || 0) > 0" class="mb-4 rounded-xl border border-border bg-surface p-5">
+      <h2 class="mb-3 text-[15px] font-semibold text-ink">AI 用量（近 {{ llmUsage.days }} 天）</h2>
+      <div class="num mb-3 grid gap-x-6 gap-y-2.5 [grid-template-columns:repeat(auto-fit,minmax(140px,1fr))]">
+        <div class="flex flex-col gap-0.5"><span class="text-[12px] text-ink-2">LLM 调用</span><strong class="text-[16px] font-semibold text-ink">{{ llmUsage.totals.llmCalls }}</strong></div>
+        <div class="flex flex-col gap-0.5"><span class="text-[12px] text-ink-2">消耗 tokens</span><strong class="text-[16px] font-semibold text-ink">{{ Number(llmUsage.totals.llmTokens).toLocaleString() }}</strong></div>
+        <div class="flex flex-col gap-0.5"><span class="text-[12px] text-ink-2">工具调用</span><strong class="text-[16px] font-semibold text-ink">{{ llmUsage.totals.toolCalls }}</strong></div>
+      </div>
+      <div v-if="llmDailySeries().length" class="flex h-[60px] items-end gap-[3px]" aria-hidden="true">
+        <div
+          v-for="(d, i) in llmDailySeries()"
+          :key="i"
+          class="min-w-[6px] flex-1 rounded-t-sm border-t-2 border-accent bg-accent-soft"
+          :style="{ height: Math.max(4, d.heightPct) + '%' }"
+          :title="`${d.date}：${Number(d.llmTokens).toLocaleString()} tokens`"
+        ></div>
+      </div>
+      <p class="mt-2 text-[12px] leading-relaxed text-ink-3">
+        委员会每次开会约 3 万 tokens；预算硬顶由服务端配置（当前 {{ llmUsage.dailyTokenBudget > 0 ? llmUsage.dailyTokenBudget + ' tokens/天' : '未设置' }}）。
+      </p>
+    </section>
 
-        <!-- 已绑定 -->
-        <template v-if="thsBound === true && !showBindQr">
-          <p class="ths-state ok">已绑定</p>
-          <p class="ths-detail">
-            <span v-if="thsLastSync" class="num">上次同步：{{ String(thsLastSync).replace('T', ' ').slice(0, 19) }}</span>
-            <span v-else>尚未同步过自选股</span>
-            <span v-if="thsLastError" class="ths-err">· {{ thsLastError }}</span>
-          </p>
-          <div class="ths-btns">
-            <button type="button" class="btn btn-outline" :disabled="working" @click="showBindQr = true">重新绑定</button>
-            <button type="button" class="btn btn-text danger" :disabled="working" @click="handleUnbind">解绑</button>
-          </div>
-        </template>
+    <!-- 同花顺绑定 -->
+    <section class="mb-4 rounded-xl border border-border bg-surface p-5">
+      <h2 class="mb-3 text-[15px] font-semibold text-ink">同花顺账号</h2>
 
-        <!-- 未绑定 或 点开了重新绑定 -->
-        <template v-else-if="thsBound === false || showBindQr">
-          <p class="ths-detail">
-            用手机同花顺 App 扫码绑定，绑定后自动同步自选股，以后也能直接扫码登录。
-          </p>
-          <QrLogin v-if="showBindQr" mode="bind" @success="onBindSuccess" />
-          <div class="ths-btns">
-            <button v-if="!showBindQr" type="button" class="btn btn-outline" @click="showBindQr = true">去绑定</button>
-            <button v-else type="button" class="btn btn-text" @click="showBindQr = false">收起</button>
-          </div>
-        </template>
-
-        <p v-else class="ths-detail">加载中...</p>
-        <!-- 绑定/同步结果是动态插入的，用 role="status" 让屏幕阅读器也能听到 -->
-        <p v-if="thsMsg" class="ths-msg num" role="status">{{ thsMsg }}</p>
-      </section>
-
-      <!-- 修改密码 -->
-      <section class="card">
-        <h2>安全设置</h2>
-        <div v-if="!showPasswordForm">
-          <button type="button" class="btn btn-outline" @click="showPasswordForm = true">修改密码</button>
+      <template v-if="thsBound === true && !showBindQr">
+        <p class="mb-2 flex items-center gap-2 text-[13.5px] font-semibold text-down">
+          <span class="h-2 w-2 rounded-full bg-down" aria-hidden="true"></span>已绑定
+        </p>
+        <p class="mb-3.5 text-[13px] leading-relaxed text-ink-2">
+          <span v-if="thsLastSync" class="num">上次同步：{{ String(thsLastSync).replace('T', ' ').slice(0, 19) }}</span>
+          <span v-else>尚未同步过自选股</span>
+          <span v-if="thsLastError" class="text-up"> · {{ thsLastError }}</span>
+        </p>
+        <div class="flex flex-wrap gap-2">
+          <Button size="sm" :disabled="working" @click="showBindQr = true">重新绑定</Button>
+          <Button size="sm" variant="ghost" class="text-up hover:bg-up-soft" :disabled="working" @click="handleUnbind">解绑</Button>
         </div>
-        <form v-else @submit.prevent="handleChangePassword" class="password-form">
-          <!-- placeholder 不能当标签，用 .visually-hidden 的 label 提供可访问名称 -->
-          <label class="visually-hidden" for="pwd-old">当前密码</label>
-          <input id="pwd-old" v-model="passwordForm.oldPassword" type="password" placeholder="当前密码" required />
-          <label class="visually-hidden" for="pwd-new">新密码（至少 6 位）</label>
-          <input id="pwd-new" v-model="passwordForm.newPassword" type="password" placeholder="新密码（至少6位）" required />
-          <label class="visually-hidden" for="pwd-confirm">确认新密码</label>
-          <input id="pwd-confirm" v-model="passwordForm.confirmPassword" type="password" placeholder="确认新密码" required />
-          <p v-if="pwdError" class="error" role="alert">{{ pwdError }}</p>
-          <p v-if="pwdSuccess" class="success" role="status">{{ pwdSuccess }}</p>
-          <div class="edit-actions">
-            <button type="button" class="btn btn-text" @click="showPasswordForm = false">取消</button>
-            <button type="submit" class="btn btn-primary" :disabled="loading">
-              {{ loading ? '修改中...' : '确认修改' }}
-            </button>
-          </div>
-        </form>
-      </section>
+      </template>
 
-      <!-- 退出登录 -->
-      <section class="card">
-        <button type="button" class="btn btn-danger btn-full" @click="handleLogout">退出登录</button>
-      </section>
+      <template v-else-if="thsBound === false || showBindQr">
+        <p class="mb-3.5 text-[13px] leading-relaxed text-ink-2">
+          用手机同花顺 App 扫码绑定，绑定后自动同步自选股，以后也能直接扫码登录。
+        </p>
+        <QrLogin v-if="showBindQr" mode="bind" @success="onBindSuccess" />
+        <div class="mt-3 flex flex-wrap gap-2">
+          <Button v-if="!showBindQr" size="sm" variant="primary" @click="showBindQr = true">去绑定</Button>
+          <Button v-else size="sm" variant="ghost" @click="showBindQr = false">收起</Button>
+        </div>
+      </template>
+
+      <p v-else class="text-[13px] text-ink-2">加载中...</p>
+      <p v-if="thsMsg" class="mt-3 text-[12.5px] text-accent" role="status">{{ thsMsg }}</p>
+    </section>
+
+    <!-- 修改密码 -->
+    <section class="mb-4 rounded-xl border border-border bg-surface p-5">
+      <h2 class="mb-3.5 text-[15px] font-semibold text-ink">安全设置</h2>
+      <div v-if="!showPasswordForm">
+        <Button size="sm" @click="showPasswordForm = true">修改密码</Button>
+      </div>
+      <form v-else class="flex flex-col gap-3" @submit.prevent="handleChangePassword">
+        <label class="sr-only" for="pwd-old">当前密码</label>
+        <input id="pwd-old" v-model="passwordForm.oldPassword" type="password" placeholder="当前密码" required
+          class="h-[38px] rounded-lg border border-border bg-bg px-3 text-[13px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none focus:ring-2 focus:ring-[color:var(--ring)]" />
+        <label class="sr-only" for="pwd-new">新密码（至少 6 位）</label>
+        <input id="pwd-new" v-model="passwordForm.newPassword" type="password" placeholder="新密码（至少6位）" required
+          class="h-[38px] rounded-lg border border-border bg-bg px-3 text-[13px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none focus:ring-2 focus:ring-[color:var(--ring)]" />
+        <label class="sr-only" for="pwd-confirm">确认新密码</label>
+        <input id="pwd-confirm" v-model="passwordForm.confirmPassword" type="password" placeholder="确认新密码" required
+          class="h-[38px] rounded-lg border border-border bg-bg px-3 text-[13px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none focus:ring-2 focus:ring-[color:var(--ring)]" />
+        <p v-if="pwdError" class="text-[13px] text-up" role="alert">{{ pwdError }}</p>
+        <p v-if="pwdSuccess" class="text-[13px] text-down" role="status">{{ pwdSuccess }}</p>
+        <div class="flex justify-end gap-2">
+          <Button variant="ghost" @click="showPasswordForm = false">取消</Button>
+          <Button type="submit" variant="primary" :loading="loading">确认修改</Button>
+        </div>
+      </form>
+    </section>
+
+    <!-- 退出登录：危险但非破坏性（只清本地 token），用描边而非实心红 -->
+    <section class="mb-4 rounded-xl border border-border bg-surface p-5">
+      <Button variant="danger" block @click="handleLogout">退出登录</Button>
+    </section>
   </div>
 </template>
-
-<style scoped>
-/* 100vh 在移动浏览器里会把地址栏高度算进去，补 100dvh 兜底 */
-
-
-
-.card { background: var(--color-bg-surface); border-radius: var(--radius-lg); padding: 24px; margin-bottom: 16px; box-shadow: var(--shadow-1); }
-.card h2 { font-size: 16px; margin-bottom: 16px; color: var(--color-text-primary); }
-
-.info-grid { display: flex; flex-direction: column; gap: 12px; }
-.info-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--color-border); }
-.info-item .label { color: var(--color-text-secondary); font-size: 14px; }
-.info-item .value { color: var(--color-text-primary); font-size: 14px; font-weight: 500; }
-
-.password-form { display: flex; flex-direction: column; gap: 12px; }
-.password-form input { width: 100%; padding: 10px 12px; border: 1px solid var(--color-border-control); border-radius: var(--radius-sm); font-size: 14px; box-sizing: border-box; }
-/* 焦点：删掉 outline: none（旧值只剩 1px 边框 + #4096ff，对白仅 2.99:1），
-   交给 style.css 的全局 :focus-visible 环；边框变色只作第二通道。 */
-.password-form input:focus-visible { border-color: var(--color-accent); }
-
-.edit-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
-
-.btn {
-  padding: 8px 20px; border: none; border-radius: var(--radius-sm); font-size: 14px; cursor: pointer;
-  transition: background-color var(--duration-base) var(--ease-out),
-              border-color var(--duration-base) var(--ease-out),
-              color var(--duration-base) var(--ease-out);
-}
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-primary { background: var(--color-accent); color: var(--color-text-on-accent); }
-.btn-primary:hover:not(:disabled) { background: var(--color-accent-hover); }
-/* 退出登录是"危险但非破坏性"的动作（只清本地 token，不销毁任何数据），
-   所以不占用整块实心红：页面唯一的实心主操作留给"确认修改"。
-   改用中性描边 + 危险色文字/边框（#cf1322 对白 5.57:1，边框同样 ≥3:1），
-   悬停时才填充实心危险色（白字对 #cf1322 为 5.57:1）。 */
-.btn-danger { background: transparent; border: 1px solid var(--color-danger); color: var(--color-danger); }
-.btn-danger:hover:not(:disabled) { background: var(--color-danger); color: var(--color-text-on-accent); }
-.btn-outline { background: transparent; border: 1px solid var(--color-border-control); color: var(--color-text-primary); }
-.btn-outline:hover { border-color: var(--color-accent); color: var(--color-accent); }
-.btn-text { background: transparent; color: var(--color-text-muted); }
-.btn-text:hover { color: var(--color-text-primary); }
-.btn-full { width: 100%; padding: 12px; font-size: 15px; }
-
-.error { color: var(--color-danger); font-size: 13px; }
-.success { color: var(--color-success); font-size: 13px; }
-
-/* ---- 同花顺绑定卡片 ---- */
-.ths-state { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
-.ths-state.ok { color: var(--color-success); }
-.ths-state.ok::before { content: '● '; font-size: 12px; color: var(--color-success-mark); }
-.ths-detail { font-size: 13px; color: var(--color-text-secondary); line-height: 1.6; margin: 0 0 14px; }
-.ths-err { color: var(--color-danger); }
-.ths-btns { display: flex; gap: 8px; flex-wrap: wrap; }
-/* 解绑：文字型危险按钮。悬停只加下划线 —— 没有比 --color-danger 更深的红色令牌，
-   旧值 #ff7875 对白仅 2.56:1，不能承载文字，所以不用"变浅"来表悬停。 */
-.btn-text.danger { color: var(--color-danger); }
-.btn-text.danger:hover { color: var(--color-danger); text-decoration: underline; }
-.ths-msg { font-size: 13px; color: var(--color-accent); margin: 12px 0 0; }
-</style>

@@ -81,6 +81,14 @@ export function useMarketStatus() {
   const restNotice = computed(
     () => buildRestNotice(status.value) ?? (failed.value ? buildUnavailableNotice() : null))
 
+  /**
+   * 主句按「·」分段（配合全局 .headline-part 样式）：每段渲染成不可拆的整体，
+   * 窄屏只会在分隔符处换行 —— 否则「（10-01 ~ 10-07）」这类日期区间会被拦腰折断，
+   * 那是手机端休市提示最显眼的一处"错位"。
+   */
+  const restNoticeParts = computed(() =>
+    String(restNotice.value?.headline || '').split(' · ').filter(Boolean))
+
   return {
     status,
     failed,
@@ -88,6 +96,7 @@ export function useMarketStatus() {
     quoteIsFromAnotherDay,
     quoteDateLabel,
     restNotice,
+    restNoticeParts,
     /** 图表副标题的"现在是什么状态"前缀（未开盘 / 午间休市 / 已收盘 / 今日休市） */
     sessionBadge: computed(() => sessionBadgeFor(status.value)),
     /**

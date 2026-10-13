@@ -1,775 +1,224 @@
-/* ============================================================================
- * Stock Tracker — 全局基础层
+/*
+ * 墨阶设计系统 — Tailwind v4 接线（2026-10-13 全量重建）
  *
- * 本文件取代了原先残留的 Vite 脚手架模板样式。旧内容带来的实际故障：
- *   1. `color-scheme: light dark` + `h1,h2{color:var(--text-h)}` →
- *      系统暗色模式下标题变成 #f3f4f6，压在应用自己的浅灰底 #f0f2f5 上，
- *      实测对比度 1.02:1 —— 标题不可见。
- *   2. `#app { width: 1126px; text-align: center }` → 全站被锁成固定宽度并居中。
- *   3. `:root { font: 18px/145% }` → 根字号偏离 16px 基准。
- *   4. 约 150 行 .hero / .vite / .framework / .ticks / #next-steps 等死规则。
+ * 上一次接入 Tailwind 因 preflight 冲突回退过（见 frontend-legacy/src/style.css 头注释）。
+ * 本次是全量重建：没有依赖浏览器默认样式的旧页面，preflight 可以也应该打开。
  *
- * 层级约定（与 better-colors 一致）：
- *   - 原始色板 `--c-*`  只在本文件定义字面色值；
- *   - 语义令牌 `--color-*`  是组件唯一允许引用的层。
- * 所有色值均经 WCAG 2.1 对比度实测，括号内为实测值。
- * ========================================================================== */
+ * 结构：语义变量（:root / .dark 各一套）→ @theme inline 映射成工具类 →
+ * base（浏览器表面）→ components（md 渲染等跨页样式）→ 动效 keyframes。
+ * 视觉世界的完整契约见仓库根 DESIGN.md。
+ */
+@import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---------- 语义 tokens：两主题一套变量 ---------- */
 :root {
-  /* ---------- 1. 原始色板（唯一允许写死颜色的地方） ---------------------- */
-
-  /* 中性：从表面到墨色 */
-  --c-neutral-0:   #ffffff;
-  --c-neutral-50:  #fafafa;
-  --c-neutral-100: #f0f2f5;  /* 页面底色 */
-  --c-neutral-200: #e8e8e8;
-  --c-neutral-300: #d9d9d9;
-  --c-neutral-400: #aaaaaa;  /* 对深底 #1a1a2e 为 7.34:1，用于深色表面上的次要文字 */
-  --c-neutral-500: #8c8c8c;  /* 对白 3.36:1，够作控件边界与图形标记 */
-  --c-neutral-600: #767676;  /* 对白 4.54:1，占位符下限 */
-  --c-neutral-700: #666666;  /* 对白 5.74:1 / 对灰底 5.12:1 */
-  --c-neutral-800: #595959;  /* 对白 7.00:1 / 对灰底 6.25:1 */
-  --c-neutral-900: #1a1a2e;  /* 对白 17.06:1 */
-
-  /* 蓝：交互。交互色改用 blue-7，白字 6.16:1（旧 #1677ff 白字仅 4.10:1，不达 AA）。
-     不要再引入更浅的蓝：旧的 #4096ff 对白仅 2.99:1，连图形/焦点环的 3:1 都不到。 */
-  --c-blue-100: #e6f4ff;
-  --c-blue-700: #0958d9;  /* 对白 6.16:1 / 对灰底 5.49:1 */
-  --c-blue-800: #003eb3;  /* 对白 8.97:1 */
-
-  /* 绿：成功。旧 #52c41a 白字仅 2.27:1 */
-  --c-green-50:  #f6ffed;  /* 浅底，承载 #237804 文字实测 5.44:1 */
-  --c-green-400: #389e0d;  /* 图形标记 3.46:1 */
-  --c-green-700: #237804;  /* 白字 5.59:1 / 对灰底 4.98:1 */
-  --c-green-800: #135200;  /* 白字 9.40:1，实心按钮 hover（须比基色更深） */
-
-  /* 红：危险。旧 #ff4d4f 白字仅 3.27:1 */
-  --c-red-50:    #fff1f0;  /* 错误字段浅底，承载 #cf1322 文字实测 5.07:1 */
-  --c-red-600:   #cf1322;  /* 白字 5.57:1 / 对灰底 4.97:1 */
-  --c-red-800:   #a8071a;  /* 白字 7.75:1，实心按钮 hover */
-
-  /* 橙：警示。旧 #fa8c16 白字仅 2.38:1、#faad14 作文字仅 1.90:1，都别再用 */
-  --c-orange-50:  #fff7e6;  /* 本地暂存徽章浅底，承载 #ad4e00 文字实测 5.09:1 */
-  --c-orange-600: #d46b08;  /* 图形标记 3.56:1 */
-  --c-orange-800: #ad4e00;  /* 白字 5.43:1 / 对灰底 4.84:1 */
-  --c-orange-900: #873800;  /* 白字 8.09:1，实心按钮 hover */
-
-  /* 紫：策略卡片渐变与图表系列，仅装饰。渐变两端都要满足白字 >=4.5:1。
-     #b37feb 那样的浅紫白字只有 2.94:1，别用作渐变端或文字 */
-  --c-purple-700: #722ed1;  /* 白字 6.94:1 */
-  --c-purple-800: #531dab;  /* 白字 9.85:1 */
-
-  /* 粉：仅图表系列。对白 3.90:1 —— 满足图形对象的 3:1，不满足文字的 4.5:1 */
-  --c-pink-600: #eb2f96;
-
-  /* 青、洋红：事件色板专用（见 --color-event-*）。
-     两者都按"要能当文字用"的标准选，所以必须 ≥4.5:1 —— 图上的事件编号就是文字。 */
-  --c-teal-800:    #006d75;  /* 对白 6.10:1 / 对灰底 5.44:1 */
-  --c-magenta-800: #9e1068;  /* 对白 7.70:1 / 对灰底 6.86:1 */
-
-  /* ---------- 2. 语义令牌（组件唯一允许引用的层） ------------------------ */
-
-  --color-bg-page:        var(--c-neutral-100);
-  --color-bg-surface:     var(--c-neutral-0);
-  --color-bg-subtle:      var(--c-neutral-50);
-  --color-bg-inverse:     var(--c-neutral-900);
-
-  --color-text-primary:   var(--c-neutral-900);
-  --color-text-secondary: var(--c-neutral-800);
-  --color-text-muted:     var(--c-neutral-700);
-  --color-text-placeholder: var(--c-neutral-600);
-  --color-text-on-accent: var(--c-neutral-0);
-  --color-text-inverse:   var(--c-neutral-0);
-  --color-text-inverse-muted: var(--c-neutral-400);  /* 对 #1a1a2e 实测 7.34:1 */
-
-  --color-border:         var(--c-neutral-200);  /* 装饰性分隔 */
-  --color-border-strong:  var(--c-neutral-300);
-  --color-border-control: var(--c-neutral-500);  /* 输入控件边界，3.36:1 满足 WCAG 1.4.11 */
-
-  --color-accent:         var(--c-blue-700);
-  --color-accent-hover:   var(--c-blue-800);
-  --color-accent-soft:    var(--c-blue-100);
-
-  --color-success:        var(--c-green-700);
-  --color-success-mark:   var(--c-green-400);
-  --color-success-soft:   var(--c-green-50);
-  --color-warning:        var(--c-orange-800);
-  --color-warning-mark:   var(--c-orange-600);
-  --color-warning-soft:   var(--c-orange-50);
-  /* 这里原有 --color-success-hover / --color-warning-hover（配实心按钮的加深 hover）。
-     「宽松」方向把首页那三个彩色实心操作按钮换成了安静的文字按钮，于是它们失去了
-     唯一的消费者。按本文件"零孤儿"的纪律移除 —— 如果将来重新出现实心 success/warning
-     按钮，加深档仍可从原始色板取：--c-green-800（白字 9.40:1）、--c-orange-900（8.09:1），
-     且必须**加深**而不是变浅，否则白字对比度会掉到 4.5:1 以下。 */
-  --color-danger:         var(--c-red-600);
-  --color-danger-hover:   var(--c-red-800);
-  --color-danger-soft:    var(--c-red-50);
-
-  /* 行情涨跌：与"成功/危险"是两个不同的语义，虽然在本应用里用到了同一批色相。
-     红涨绿跌是中国市场约定 —— 涨用红色表示"上涨"，与 danger 的"危险"含义无关，
-     所以必须独立成令牌；直接引用 --color-danger 会让语义漂移
-     （正是 better-colors「一个颜色一个含义」要避免的）。 */
-  --color-gain:           var(--c-red-600);    /* 对白 5.57:1 */
-  --color-loss:           var(--c-green-700);  /* 对灰底 4.98:1 */
-
-  /* 涨跌的浅底：承载"软底胶囊"里的涨跌结论（宽松方向用它做每张卡的结论位）。
-     与 --color-success-soft / --color-danger-soft 分开是刻意的 ——
-     "涨"和"成功"共用色相但不是同一个语义，共用一个令牌会让含义漂移。
-     实测：--color-gain(#cf1322) 压 #fff1f0 = 5.07:1；--color-loss(#237804) 压 #f6ffed = 5.44:1，都过 AA。*/
-  --color-gain-soft:      var(--c-red-50);
-  --color-loss-soft:      var(--c-green-50);
-
-  /* 图表数据系列色（K线、均线、布林带、成交量）。
-     这是"数据系列"这一角色，不是状态色 —— 所以独立成组，组件只引用这一层，
-     不要去借用 --color-warning-mark 之类表示状态的令牌（那会让"橙色=警示"的含义漂移）。
-     门槛：图形对象对白底 ≥3:1；标「仅图形」的两项 <4.5:1，不可用作文字。
-     组内需两两可区分，改动前请确认没有撞色。 */
-  --color-chart-ma5:      var(--c-orange-600);  /* #d46b08  3.56:1  仅图形 */
-  --color-chart-ma10:     var(--c-blue-700);    /* #0958d9  6.16:1  兼作图例文字 */
-  --color-chart-ma20:     var(--c-purple-700);  /* #722ed1  6.94:1  兼作图例文字 */
-  --color-chart-ma60:     var(--c-green-400);   /* #389e0d  3.46:1  仅图形 */
-  --color-chart-boll:     var(--c-pink-600);    /* #eb2f96  3.90:1  仅图形 */
-
-  /* 事件色板："图上的竖线是哪一条新闻"。
-     与 --color-chart-* 是**两个角色**：那一组是连续的数据系列（均线/布林带），
-     这一组是离散的事件标注。所以独立成组，不要互相借用。
-
-     三条硬约束（都是踩过坑才写下来的）：
-     1. **全部 ≥4.5:1**：图上的事件编号是**文字**，不是纯图形，门槛比 --color-chart-*
-        那组（只要求 3:1）更高；
-     2. **不含红、不含绿**：红=利好、绿=利空在本应用已有确定含义，
-        再让它们承担"这是第几条新闻"就是同一通道两层语义；
-     3. **方向改用线型表达**（实线利好 / 虚线利空 / 点线未判），
-        这样把颜色让给"身份"之后，图上的方向信息也不会丢。 */
-  --color-event-1:        var(--c-blue-800);    /* #003eb3  8.97:1 */
-  --color-event-2:        var(--c-teal-800);    /* #006d75  6.10:1 */
-  --color-event-3:        var(--c-orange-900);  /* #873800  8.09:1 */
-  --color-event-4:        var(--c-purple-800);  /* #531dab  9.85:1 */
-  --color-event-5:        var(--c-magenta-800); /* #9e1068  7.70:1 */
-
-  --color-focus-ring:     var(--c-blue-700);
-
-  --color-overlay:        rgb(0 0 0 / 0.45);
-
-  /* ---------- 3. 形状 / 阴影 / 动效 -------------------------------------- */
-
-  /* 圆角。嵌套时遵守同心规则：外圆角 = 内圆角 + 内距（better-ui/surfaces.md）。
-     例：卡片 20px 圆角、内距 16px → 内部控件的圆角应当是 4px，而不是也写 20px。
-     内距超过 24px 时两层算独立表面，各选各的，不必强行凑同心。*/
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
-  --radius-xl: 12px;
-  --radius-3xl: 20px;   /* 卡片级：配 16px 内距 → 内层 4px，同心 */
-  --radius-pill: 999px;
-
-  /* 深度。原先只有两只：--shadow-1 用在 20 处里的 19 处，于是全站只有一个深度，
-     卡片之间没有前后关系 —— 这是"界面平坦单调"的直接来源，不是风格问题。
-     现在三档：1 = 卡片静止，2 = 卡片悬停/可交互，3 = 浮层（模态、安装横幅）。
-     用 box-shadow 而不是 border 表达深度（surfaces.md）：阴影带透明度，
-     所以它在白卡片上和灰页面底上自动成立，而固定颜色的边框做不到。
-
-     第 1 层是个 1px 的环 —— 它替代"给卡片加边框"，但比边框更耐背景变化。*/
-  --shadow-1:
-    0 0 0 1px oklch(0 0 0 / 0.06),
-    0 1px 2px -1px oklch(0 0 0 / 0.06),
-    0 2px 6px 0 oklch(0 0 0 / 0.04);
-  --shadow-2:
-    0 0 0 1px oklch(0 0 0 / 0.08),
-    0 1px 2px -1px oklch(0 0 0 / 0.08),
-    0 4px 12px 0 oklch(0 0 0 / 0.06);
-  --shadow-3: 0 4px 20px rgb(0 0 0 / 0.35);
-
-  --duration-fast: 150ms;
-  --duration-base: 200ms;
-  --ease-out: cubic-bezier(0.2, 0, 0, 1);
-
-  /* ---------- 3.5 字阶（角色化）与间距节奏 ------------------------------- */
-
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-    'Helvetica Neue', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
-
-  /* 一个角色 = 字号 + 行高 + 字重，用 font 简写一次给全。
-     组件里写 font: var(--font-heading) 就是"用标题这个角色"，而不是每次自己挑
-     17px / 600 / 1.3 这种三连 —— 改前全项目有 232 处硬编码 font-size、14 个不同
-     字号、6 种字重写法，界面没有节奏就是从这里来的。
-
-     行高按角色给而不是按字号给：短文本可以紧（1.1），会折行的正文必须松（≥1.4）。
-     12px 是下限：13px 是说明文字档；12px 只留给徽章/角标这种"扫一眼就够"的极短
-     文本，并且必须是 500 字重（低于 400 的细体在小字号下会消失）。*/
-  --font-display: 600 2.25rem/1.1 var(--font-sans);   /* 36px 一屏只有一个：当前股价 */
-  --font-title:   600 1.5rem/1.2 var(--font-sans);    /* 24px 页面级数字 */
-  --font-heading: 600 1.125rem/1.3 var(--font-sans);  /* 18px 区块标题 */
-  --font-body:    400 1rem/1.5 var(--font-sans);      /* 16px 正文 / 输入框 */
-  --font-ui:      400 0.875rem/1.4 var(--font-sans);  /* 14px 列表行、菜单、按钮 */
-  --font-caption: 400 0.8125rem/1.4 var(--font-sans); /* 13px 说明文字 */
-  --font-micro:   500 0.75rem/1.3 var(--font-sans);   /* 12px 徽章，仅此用途 */
-
-  /* 间距节奏：组内用小的、组间用大的，且组间 ≥ 组内 2×，否则分组读起来像噪音
-     （better-layout 的硬性下限）。全部是 4 的倍数，避免手挑 5/7/9/11 这类值。*/
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-5: 24px;
-  --space-6: 32px;
-  --space-7: 48px;
-
-  /* ---------- 4. 文档级设置 ---------------------------------------------- */
-
-  /* 应用是纯浅色界面（组件层全部写死浅色），因此显式声明 light。
-     阴影滚动条/原生控件会跟随系统暗色，与写死的浅色卡片混在一起。
-     将来要做暗色模式：只需覆盖第 2 节的语义令牌，组件层无需改动。 */
-  color-scheme: light;
-
-  font-size: 16px;
-  line-height: 1.5;
-  font-family: var(--font-sans);
-  color: var(--color-text-primary);
-  background-color: var(--color-bg-page);
-
-  font-synthesis: none;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --surface-2: #eef0f4;
+  --border: #e3e6ec;
+  --ink: #1b1e26;
+  --ink-2: #575e6e;
+  --ink-3: #8b92a5;
+  --sidebar: #13151c;
+  --sidebar-border: #242733;
+  --sidebar-ink: #c6cbd8;
+  --sidebar-dim: #7d8598;
+  /* 侧栏在两主题下都是墨色，所以它有自己的强调色（取深色主题的钴蓝） */
+  --sidebar-accent: #7da2ff;
+  --sidebar-accent-soft: rgba(125, 162, 255, 0.14);
+  --accent: #2153d6;
+  --accent-hover: #1a46b8;
+  --accent-soft: #e8eefc;
+  --on-accent: #ffffff;
+  /* 图表系列色与事件身份色（canvas 不认 CSS 变量名，但 JS 会按名取值）：
+     事件五色刻意避开红绿——红绿在本应用是涨跌语义 */
+  --chart-ma5: #d97706;
+  --chart-ma10: #7c3aed;
+  --chart-ma20: #0891b2;
+  --chart-ma60: #64748b;
+  --chart-boll: #db2777;
+  --event-1: #3b82f6;
+  --event-2: #a855f7;
+  --event-3: #f59e0b;
+  --event-4: #06b6d4;
+  --event-5: #ec4899;
+  --up: #d92c2c;
+  --up-soft: #fceaea;
+  --down: #0e9668;
+  --down-soft: #e6f6ef;
+  --warn: #b45309;
+  --warn-soft: #fdf1df;
+  --ring: rgba(33, 83, 214, 0.4);
+  --overlay: rgba(20, 23, 31, 0.45);
+  --shadow-pop: 0 12px 32px rgba(16, 20, 34, 0.14);
 }
 
-/* ============================================================================
- * 基础重置（与原 App.vue 中的全局样式保持等价，避免布局回归）
- * ========================================================================== */
-
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
+.dark {
+  --bg: #0e1015;
+  --surface: #161a24;
+  --surface-2: #1d2230;
+  --border: #262c3c;
+  --ink: #e7eaf2;
+  --ink-2: #9aa2b5;
+  --ink-3: #646d84;
+  --sidebar: #090b10;
+  --sidebar-border: #1b2028;
+  --sidebar-ink: #c6cbd8;
+  --sidebar-dim: #666e80;
+  --sidebar-accent: #7da2ff;
+  --sidebar-accent-soft: rgba(125, 162, 255, 0.14);
+  --accent: #7da2ff;
+  --accent-hover: #98b6ff;
+  --accent-soft: #1a2540;
+  --on-accent: #0c1224;
+  --up: #ff7570;
+  --up-soft: #3a1d1e;
+  --down: #3ed598;
+  --down-soft: #11301f;
+  --warn: #f0b13e;
+  --warn-soft: #3a2c12;
+  --ring: rgba(125, 162, 255, 0.45);
+  --overlay: rgba(4, 6, 10, 0.6);
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5);
 }
 
-* {
-  margin: 0;
-  padding: 0;
+/* ---------- 映射为工具类（inline：引用变量本身，.dark 覆盖即时生效） ---------- */
+@theme inline {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "HarmonyOS Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC",
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SF Mono", "Cascadia Mono", "JetBrains Mono", Consolas,
+    "Courier New", monospace;
+
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ink: var(--sidebar-ink);
+  --color-sidebar-dim: var(--sidebar-dim);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-soft: var(--sidebar-accent-soft);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-on-accent: var(--on-accent);
+  --color-up: var(--up);
+  --color-up-soft: var(--up-soft);
+  --color-down: var(--down);
+  --color-down-soft: var(--down-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
 }
 
-html {
-  -webkit-text-size-adjust: 100%;
-  text-size-adjust: 100%;
-}
-
-body {
-  min-height: 100dvh;
-  background-color: var(--color-bg-page);
-  color: var(--color-text-primary);
-}
-
-#app {
-  min-height: 100dvh;
-  display: flex;
-  flex-direction: column;
-  /* 旧脚手架在此处锁死 width:1126px + text-align:center + 左右竖边框，已移除 */
-}
-
-img,
-svg,
-video,
-canvas {
-  display: block;
-  max-width: 100%;
-}
-
-button,
-input,
-select,
-textarea {
-  font: inherit;
-  color: inherit;
-}
-
-button {
-  cursor: pointer;
-}
-
-/* 数值类文本统一等宽数字：价格、涨跌幅、计数变化时不会左右抖动。
-   用法：<span class="num"> 或给容器加 .num 让全部后代生效。 */
-.num,
-.num * {
+/* ---------- 数字是第一公民 ---------- */
+@utility num {
   font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
 }
 
-/* ============================================================================
- * 键盘焦点指示器
- *
- * 旧代码在 9 处写了 `outline: none`，只把 1px 边框换个颜色（且那个颜色
- * #4096ff 对白仅 2.99:1），既达不到 2px 周长，也不满足 3:1 对比度要求。
- * 这里统一给一个不可被 outline:none 悄悄抹掉的可视焦点环。
- * 用 :focus-visible 而非 :focus —— 键盘用户看得到，鼠标点击不出现。
- * ========================================================================== */
-
-:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-  outline-offset: 2px;
+/* ---------- 浏览器表面：没画的部分也带上设计 ---------- */
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection {
+    background: var(--accent-soft);
+    color: var(--ink);
+  }
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
 }
 
-/* 输入类控件额外给出边框色变化，双通道提示 */
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-  outline-offset: 1px;
-  border-color: var(--color-accent);
+/* ---------- 跨页组件样式 ---------- */
+@layer components {
+  /* renderMarkdown() 的输出容器（聊天气泡 / AI 文本块） */
+  .md-body p { margin: 0 0 8px; }
+  .md-body p:last-child { margin-bottom: 0; }
+  .md-body ul { margin: 4px 0 8px; padding-left: 18px; }
+  .md-body li { margin: 2px 0; }
+  .md-body h1, .md-body h2, .md-body h3, .md-body h4 {
+    font-size: 14px;
+    font-weight: 600;
+    margin: 12px 0 6px;
+  }
+  .md-body code {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--surface-2);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  .md-body pre {
+    background: var(--surface-2);
+    padding: 10px 12px;
+    border-radius: 8px;
+    overflow-x: auto;
+    margin: 8px 0;
+  }
+  .md-body pre code { background: none; padding: 0; }
+  .md-body a {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .md-body hr { border: 0; border-top: 1px solid var(--border); margin: 10px 0; }
+  .md-body .md-table-wrap { overflow-x: auto; margin: 8px 0; }
+  .md-body table { border-collapse: collapse; font-size: 12.5px; width: 100%; }
+  .md-body th, .md-body td {
+    border: 1px solid var(--border);
+    padding: 5px 9px;
+    text-align: left;
+  }
+  .md-body th { background: var(--surface-2); font-weight: 500; }
+
+  /* 开市呼吸点：唯一常驻动效，说的是"行情活着" */
+  .live-dot { animation: breathe 2.4s ease-in-out infinite; }
 }
 
-::placeholder {
-  color: var(--color-text-placeholder);
-  opacity: 1;
+@keyframes breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
-
-/* ============================================================================
- * 减弱动效
- *
- * 旧代码全站 0 处 prefers-reduced-motion，而 App.vue 有 slideUp 关键帧、
- * 各页面有大量 transition。这里做全局兜底：把动效压到近乎瞬间，
- * 但保留状态变化的静态结果（颜色/位置仍然改变），
- * 确保"状态变化不依赖动效本身"。
- * ========================================================================== */
+@keyframes shimmer {
+  100% { transform: translateX(100%); }
+}
 
 @media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
+  *, *::before, *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
   }
 }
-
-/* ============================================================================
- * 休市提示条（首页行情卡 + 个股 K 线页共用）
- *
- * 用户的原话："明明是在休息日，却显示昨收，这里难道不应该提醒用户几天休息吗"。
- * 休市日行情接口返回的仍然是上一交易日的收盘价与涨跌幅，页面如果不把这件事
- * 说出来，用户唯一的理解就是"这是今天的价格"。
- *
- * 放在全局而不是各页 scoped：两处必须**看起来是同一件事**。
- * 各写一份的结果是文案与颜色慢慢漂移，而"休市了"正是最不该有两种说法的信息。
- * ========================================================================== */
-
-.market-notice {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 6px 10px;
-  margin: 0 0 12px;
-  padding: 10px 12px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--color-border);
-  background: var(--color-bg-subtle);
-  font: var(--font-caption);
-  color: var(--color-text-primary);
-}
-
-.market-notice .market-badge {
-  flex-shrink: 0;
-  font: var(--font-micro);
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: var(--radius-sm);
-  /* 休市是"状态说明"不是"错误"：用中性底色 + 主文字色，
-     不用 danger/warning —— 那会把"市场今天不开门"说成"出问题了"。
-     形状（实心徽章）+ 文字（"休市"）承载含义，颜色只作区分。 */
-  background: var(--color-border);
-  color: var(--color-text-primary);
-}
-
-.market-notice .market-headline {
-  font-weight: 600;
-}
-
-.market-notice .market-detail {
-  /* 强制独占一行：它是"页面上这些价格是哪天的"，与上面那句"今天开不开市"
-     是两件事，挤在同一行会被读成一个长句。 */
-  flex-basis: 100%;
-  margin-top: -2px;
-  color: var(--color-text-secondary);
-  font-weight: 400;
-}
-
-/* 日历不可用：唯一的区别是徽章给警示色 —— 那时页面**确实**在说一件
-   "我们不知道"的事，值得被多看一眼。 */
-.market-notice.tone-unknown .market-badge {
-  background: var(--color-warning-soft);
-  color: var(--color-warning);
-}
-
-/* ============================================================================
- * 小工具
- * ========================================================================== */
-
-/* 视觉隐藏但保留给屏幕阅读器（用于给图标按钮补可访问名称的补充文本） */
-.visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-  border: 0;
-}
-
-/* ============================================================================
- * 应用壳（AppShell）：左侧导航 + 内容区（2026-10 重构，Operate 模式）
- *
- * 设计依据（.agents/skills/impeccable/reference/operate.md）：
- *   - 产品 UI 用"第二中性层"承载侧栏/面板（比内容面稍冷一点的灰）；
- *   - accent 只用于主操作、当前选中与状态指示，不做装饰；
- *   - 响应式靠结构（侧栏折叠成抽屉）而不是流式字号；
- *   - 动效 150-250ms、只表达状态（选中、抽屉开合），不做页面加载编排。
- * ========================================================================== */
-:root {
-  /* 侧栏底色：比页面底(#f0f2f5)浅、比纯白暖一档的冷灰——第二中性层 */
-  --color-bg-nav: #f7f8fa;
-  --sidebar-width: 232px;
-  --shell-bar-h: 56px;  /* 移动顶栏定高：全高页面（聊天）用它做 calc 扣减 */
-  --content-max: 1080px;
-  /* emil-design-eng：内置缓动太弱，交互用更强的 ease-out；
-     这两根曲线只服务"状态变化"，页面加载不编排 */
-  --ease-out-strong: cubic-bezier(0.23, 1, 0.32, 1);
-  --ease-in-out-strong: cubic-bezier(0.77, 0, 0.175, 1);
-}
-
-/* ---------- 壳骨架 ---------- */
-.shell {
-  min-height: 100vh;
-  min-height: 100dvh;
-  background: var(--color-bg-page);
-}
-
-.shell-sidebar {
-  position: fixed;
-  inset: 0 auto 0 0;
-  width: var(--sidebar-width);
-  background: var(--color-bg-nav);
-  border-right: 1px solid var(--color-border);
-  display: flex;
-  flex-direction: column;
-  padding: 16px 12px;
-  gap: 4px;
-  z-index: 40;
-}
-
-.shell-main {
-  margin-left: var(--sidebar-width);
-  min-height: 100vh;
-  min-height: 100dvh;
-  display: flex;
-  flex-direction: column;
-}
-
-/* ---------- 侧栏内容 ---------- */
-.shell-brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 10px 14px;
-  font: var(--font-heading);
-  color: var(--color-text-primary);
-  text-decoration: none;
-}
-.shell-brand .brand-mark {
-  display: inline-flex;
-  color: var(--color-accent);
-}
-
-.shell-nav {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  flex: 1;
-  overflow-y: auto;
-}
-
-/* 导航项：当前选中 = accent-soft 底 + accent 文字（选中态允许用 accent）；
-   其余状态一律中性，hover 只到 subtle 底 */
-.shell-nav-item {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
-  border: none;
-  border-radius: var(--radius-lg);
-  background: transparent;
-  color: var(--color-text-secondary);
-  font: var(--font-ui);
-  text-decoration: none;
-  cursor: pointer;
-  transition: background-color var(--duration-fast) var(--ease-out),
-              color var(--duration-fast) var(--ease-out);
-}
-.shell-nav-item:hover {
-  background: var(--color-bg-page);
-  color: var(--color-text-primary);
-}
-.shell-nav-item.router-link-active {
-  background: var(--color-accent-soft);
-  color: var(--color-accent);
-  font-weight: 600;
-}
-.shell-nav-item:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 1px;
-}
-/* 按压反馈（emil：任何可按元素 0.97 + 160ms） */
-.shell-nav-item:active {
-  transform: scale(0.97);
-}
-
-/* 导航徽章：未读数（danger 实心）与运行数（安静的文字数） */
-.shell-nav-badge {
-  margin-left: auto;
-  font: var(--font-micro);
-  line-height: 1;
-  padding: 3px 6px;
-  border-radius: var(--radius-pill);
-  background: var(--color-danger);
-  color: var(--color-text-on-accent);
-}
-.shell-nav-badge.quiet {
-  background: var(--color-bg-subtle);
-  color: var(--color-text-secondary);
-  border: 1px solid var(--color-border);
-}
-
-/* 侧栏底部：市场状态一行 + 用户行 */
-.shell-side-foot {
-  border-top: 1px solid var(--color-border);
-  padding-top: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.shell-market-line {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px 8px;
-  font: var(--font-caption);
-  color: var(--color-text-muted);
-}
-.shell-market-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--color-text-muted);
-  opacity: 0.55;
-  flex: none;
-}
-.shell-market-dot.live {
-  background: var(--color-success-mark);
-  opacity: 1;
-}
-.shell-user-row {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 4px;
-  border-radius: var(--radius-lg);
-}
-.shell-user-link {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 1;
-  min-width: 0;
-  padding: 6px 8px;
-  border-radius: var(--radius-md);
-  color: var(--color-text-secondary);
-  font: var(--font-ui);
-  text-decoration: none;
-}
-.shell-user-link:hover { background: var(--color-bg-page); color: var(--color-text-primary); }
-.shell-user-link .who { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.shell-logout {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 32px;
-  min-height: 32px;
-  border: none;
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--color-text-muted);
-  cursor: pointer;
-  transition: color var(--duration-fast) var(--ease-out),
-              background-color var(--duration-fast) var(--ease-out);
-}
-.shell-logout:hover { color: var(--color-danger); background: var(--color-danger-soft); }
-
-/* ---------- 移动端（<1024px）：侧栏折叠为抽屉 ---------- */
-.shell-mobile-bar {
-  display: none;
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: var(--shell-bar-h);
-  z-index: 30;
-  align-items: center;
-  gap: 8px;
-  padding: calc(10px + env(safe-area-inset-top, 0px)) 14px 10px;
-  background: var(--color-bg-nav);
-  border-bottom: 1px solid var(--color-border);
-}
-.shell-mobile-bar .bar-title {
-  flex: 1;
-  font: var(--font-heading);
-  color: var(--color-text-primary);
-}
-.shell-icon-btn {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 40px;
-  min-height: 40px;
-  border: none;
-  border-radius: var(--radius-lg);
-  background: transparent;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-}
-.shell-icon-btn:active { transform: scale(0.97); }
-.shell-icon-btn .shell-nav-badge {
-  position: absolute;
-  top: 4px;
-  right: 2px;
-}
-
-.shell-mask {
-  display: none;
-}
-
-@media (max-width: 1023px) {
-  .shell-sidebar {
-    transform: translateX(-100%);
-    transition: transform var(--duration-base) var(--ease-in-out-strong);
-    box-shadow: var(--shadow-3);
-  }
-  .shell-sidebar.open {
-    transform: translateX(0);
-  }
-  .shell-mask {
-    display: block;
-    position: fixed;
-    inset: 0;
-    background: rgb(26 26 46 / 0.4);
-    z-index: 35;
-    opacity: 1;
-    transition: opacity var(--duration-base) var(--ease-out);
-  }
-  .shell-main { margin-left: 0; padding-top: var(--shell-bar-h); }
-  .shell-mobile-bar { display: flex; }
-}
-
-/* ---------- 内容区页面骨架（各页共用，替代原来的每页 .app-layout） ---------- */
-
-.page {
-  width: 100%;
-  max-width: var(--content-max);
-  margin: 0 auto;
-  padding: var(--space-5) var(--space-4) calc(var(--space-6) + env(safe-area-inset-bottom, 0px));
-}
-
-.page-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  /* 标题上方留白大于下方（craft-floor 的节奏规则） */
-  margin: 0 0 var(--space-4);
-}
-.page-head h1 {
-  margin: 0;
-  /* 产品 UI 的层级靠字重与颜色，不靠吼（taste §9.B：不要超大的 H1） */
-  font: var(--font-heading);
-  color: var(--color-text-primary);
-}
-.page-head .page-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-/* 面板：内容分组的唯一容器。
- * craft-floor：elevation 只声明一次（用边框就不用阴影）；卡片圆角 12-16px；
- * 禁止面板嵌面板——需要内部分组时用 .panel-section + 分隔线。 */
-.panel {
-  background: var(--color-bg-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  padding: var(--space-4);
-  margin-bottom: var(--space-4);
-}
-.panel + .panel { margin-top: 0; }
-
-.panel-title {
-  margin: 0 0 var(--space-3);
-  font: var(--font-heading);
-  font-size: 1rem;
-  color: var(--color-text-primary);
-}
-.panel-hint {
-  margin: -8px 0 var(--space-3);
-  font: var(--font-caption);
-  color: var(--color-text-muted);
-}
-
-/* 面板内分组：用分隔线，不嵌第二层盒子 */
-.panel-section {
-  padding: var(--space-3) 0;
-  border-top: 1px solid var(--color-border);
-}
-.panel-section:first-of-type { border-top: none; padding-top: 0; }
-
-/* 全站按钮统一层（各页原有按钮样式逐步迁到这里） */
-.btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 8px 16px;
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--color-border-strong);
-  background: var(--color-bg-surface);
-  color: var(--color-text-primary);
-  font: var(--font-ui);
-  cursor: pointer;
-  transition: background-color var(--duration-fast) var(--ease-out),
-              border-color var(--duration-fast) var(--ease-out),
-              color var(--duration-fast) var(--ease-out),
-              transform 160ms var(--ease-out-strong);
-}
-.btn:hover { background: var(--color-bg-subtle); }
-.btn:active { transform: scale(0.97); }
-.btn:disabled { opacity: 0.55; cursor: default; transform: none; }
-.btn.danger-quiet {
-  border-color: transparent;
-  background: transparent;
-  color: var(--color-danger);
-}
-.btn.danger-quiet:hover { background: var(--color-danger-soft); }
-.btn.quiet {
-  border-color: transparent;
-  background: transparent;
-  color: var(--color-text-secondary);
-}
-.btn.quiet:hover { background: var(--color-bg-subtle); color: var(--color-text-primary); }
-/* 主操作：accent 只给"页面唯一的主动作"（operate.md 的 accent 纪律） */
-.btn.primary {
-  border-color: var(--color-accent);
-  background: var(--color-accent);
-  color: var(--color-text-on-accent);
-}
-.btn.primary:hover { background: var(--color-accent-hover); }

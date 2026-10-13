@@ -1,10 +1,12 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
 
 export default defineConfig({
   plugins: [
     vue(),
+    tailwindcss(),
     VitePWA({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.svg'],
@@ -12,10 +14,9 @@ export default defineConfig({
         name: 'Stock Tracker',
         short_name: 'Stock',
         description: '量化股票分析助手',
-        // 与页面顶部导航同色（--color-bg-inverse: #1a1a2e），
-        // 独立模式下状态栏与 header 连成一片；旧值 #1a73e8 是第三个游离的蓝色。
-        theme_color: '#1a1a2e',
-        background_color: '#f0f2f5',
+        // 墨阶侧栏色（DESIGN.md --sidebar），独立模式下状态栏与壳连成一片
+        theme_color: '#13151c',
+        background_color: '#f5f6f8',
         display: 'standalone',
         orientation: 'portrait',
         start_url: '/',
@@ -60,8 +61,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        // 8080 被同机其它应用占用时（曾发生：另一个 jar 抢占 8080，
-        // 前端全部接口 404 却像"代码坏了"），可用 API_PROXY_TARGET 指向备用端口后端。
+        // 8080 被同机其它应用占用时，可用 API_PROXY_TARGET 指向备用端口后端。
         target: process.env.API_PROXY_TARGET || 'http://localhost:8080',
         changeOrigin: true
       }

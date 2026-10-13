@@ -11,10 +11,13 @@ import StrategyDetail from '../pages/StrategyDetail.vue'
 import Paper from '../pages/Paper.vue'
 import Memory from '../pages/Memory.vue'
 import NewsSearch from '../pages/NewsSearch.vue'
+import Share from '../pages/Share.vue'
 import AppShell from '../components/AppShell.vue'
 
 const routes = [
   { path: '/login', component: Login },
+  // 只读分享页：token 即凭证，访问者不需要账号 —— 所以必须挂在鉴权壳之外
+  { path: '/share/:token', component: Share },
   // 鉴权页统一挂在 AppShell 下：左侧导航 + 内容区一处实现、全站一致
   {
     path: '/',

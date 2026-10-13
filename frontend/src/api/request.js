@@ -3,7 +3,11 @@ import router from '../router/index.js'
 
 const request = axios.create({
   baseURL: '/api/v1',
-  headers: { 'Accept-Charset': 'utf-8' }
+  headers: { 'Accept-Charset': 'utf-8' },
+  // 没有超时的代价（2026-10-04 测试确认）：连接一旦被掐断，await 永远不 resolve，
+  // 页面无限转圈且无法恢复 —— 本地局域网测不出来，公网部署必踩。
+  // 默认 30s；回测这类慢接口在调用处单独放宽（见 strategy.js runBacktest）。
+  timeout: 30000
 })
 
 request.interceptors.request.use(config => {
@@ -72,6 +76,13 @@ request.interceptors.response.use(
     return response
   },
   error => {
+    // 断网/超时：axios 的 message 是英文（"Network Error"/"timeout of 30000ms exceeded"），
+    // 页面的兜底文案盖得住大部分场景，但直接读 e.message 的地方会露英文 —— 在源头翻掉。
+    if (!error.response) {
+      error.friendlyMessage = error.code === 'ECONNABORTED'
+        ? '请求超时，请稍后重试'
+        : '网络连接失败，请检查网络后重试'
+    }
     if (error.response?.status === 401) {
       localStorage.removeItem('token')
       // 主动断开 SSE：否则旧 EventSource 要等下一次 onerror 才关，
