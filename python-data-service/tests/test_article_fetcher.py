@@ -114,3 +114,30 @@ def test_body_is_capped_at_storage_limit(monkeypatch):
             yield html.encode("utf-8")
     monkeypatch.setattr(af.requests, "get", lambda *a, **k: _Resp())
     assert len(fetch_article_body("https://finance.eastmoney.com/a/1.html")) == af.MAX_BODY_CHARS
+
+
+def test_known_container_short_flash_is_full_body(monkeypatch):
+    """回归（2026-10-12 实测 bug）：东财快讯类文章只有几十字，已知容器抽到了
+    83 字真正文却被 MIN_BODY_CHARS=200 击杀、误报"JS 渲染页"——318 条失败的主因。
+    已知正文容器 ≥50 字即收；启发式路径维持 200 高门槛。"""
+    flash = "康菲石油首席执行官表示，公司已加大对美国本土48州的投入，以设法提高供应；" \
+            "若油价持续低迷，部分页岩油产区将出现自然减产。"  # 83 字，真实失败样本长度
+    html = f"<html><body><div class='txtinfos'>{flash}</div></body></html>"
+    class _Resp:
+        encoding = "utf-8"
+        def raise_for_status(self): pass
+        def iter_content(self, chunk_size):
+            yield html.encode("utf-8")
+    monkeypatch.setattr(af.requests, "get", lambda *a, **k: _Resp())
+    assert flash in fetch_article_body("https://finance.eastmoney.com/a/1.html")
+
+    # 没有已知容器的页面走启发式：同样 83 字仍应失败（高门槛防模板混入不能松）
+    html2 = f"<html><body><div id='unknown'><p>{flash}</p></div></body></html>"
+    class _Resp2:
+        encoding = "utf-8"
+        def raise_for_status(self): pass
+        def iter_content(self, chunk_size):
+            yield html2.encode("utf-8")
+    monkeypatch.setattr(af.requests, "get", lambda *a, **k: _Resp2())
+    with pytest.raises(FetchError):
+        fetch_article_body("https://finance.eastmoney.com/a/2.html")

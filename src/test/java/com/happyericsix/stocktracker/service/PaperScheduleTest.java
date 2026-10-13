@@ -69,7 +69,7 @@ class PaperScheduleTest {
                 ExecutionContract.DECISION_MODE_AGENT, at(2026, 9, 18, 16, 0));
 
         assertEquals("daily", next.kind());
-        assertTrue(next.note().contains("只在日线结算时决策"), next.note());
+        assertTrue(next.note().contains("盘中由盯盘 agent 事件驱动执行"), next.note());
         assertFalse(next.note().contains("每 5 分钟"),
                 "agent 模式盘中不再做规则检查，不能承诺盘中评估：" + next.note());
     }
@@ -80,7 +80,8 @@ class PaperScheduleTest {
                 ExecutionContract.DECISION_MODE_RULE, at(2026, 9, 18, 10, 0));
 
         assertEquals("realtime", next.kind());
-        assertTrue(next.note().contains("每 5 分钟"), next.note());
+        // 快车道（2026-10-08）：盘中结算吃 1 分钟 K 线 + 45s 节流 —— 文案必须跟着节奏走
+        assertTrue(next.note().contains("1 分钟 K 线"), next.note());
     }
 
     @Test

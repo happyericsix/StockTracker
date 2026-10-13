@@ -184,6 +184,32 @@ class PaperTraceServiceTest {
         assertNull(saved.getSkipReason(), "上一次的失败原因必须被清掉，否则会挂着一条不存在的失败");
     }
 
+    /**
+     * 去重更新必须把 **agent 成本与决策者**一起带过去（2026-10-08 实测踩坑）：
+     * 15:30 的 no_bar 行先落了 llm_calls=0，补跑成功后快照里是 8 次调用、列却还是 0 ——
+     * lastBriefingDate 靠 agentLlmCalls&gt;0 找"上次真的开会的日子"，读不到就会
+     * 把开过的会当成没开过，第二天再白开一次 ~2 万 token 的会。
+     */
+    @Test
+    void aRepeatCarriesAgentCostAndDecisionModeForward() {
+        PaperTradeTrace existing = trace(ExecutionContract.SETTLEMENT_DAILY,
+                ExecutionContract.DECISION_SKIP, ExecutionContract.SKIP_NO_BAR);
+        existing.setId(9L);
+        when(repository.findByDedupeKey(any())).thenReturn(Optional.of(existing));
+        when(repository.save(any(PaperTradeTrace.class))).thenAnswer(i -> i.getArgument(0));
+
+        PaperTradeTrace incoming = trace(ExecutionContract.SETTLEMENT_DAILY,
+                ExecutionContract.DECISION_SKIP, null);
+        incoming.setDecisionMode(ExecutionContract.DECISION_MODE_AGENT);
+        incoming.setAgentLlmCalls(8);
+        incoming.setAgentTokens(20996);
+        PaperTradeTrace saved = service.record(incoming);
+
+        assertEquals(ExecutionContract.DECISION_MODE_AGENT, saved.getDecisionMode());
+        assertEquals(8, saved.getAgentLlmCalls(), "补跑成功的委员会成本必须落到列上，不能只在快照里");
+        assertEquals(20996, saved.getAgentTokens());
+    }
+
     @Test
     void aWriteFailureNeverThrows() {
         when(repository.findByDedupeKey(any())).thenThrow(new RuntimeException("db down"));

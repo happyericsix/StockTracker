@@ -98,6 +98,53 @@ public final class ExecutionContract {
      * 而那天恰恰是唯一有成交的一天。
      */
     public static final String SKIP_ALREADY_TRADED_TODAY = "already_traded_today";
+    /**
+     * agent 模式的盘中执行还没有任何一次委员会授权（策略刚开、或从未开过会）。
+     *
+     * <p>authorization 模式：盘中执行的不是"规则偷偷跑"，而是"委员会划定的边界内跑"。
+     * 这条原因回答的是用户最先问的问题——"agent 模式为什么盘中没动静"；
+     * 与 {@link #SKIP_AGENT_NO_NEW_INFORMATION}（今天没开会）是两回事：
+     * 一个是"从未授权"，一个是"今天没有新信息"。
+     */
+    public static final String SKIP_AWAITING_AUTHORIZATION = "awaiting_authorization";
+    /**
+     * 规则给了信号，但信号在授权边界之外（如 allow_open=false 时的买入信号）。
+     *
+     * <p>与 {@link #SKIP_RULE_NOT_MET} 必须分开：一个是"被委员会的边界挡下"，
+     * 一个是"市场没给机会"。这个区分正是授权模式存在的意义——
+     * 委员会复盘时要能看到自己的边界挡了多少单，才能调整授权的松紧。
+     */
+    public static final String SKIP_OUTSIDE_AUTHORIZATION = "outside_authorization";
+    /**
+     * 委员会开会后**明确关闭了盘中执行**（authorization.intraday_execution=false）。
+     *
+     * <p>与 {@link #SKIP_AGENT_NO_NEW_INFORMATION}（没开会所以没看）方向正好相反：
+     * 这里委员会恰恰开过会并主动决定收盘前不动。混在一起，
+     * "委员会为什么关掉盘中"就永远统计不出来——而那正是它下次开会该重新评估的边界。
+     */
+    public static final String SKIP_AGENT_INTRADAY_DISABLED = "agent_intraday_disabled";
+    /**
+     * 盘中盯盘 agent 被问过、但决定不动（含否决规则信号）。
+     *
+     * <p>为什么必须独立："规则说买、盯盘 agent 说不动"是 agent 模式盘中最常见也
+     * 最需要审计的分歧——写成 {@link #SKIP_RULE_NOT_MET}（规则自己的结论）或
+     * {@link #SKIP_AGENT_NO_NEW_INFORMATION}（没看）都是假话。
+     */
+    public static final String SKIP_WATCH_HOLD = "watch_hold";
+    /**
+     * 盯盘 agent 的当日调用预算（默认 20 次/策略）用完：事件还在发生，但当天不再问模型，
+     * 盘中回落到"规则 + 授权边界"的执行路径。预算是成本止损线，
+     * 必须与"模型说不动"分开统计。
+     */
+    public static final String SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED = "intraday_watch_budget_exceeded";
+    /**
+     * 组合级熔断：该用户所有模拟盘的总净值相对上一收盘快照的回撤超过了阈值，
+     * **新的开仓**被暂停（平仓不受影响——熔断是把风险降下来，不是把出口锁死）。
+     *
+     * <p>与单策略层的 {@link #SKIP_LIMIT_BLOCKED} 等不同：这条管的是"整个组合今天亏了多少"，
+     * 任何一个策略触发都会挡住所有策略的新开仓。痕迹里带上当日的组合回撤数字。
+     */
+    public static final String SKIP_PORTFOLIO_HALTED = "portfolio_halted";
 
     // ---------- 归一与版本 ----------
     public static final String UNKNOWN_PREFIX = "unknown_";
@@ -117,9 +164,11 @@ public final class ExecutionContract {
     public static final String TRIGGER_EVENT = "event";
     /** 用户手动触发（启动模拟盘时的首次评估）。 */
     public static final String TRIGGER_MANUAL = "manual";
+    /** 盘中盯盘 agent（量化事件触发的轻量判断，见 `intraday_watch.py`）。 */
+    public static final String TRIGGER_WATCH = "watch";
 
     public static final List<String> TRACE_TRIGGERS =
-            List.of(TRIGGER_CRON, TRIGGER_EVENT, TRIGGER_MANUAL);
+            List.of(TRIGGER_CRON, TRIGGER_EVENT, TRIGGER_MANUAL, TRIGGER_WATCH);
 
     /** 请求体里声明结算类型的字段名（Python 侧 `app.py` 读同名键）。 */
     public static final String SETTLEMENT_KIND_FIELD = "settlement_kind";
@@ -145,7 +194,10 @@ public final class ExecutionContract {
             SKIP_INSUFFICIENT_CASH_FOR_ONE_LOT, SKIP_INSUFFICIENT_CASH,
             SKIP_INVALID_PRICE, SKIP_RULE_NOT_MET, SKIP_STATE_MISMATCH,
             SKIP_AGENT_UNPARSABLE, SKIP_AGENT_BUDGET_EXCEEDED, SKIP_AGENT_LLM_UNAVAILABLE,
-            SKIP_AGENT_NO_NEW_INFORMATION, SKIP_ALREADY_TRADED_TODAY);
+            SKIP_AGENT_NO_NEW_INFORMATION, SKIP_ALREADY_TRADED_TODAY,
+            SKIP_AWAITING_AUTHORIZATION, SKIP_OUTSIDE_AUTHORIZATION,
+            SKIP_AGENT_INTRADAY_DISABLED, SKIP_WATCH_HOLD,
+            SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED, SKIP_PORTFOLIO_HALTED);
 
     /** 结算类型 → 成交价口径。**唯一的映射处**（Python 侧同名映射）。 */
     public static final Map<String, String> FILL_BASIS_BY_SETTLEMENT = Map.of(

@@ -151,7 +151,18 @@ def retract_fact(user_id, fact_id) -> dict:
     """撤回一条事实（逻辑撤回，历史仍可回溯）。"""
     if not user_id or not fact_id:
         return {}
-    return _post(f"/api/v1/internal/memory/facts/{fact_id}/retract?userId={user_id}", {})
+    result = _post(f"/api/v1/internal/memory/facts/{fact_id}/retract?userId={user_id}", {})
+    if result:
+        # 撤回成功就失效语义索引：否则被撤回的事实还能被向量召回最多一个 TTL（5 分钟），
+        # 用户前脚说"忘掉这个"、后脚模型又引用它，看起来像没生效。
+        # 延迟导入：vector_index 反向依赖本模块，顶层 import 会循环。
+        try:
+            from agent import vector_index
+
+            vector_index.invalidate(user_id)
+        except Exception as exc:  # noqa: BLE001 —— 索引失效失败只多忍一个 TTL
+            logger.debug("撤回后索引失效失败: %s", exc)
+    return result
 
 
 def _lesson_payload(lesson: dict) -> dict:

@@ -137,6 +137,11 @@ QUOTE_CACHE_TTL = 15  # 秒
 _history_cache: dict[tuple, tuple[float, list[dict]]] = {}
 _history_cache_lock = threading.Lock()
 HISTORY_CACHE_TTL = 3600  # 日/周/月 K：1 小时
+# 请求区间**覆盖今天**时的短新鲜度：日线在收盘后一段时间才陆续发布
+#（实测 2026-10-08：15:30 结算当口腾讯源还没有当天 bar，17:05 才有）。
+# 这类请求若也走 1 小时缓存，15:30 那次"没有当天 bar"会被一直端给后续调用 ——
+# 模拟盘从启动那天起就永远结算不了。只回看历史的请求（回测/验证）不受影响。
+HISTORY_RECENT_TTL = 300
 MINUTE_CACHE_TTL = 30     # 分钟 K：30 秒
 
 # 一次批量行情最多取多少只（腾讯接口对 URL 长度敏感，50 只约 500 字符，很安全）
@@ -558,13 +563,17 @@ def get_history(symbol: str, start_date: str = "", end_date: str = "",
     end_date = str(end_date or "").strip()
     limit = _limit_for_range(start_date, end_date, count)
 
-    # 1. 查缓存（键必须含区间与数量：少了它们，不同请求会互相顶掉）
+    # 1. 查缓存（键必须含区间与数量：少了它们，不同请求会互相顶掉）。
+    #    区间覆盖"今天"的请求按短新鲜度服务：当天 bar 的发布有延迟，
+    #    长缓存会把"15:30 那一刻还没有"冻结成一个小时（见 HISTORY_RECENT_TTL 的说明）。
     cache_key = (symbol, period, start_date, end_date, limit)
     now = time.time()
+    covers_today = (not end_date) or (end_date >= time.strftime("%Y-%m-%d"))
+    ttl = HISTORY_RECENT_TTL if covers_today else HISTORY_CACHE_TTL
     with _history_cache_lock:
         if cache_key in _history_cache:
             ts, cached = _history_cache[cache_key]
-            if now - ts < HISTORY_CACHE_TTL:
+            if now - ts < ttl:
                 return cached
             del _history_cache[cache_key]
 
@@ -577,9 +586,18 @@ def get_history(symbol: str, start_date: str = "", end_date: str = "",
 
         windows = _windows_for(start_date, end_date)
         merged: dict[str, dict] = {}
+        today = time.strftime("%Y-%m-%d")
         for page_start, page_end in windows:
             page_limit = limit if len(windows) == 1 else SOURCE_MAX_BARS
-            for record in _fetch_page(code, period, page_start, page_end, page_limit):
+            # 终点落在"今天"的那一页改用**开放式终点**取数：实测腾讯的封闭区间查询
+            # 在特定根数下会悄悄丢掉最新一根 —— 2026-10-09 实证：start=2024-04-22、
+            # end=当天、limit=640 返回 596 根止于前一日；同一区间 end 留空（或 limit+1）
+            # 才返回 597 根含当天。日线结算/重试据此全天 no_bar，而"最近 N 根"查询
+            # 却看得到当天 bar，问题只出在区间查询这一条路上。
+            # as-of 语义不受影响：下方本地裁剪（<= end_date）本来就是第二道防线，
+            # 开放终点多取到的未来数据（不存在）会被它挡住。
+            fetch_end = "" if (page_end and page_end >= today) else page_end
+            for record in _fetch_page(code, period, page_start, fetch_end, page_limit):
                 merged[record["date"]] = record      # 同一天重复出现时后一页为准（内容相同）
 
         if not merged:

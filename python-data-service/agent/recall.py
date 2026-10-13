@@ -113,10 +113,10 @@ def load_context(memory_user_id, session_key, query=None, symbol=None) -> dict:
         return {}
     if not isinstance(context, dict) or not context:
         return {}
-    return _fuse(context, memory_user_id, query)
+    return _fuse(context, memory_user_id, query, session_key)
 
 
-def _fuse(context: dict, user_id, query) -> dict:
+def _fuse(context: dict, user_id, query, current_session_key=None) -> dict:
     """把"关键词名次"（Java）与"语义名次"（本地向量）用 RRF 融合。
 
     任何一步失败都原样返回 —— 融合是增强，Java 的关键词排序本身就是可用的保底。
@@ -133,7 +133,7 @@ def _fuse(context: dict, user_id, query) -> dict:
 
     context["facts"] = _fuse_list(context.get("facts"), semantic, "fact")
     context["lessons"] = _fuse_list(context.get("lessons"), semantic, "lesson")
-    context["semanticEpisodes"] = _semantic_episodes(context, semantic)
+    context["semanticEpisodes"] = _semantic_episodes(context, semantic, current_session_key)
     return context
 
 
@@ -159,10 +159,18 @@ def _fuse_list(items, semantic, kind) -> list:
     return ordered
 
 
-def _semantic_episodes(context: dict, semantic) -> list:
-    """语义召回的历史摘要，排除已经按时间给过的那几条（避免重复注入）。"""
+def _semantic_episodes(context: dict, semantic, current_session_key=None) -> list:
+    """语义召回的历史摘要，排除已经按时间给过的那几条（避免重复注入）。
+
+    排除集除了 recaps 的 sessionKey，还必须包含**当前会话**：
+    recaps 在 Java 侧本来就不含当前会话，而会话中段巩固（maybeConsolidateCurrentSession）
+    会让当前会话的摘要进入语义索引——不排除的话，它会被当成"更早的相关对话"
+    再次注入，而这段对话的原文已经通过 history 在上下文里了。
+    """
     known = {recap.get("sessionKey") for recap in (context.get("recaps") or [])
              if isinstance(recap, dict)}
+    if current_session_key:
+        known.add(current_session_key)
     picked = []
     for item, score in semantic:
         if item["kind"] != "episode":
@@ -197,7 +205,10 @@ def render(context) -> str:
     today = str(context.get("today") or memory_store.today_str())
     tz = str(context.get("timeZone") or memory_store.TZ_LABEL)
 
-    sections: list[str] = []
+    # (优先级, 文本)。优先级 = 超预算时谁最后被砍：digest/recaps 是跨会话记忆的
+    # 生命线（隔天回来的第一条消息全靠它们），必须排在 facts/persona 前面占位。
+    # 改造前是"按固定顺序拼接、超了从尾部一刀切"，最该保的兜底摘录反而最先没。
+    sections: list[tuple[int, str]] = []
     fact_ids = set()
     facts = context.get("facts")
     if isinstance(facts, list) and facts:
@@ -211,28 +222,28 @@ def render(context) -> str:
         if unique:
             rendered = _render_fact_group("长期画像（稳定信息）", unique[:MAX_PERSONA])
             if rendered:
-                sections.append(rendered)
+                sections.append((40, rendered))
 
     if isinstance(facts, list) and facts:
         rendered = _render_facts(facts)
         if rendered:
-            sections.append(rendered)
+            sections.append((30, rendered))
 
     lessons = context.get("lessons")
     if isinstance(lessons, list) and lessons:
         rendered = _render_lessons(lessons)
         if rendered:
-            sections.append(rendered)
+            sections.append((50, rendered))
 
     semantic_episodes = context.get("semanticEpisodes")
     if isinstance(semantic_episodes, list) and semantic_episodes:
         rendered = _render_semantic_episodes(semantic_episodes)
         if rendered:
-            sections.append(rendered)
+            sections.append((60, rendered))
 
     digest = context.get("pendingDigest")
     if isinstance(digest, list) and digest:
-        sections.append(_render_digest(digest))
+        sections.append((10, _render_digest(digest)))
 
     recaps = context.get("recaps")
     if isinstance(recaps, list) and recaps:
@@ -241,28 +252,53 @@ def render(context) -> str:
             if not isinstance(recap, dict):
                 continue
             lines.extend(_render_recap(recap))
-        sections.append("\n".join(lines))
+        sections.append((20, "\n".join(lines)))
 
     # 兜底摘录已经覆盖了最新那段未总结的会话，剩下的才对模型说"这里可能缺东西"
     pending = context.get("pendingSessions")
     if isinstance(pending, list) and pending:
         uncovered = len(pending) - (1 if isinstance(digest, list) and digest else 0)
         if uncovered > 0:
-            sections.append(
+            sections.append((70,
                 f"## 注意\n另有 {uncovered} 段更早的对话尚未生成摘要；"
                 "如果用户提到的内容不在上面的记录里，请直接向用户确认，不要编造。"
-            )
+            ))
 
-    body = "\n\n".join(sections)
-    block = _HEADER.format(today=today, tz=tz)
-    if body:
-        block = f"{block}\n\n{body}"
-    block = f"{block}\n{_FOOTER}"
+    header = _HEADER.format(today=today, tz=tz)
+    body = _assemble_body(sections, MEMORY_MAX_CHARS - len(header) - len(_FOOTER) - 4)
+    block = f"{header}\n\n{body}\n{_FOOTER}" if body else f"{header}\n{_FOOTER}"
 
     if len(block) > MEMORY_MAX_CHARS:
-        # 超预算时优先保住头部（时间锚点与安全性声明），尾部截断
-        block = block[:MEMORY_MAX_CHARS] + "\n…（记忆内容过长已截断）\n" + _FOOTER
+        # 最后兜底：头部（时间锚点与安全性声明）必须完整，宁砍尾部
+        block = block[:MEMORY_MAX_CHARS] + "\n…\n" + _FOOTER
     return block
+
+
+def _assemble_body(sections: list[tuple[int, str]], budget: int) -> str:
+    """按优先级把各段塞进字符预算：高优先级先占位，放不下的段截断，截不下就丢弃。
+
+    预算必须在这里而不是"拼完再切"：一刀切的位置由拼接顺序决定，
+    等于让"渲染顺序"冒充"重要性"，而这两者没有理由一致。
+    """
+    if budget <= 0:
+        return ""
+    kept: list[str] = []
+    used = 0
+    for _, text in sorted(sections, key=lambda pair: pair[0]):
+        if not text:
+            continue
+        separator = 2 * len(kept)  # "\n\n".join 的开销
+        room = budget - used - separator
+        if room <= 0:
+            break
+        if len(text) <= room:
+            kept.append(text)
+            used += len(text)
+        elif room > 60:
+            # 留得出截断标注才截，否则整段丢弃：一行孤零零的标题没有信息量
+            kept.append(text[:room - 1] + "…")
+            used += room
+    return "\n\n".join(kept)
 
 
 def _render_facts(facts: list) -> str:
@@ -291,10 +327,12 @@ def _render_fact_group(title: str, facts: list) -> str:
 
 
 def _fact_line(fact: dict) -> str:
-    subject = str(fact.get("subject") or "").strip()
+    subject = str(fact.get("subjectLabel") or fact.get("subject") or "").strip()
+    # 谓词中文名优先用 Java 给的 predicateLabel（唯一真相源，见 MemoryDisplayLabels）：
+    # 它覆盖了 25+ 个客观事实谓词，本地表只做接口降级时的回退。
     predicate = str(fact.get("predicate") or "").strip()
-    value = str(fact.get("object") or "").strip()
-    label = _PREDICATE_LABELS.get(predicate, predicate)
+    label = fact.get("predicateLabel") or _PREDICATE_LABELS.get(predicate, predicate)
+    value = str(fact.get("objectLabel") or fact.get("object") or "").strip()
     name = label if subject.lower() in ("", "user", "用户") else f"{subject} {label}"
 
     notes: list[str] = []

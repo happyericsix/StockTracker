@@ -27,6 +27,8 @@ public class NewsEventResponse {
     private String title;
     /** 摘要/正文（公告无正文时等于标题） */
     private String content;
+    /** 抓取到的原文正文（正文预抓/懒抓写入；null = 尚未抓到）。阅读卡优先用它 */
+    private String body;
     private String url;
     /** 1公告 2媒体 3研报 4舆情 */
     private Integer sourceLevel;
@@ -70,6 +72,13 @@ public class NewsEventResponse {
     private Long freshHours;
     /** "3小时内" / "24小时内" / "3天前" / "3周前"；时间未知为 null */
     private String freshnessLabel;
+    /**
+     * 源站只给了**日期**（公告、研报、新闻联播都是日级），时刻是落库时的
+     * 00:00:00 占位（排序用），不是事实时刻 —— 公告实际在盘后披露，
+     * 显示成"10-09 00:00"等于编造了一个午夜发布时间（2026-10-09 用户实测指出）。
+     * 展示层据此只显示日期；freshnessLabel 也按天分档（见 {@link #freshnessLabel}）。
+     */
+    private boolean dateOnly;
 
     private LocalDateTime publishedAt;
     private LocalDateTime createdAt;
@@ -84,6 +93,7 @@ public class NewsEventResponse {
         response.name = event.getName();
         response.title = event.getTitle();
         response.content = event.getContent();
+        response.body = event.getBody();
         response.url = event.getUrl();
         response.sourceLevel = event.getSourceLevel();
         response.sourceName = event.getSourceName();
@@ -102,19 +112,38 @@ public class NewsEventResponse {
         response.credibilityGrade = event.getCredibilityGrade();
         readCredibilityDetail(event.getCredibilityDetail(), mapper, response);
         response.freshHours = freshHours(event.getPublishedAt());
+        response.dateOnly = isDateOnly(event.getPublishedAt());
         response.freshnessLabel = freshnessLabel(event.getPublishedAt());
         response.publishedAt = event.getPublishedAt();
         response.createdAt = event.getCreatedAt();
         return response;
     }
 
+    /** 时刻是 00:00:00 → 日期级条目（快讯源都有真实时刻，占位午夜只来自日级源）。 */
+    static boolean isDateOnly(LocalDateTime publishedAt) {
+        return publishedAt != null
+                && publishedAt.getHour() == 0 && publishedAt.getMinute() == 0
+                && publishedAt.getSecond() == 0;
+    }
+
     /**
      * 时效性分档。档位不追求精确（精确交给 freshHours），追求一眼可读：
      * "24小时内"和"27小时前"对决策是同一件事，不必让用户做减法。
+     *
+     * <p><b>日期级条目（00:00:00 占位）按天分档</b>：占位时刻算出来的
+     * "1小时内"（今天零点发布的公告在早上看正好"1小时内"）是占位符制造的
+     * 谎言 —— 公告实际盘后披露，日期级能诚实说的最细粒度就是"今天/N天前"。
      */
     static String freshnessLabel(LocalDateTime publishedAt) {
         if (publishedAt == null) {
             return null;
+        }
+        if (isDateOnly(publishedAt)) {
+            long days = freshHours(publishedAt) / 24;
+            if (days < 1) return "今天";
+            if (days < 7) return days + "天前";
+            if (days < 30) return (days / 7) + "周前";
+            return "30天前";
         }
         long hours = freshHours(publishedAt);
         if (hours < 1) return "1小时内";
@@ -180,6 +209,8 @@ public class NewsEventResponse {
     public void setTitle(String title) { this.title = title; }
     public String getContent() { return content; }
     public void setContent(String content) { this.content = content; }
+    public String getBody() { return body; }
+    public void setBody(String body) { this.body = body; }
     public String getUrl() { return url; }
     public void setUrl(String url) { this.url = url; }
     public Integer getSourceLevel() { return sourceLevel; }
@@ -224,6 +255,8 @@ public class NewsEventResponse {
     public void setFreshHours(Long freshHours) { this.freshHours = freshHours; }
     public String getFreshnessLabel() { return freshnessLabel; }
     public void setFreshnessLabel(String freshnessLabel) { this.freshnessLabel = freshnessLabel; }
+    public boolean isDateOnly() { return dateOnly; }
+    public void setDateOnly(boolean dateOnly) { this.dateOnly = dateOnly; }
     public LocalDateTime getPublishedAt() { return publishedAt; }
     public void setPublishedAt(LocalDateTime publishedAt) { this.publishedAt = publishedAt; }
     public LocalDateTime getCreatedAt() { return createdAt; }

@@ -22,6 +22,13 @@ public interface MemoryEventRepository extends JpaRepository<MemoryEvent, Long> 
     /** 一个会话的全部事件，按写入顺序（= 时间顺序） */
     List<MemoryEvent> findByUserIdAndSessionKeyOrderByIdAsc(Long userId, String sessionKey);
 
+    /**
+     * LLM 用量看板：一段时间内的用量事件（kind=usage，Python agent 每轮写入）。
+     * 不按用户过滤——成本是整站的，看板也按整站口径。
+     */
+    List<MemoryEvent> findByKindAndIngestedAtGreaterThanEqualOrderByIngestedAtAsc(
+            String kind, java.time.LocalDateTime since);
+
     long countByUserIdAndSessionKey(Long userId, String sessionKey);
 
     /**

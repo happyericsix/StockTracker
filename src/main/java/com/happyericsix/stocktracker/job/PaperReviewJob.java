@@ -1,5 +1,7 @@
 package com.happyericsix.stocktracker.job;
 
+import com.happyericsix.stocktracker.service.JobRunService;
+import com.happyericsix.stocktracker.service.MarketStatusService;
 import com.happyericsix.stocktracker.service.PaperTradingService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,17 +26,32 @@ public class PaperReviewJob {
 
     private static final Logger log = LoggerFactory.getLogger(PaperReviewJob.class);
     private final PaperTradingService paperTradingService;
+    private final MarketStatusService marketStatusService;
+    private final JobRunService jobRunService;
 
-    public PaperReviewJob(PaperTradingService paperTradingService) {
+    public PaperReviewJob(PaperTradingService paperTradingService,
+                          MarketStatusService marketStatusService,
+                          JobRunService jobRunService) {
         this.paperTradingService = paperTradingService;
+        this.marketStatusService = marketStatusService;
+        this.jobRunService = jobRunService;
     }
 
     @Scheduled(cron = "0 30 16 * * FRI", zone = "Asia/Shanghai")
     public void runWeeklyReview() {
-        try {
+        // 节假日周五（如国庆 10-02）没有新结算，验证与摘要都是对旧数据复读。
+        // 与 PaperTradingJob 同一条纪律：只有日历明确说非交易日才跳过。
+        jobRunService.runWithHeartbeat(JobRunService.JOB_PAPER_WEEKLY, () -> {
+            try {
+                if (Boolean.FALSE.equals(marketStatusService.current().tradingDay())) {
+                    log.info("Skip weekly review: not a trading day");
+                    return "非交易日，跳过";
+                }
+            } catch (Exception e) {
+                log.warn("Market status unavailable, run review anyway: {}", e.toString());
+            }
             paperTradingService.runWeeklyReview();
-        } catch (Exception e) {
-            log.error("PaperReviewJob failed: {}", e.getMessage(), e);
-        }
+            return null;
+        });
     }
 }

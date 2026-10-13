@@ -241,12 +241,12 @@ public class ExpectationService {
                     expectation.deadline(), metric, threshold);
         }
         if (STATUS_UNMEASURABLE.equals(expectation.status())) {
-            return String.format("预期到 %s 到期，但**算不出来**（净值样本不足）——这不等于未达成",
+            return String.format("预期到 %s 到期，但算不出来（净值样本不足）——这不等于未达成",
                     expectation.deadline());
         }
         String outcome = expectation.outcome() == null ? "n/a" : plain(expectation.outcome());
         return String.format("预期%s：到 %s，%s 实际 %s（门槛 %s）",
-                STATUS_MET.equals(expectation.status()) ? "**达成**" : "**未达成**",
+                STATUS_MET.equals(expectation.status()) ? "达成" : "未达成",
                 expectation.deadline(), metric, outcome, threshold);
     }
 

@@ -7,6 +7,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 
 /**
  * 经验记忆（L3 procedural）—— "这类问题上次是怎么解决的"。
@@ -41,6 +42,9 @@ import java.time.LocalDateTime;
 @NoArgsConstructor
 @Builder
 public class MemoryLesson {
+
+    /** 记忆表统一业务时区（与 MemoryService.ZONE 一致；prePersist 兜底用） */
+    private static final ZoneId ZONE_CN = ZoneId.of("Asia/Shanghai");
 
     public static final String STATUS_PENDING = "pending";
     public static final String STATUS_ACTIVE = "active";
@@ -107,7 +111,7 @@ public class MemoryLesson {
 
     @PrePersist
     void prePersist() {
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = LocalDateTime.now(ZONE_CN);
         if (createdAt == null) {
             createdAt = now;
         }

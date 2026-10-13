@@ -2,6 +2,8 @@ package com.happyericsix.stocktracker.repository;
 
 import com.happyericsix.stocktracker.entity.MemoryEpisode;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
@@ -24,4 +26,11 @@ public interface MemoryEpisodeRepository extends JpaRepository<MemoryEpisode, Lo
     List<MemoryEpisode> findByUserIdOrderByCreatedAtDesc(Long userId, org.springframework.data.domain.Pageable pageable);
 
     long countByUserId(Long userId);
+
+    /**
+     * 有过摘要的会话段数（同一会话的重生成是版本追加，不算新段）。
+     * 用户在"记忆"页看到的应该是"总结过几天"，而不是"总结过几版"。
+     */
+    @Query("select count(distinct e.sessionKey) from MemoryEpisode e where e.userId = :userId")
+    long countDistinctSessionKeyByUserId(@Param("userId") Long userId);
 }

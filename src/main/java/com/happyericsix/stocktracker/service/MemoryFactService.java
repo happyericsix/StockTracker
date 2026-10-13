@@ -101,7 +101,9 @@ public class MemoryFactService {
             String predicate = item.getPredicate().trim();
             String value = item.getObject().trim();
 
-            List<MemoryFact> active = factRepo.findActiveByKey(request.getUserId(), subject, predicate);
+            // 写入路径用带行锁的查询（见 findActiveByKeyForUpdate）：
+            // 并发巩固下两个事务同时判"同键不同值=取代"会漏取代一条，留下矛盾值并存。
+            List<MemoryFact> active = factRepo.findActiveByKeyForUpdate(request.getUserId(), subject, predicate);
 
             MemoryFact same = active.stream()
                     .filter(f -> value.equalsIgnoreCase(f.getFactValue() == null ? "" : f.getFactValue().trim()))
@@ -129,6 +131,8 @@ public class MemoryFactService {
                     .provenance(item.getProvenance() == null ? "model" : item.getProvenance())
                     .trust(item.getTrust() == null ? "medium" : item.getTrust())
                     .confirmed(Boolean.TRUE.equals(item.getConfirmed()))
+                    // 双层记忆：用户层默认可见；系统遥测由 observation()/observationStory() 工厂标记
+                    .userVisible(!Boolean.FALSE.equals(item.getUserVisible()))
                     .sourceEventIds(toJsonIds(request.getSourceEventIds()))
                     .build());
 
@@ -248,6 +252,17 @@ public class MemoryFactService {
      */
     public List<Map<String, Object>> searchFacts(Long userId, String query, String symbol,
                                                  String factType, int limit) {
+        // 内部消费方（memory_search 工具、recall 注入）要读全量：可见性只是展示语义
+        return searchFacts(userId, query, symbol, factType, limit, false);
+    }
+
+    /**
+     * @param visibleOnly true = 用户"记忆"门面：只回可见层（用户说的 + 可见叙事）；
+     *                    false = 内部消费（记忆搜索工具 / recall 注入）读全量。
+     *                    同一份数据两个口径，靠参数而不是两个方法 —— 否则过滤逻辑迟早分叉。
+     */
+    public List<Map<String, Object>> searchFacts(Long userId, String query, String symbol,
+                                                 String factType, int limit, boolean visibleOnly) {
         if (userId == null) {
             return List.of();
         }
@@ -259,6 +274,11 @@ public class MemoryFactService {
             if (FACT_TYPE_RETRACTION.equals(fact.getFactType())) {
                 continue;
             }
+            // 双层记忆（2026-10-09）：用户门面只显示可见层；内部消费（recall/记忆搜索）
+            // 读全量 —— 系统遥测对对话上下文仍然可用，只是不冒充"助手记住的我"。
+            if (visibleOnly && Boolean.FALSE.equals(fact.getUserVisible())) {
+                continue;
+            }
             if (factType != null && !factType.isBlank()
                     && !factType.trim().equalsIgnoreCase(fact.getFactType())) {
                 continue;
@@ -268,6 +288,7 @@ public class MemoryFactService {
             }
             candidates.add(fact);
         }
+        candidates = latestActivePerKey(candidates, userId);
 
         LocalDateTime now = LocalDateTime.now(ZoneId.of("Asia/Shanghai"));
         candidates.sort((a, b) -> Double.compare(score(b, query, symbol, now), score(a, query, symbol, now)));
@@ -347,6 +368,30 @@ public class MemoryFactService {
         return subject.equals(target) || subject.contains(target) || value.contains(target);
     }
 
+    /**
+     * 同一把键（subject|predicate，忽略大小写）上多条 active 时只保留 id 最大（最新）的那条。
+     *
+     * <p>正常状态每键最多一条 active；出现多条说明历史脏数据或曾经的并发写漏了取代。
+     * 这是读侧自愈：注入时出现两个矛盾的止损值是记忆系统最伤信任的故障，
+     * 宁可只给最新一条（写入侧由 {@code findActiveByKeyForUpdate} 的行锁防止再产生新的）。
+     * 打 warn 而不是静默——这批存量数据该修。
+     */
+    private List<MemoryFact> latestActivePerKey(List<MemoryFact> facts, Long userId) {
+        if (facts == null || facts.size() <= 1) {
+            return facts == null ? List.of() : facts;
+        }
+        Map<String, MemoryFact> latestByKey = new LinkedHashMap<>();
+        for (MemoryFact fact : facts) {
+            latestByKey.merge(fact.factKey(), fact,
+                    (a, b) -> a.getId() != null && a.getId() > b.getId() ? a : b);
+        }
+        if (latestByKey.size() < facts.size()) {
+            log.warn("事实键上有多条当前有效记录，检索已只取最新 user={} 冲突行数={}",
+                    userId, facts.size() - latestByKey.size());
+        }
+        return new ArrayList<>(latestByKey.values());
+    }
+
     // ==================== 撤回（不删除，走取代链） ====================
 
     /**
@@ -405,7 +450,7 @@ public class MemoryFactService {
         }
         LocalDateTime now = LocalDateTime.now(ZoneId.of("Asia/Shanghai"));
         List<MemoryFact> picked = new ArrayList<>();
-        for (MemoryFact fact : factRepo.findActiveByUserId(userId)) {
+        for (MemoryFact fact : latestActivePerKey(factRepo.findActiveByUserId(userId), userId)) {
             if (!PERSONA_TYPES.contains(fact.getFactType())) {
                 continue;
             }
@@ -529,7 +574,14 @@ public class MemoryFactService {
         item.put("subject", fact.getSubject());
         item.put("predicate", fact.getPredicate());
         item.put("object", fact.getFactValue());
+        // 展示形态（中文谓词 / 主体 / 带单位的值）：前端记忆页与 Python 注入块
+        // 都优先用它们，本地映射表只做回退。没有这一层，用户看到的就是
+        // "strategy:3 backtest_total_return_pct：12.5"。
+        item.put("predicateLabel", MemoryDisplayLabels.predicateLabel(fact.getPredicate()));
+        item.put("subjectLabel", MemoryDisplayLabels.subjectLabel(fact.getSubject()));
+        item.put("objectLabel", MemoryDisplayLabels.objectLabel(fact.getPredicate(), fact.getFactValue()));
         item.put("factType", fact.getFactType());
+        item.put("userVisible", !Boolean.FALSE.equals(fact.getUserVisible()));
         item.put("confidence", fact.getConfidence());
         item.put("confirmed", Boolean.TRUE.equals(fact.getConfirmed()));
         item.put("trust", fact.getTrust());
@@ -561,6 +613,10 @@ public class MemoryFactService {
         Map<String, Object> stats = new LinkedHashMap<>();
         stats.put("total", userId == null ? 0 : factRepo.countByUserId(userId));
         stats.put("active", userId == null ? 0 : factRepo.findActiveByUserId(userId).size());
+        // 用户门面用的计数：只数可见层（"助手记住了你说的 N 件事"）。
+        // total/active 保持全量口径 —— 它们是系统视角的账。
+        stats.put("visibleActive", userId == null ? 0 : factRepo.findActiveByUserId(userId).stream()
+                .filter(fact -> !Boolean.FALSE.equals(fact.getUserVisible())).count());
         return stats;
     }
 }

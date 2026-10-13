@@ -55,7 +55,19 @@ public class PaperTraceService {
             ExecutionContract.SKIP_NO_BAR,
             ExecutionContract.SKIP_MARKET_CLOSED,
             ExecutionContract.SKIP_SUSPENDED,
-            ExecutionContract.SKIP_EX_DIVIDEND_DAY);
+            ExecutionContract.SKIP_EX_DIVIDEND_DAY,
+            // 授权两因：一天一行（dedupeKey 按 日期+原因 去重），
+            // 它们回答的正是"agent 模式为什么盘中没动静/为什么被挡"——必须可见。
+            ExecutionContract.SKIP_AWAITING_AUTHORIZATION,
+            ExecutionContract.SKIP_OUTSIDE_AUTHORIZATION,
+            // 委员会明确关闭盘中执行：同样是"agent 盘中为什么不动"的答案，必须可见。
+            ExecutionContract.SKIP_AGENT_INTRADAY_DISABLED,
+            // 盯盘两因（看过不动 / 预算用完）：盯盘是 agent 盘中的主决策路径，
+            // 它的每次"不动"都要能被用户找到，否则"盯盘到底在工作吗"无从回答。
+            ExecutionContract.SKIP_WATCH_HOLD,
+            ExecutionContract.SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED,
+            // 组合熔断：触发了就该被看见（一天一行），否则"为什么突然不下单"无从回答。
+            ExecutionContract.SKIP_PORTFOLIO_HALTED);
 
     private final PaperTradeTraceRepository repository;
     private final AtomicLong writeFailures = new AtomicLong();
@@ -144,6 +156,11 @@ public class PaperTraceService {
      * 而不是"它被算过几次"——后者由 {@code repeatCount} 回答。
      * 更新而不是保留首次，是因为首次可能是失败（取数不可用），
      * 而当天稍后成功结算时，读者要看到的是**成功那次**的结论。
+     *
+     * <p>唯一的例外：已有行记录的是**成交**（decision=buy/sell）时不被后续 skip 覆盖。
+     * 场景：15:30 日线结算买入（decision=buy），同日再触发评估（手动启动/切换模式）
+     * 落下 already_traded_today 的 skip 行 —— 覆盖会把"今天买过"的证据抹掉，
+     * 而 {@code PaperTrade.traceId} 还指着这一行，审计链从此断裂。
      */
     public PaperTradeTrace record(PaperTradeTrace trace) {
         try {
@@ -157,6 +174,14 @@ public class PaperTraceService {
             Optional<PaperTradeTrace> existing = repository.findByDedupeKey(key);
             if (existing.isPresent()) {
                 PaperTradeTrace row = existing.get();
+                boolean rowHasFill = ExecutionContract.DECISION_BUY.equals(row.getDecision())
+                        || ExecutionContract.DECISION_SELL.equals(row.getDecision());
+                boolean newIsSkip = ExecutionContract.DECISION_SKIP.equals(trace.getDecision());
+                if (rowHasFill && newIsSkip) {
+                    log.warn("痕迹 {} 已记录成交（decision={}），不被后续 skip({}) 覆盖 —— 保留成交证据",
+                            key, row.getDecision(), trace.getSkipReason());
+                    return row;
+                }
                 row.setDecision(trace.getDecision());
                 row.setSkipReason(trace.getSkipReason());
                 row.setSignal(trace.getSignal());
@@ -179,6 +204,13 @@ public class PaperTraceService {
                 row.setEngineVersion(trace.getEngineVersion());
                 row.setAdjustMode(trace.getAdjustMode());
                 row.setMoneyPolicyVersion(trace.getMoneyPolicyVersion());
+                // 决策者与 agent 成本必须跟着更新（2026-10-08 实测踩坑：15:30 no_bar 的行
+                // 先落了 llm_calls=0，16:10 补跑成功后快照里是 8 次调用，列却还是 0 ——
+                // lastBriefingDate 靠 agentLlmCalls>0 找"上次真的开会的日子"，
+                // 读不到就会把开过的会当成没开过，第二天再白开一次 ~2 万 token 的会）。
+                row.setDecisionMode(trace.getDecisionMode());
+                row.setAgentLlmCalls(trace.getAgentLlmCalls());
+                row.setAgentTokens(trace.getAgentTokens());
                 row.setSnapshotJson(trace.getSnapshotJson());
                 row.setSnapshotSchemaVersion(trace.getSnapshotSchemaVersion());
                 row.setTraceHash(trace.getTraceHash());

@@ -22,11 +22,24 @@ SYSTEM_PROMPT = """你是股票策略助手。用户可能让你生成交易策�
 
 可用工具分为三类：
 1. 事实与验证工具：search_stock、get_quote、get_quotes、get_history、get_indicators、
-   get_risk_metrics、get_financial_abstract、validate_strategy、backtest_strategy、finalize_strategy。
+   get_risk_metrics、get_financial_abstract、validate_strategy、backtest_strategy、finalize_strategy、
+   list_user_strategies、review_strategy（后两个读用户自己的策略与模拟盘实际表现）。
 2. 模型诊断工具：get_model_status、get_model_consensus。这些只是低权重参考，
    不能作为买卖结论，置信度低或不可用时必须忽略。
-3. 消息面工具：get_news（个股新闻 / 全市场快讯）。被问"为什么涨/跌""有什么消息"时先查再答，
-   查不到就说查不到，不要凭印象编消息。
+3. 消息面工具：get_news（快讯）、search_news（多源搜索 + 可信度标注）、
+   read_news_detail（单条深读：原文 + 库内分析）、get_topic_story（这件事的后续报道线）、
+   get_stock_briefing（个股信息面总览：近期事件 + 专题，一眼看全）。
+
+   消息面问题的回答纪律：
+   - 用户问"有什么消息 / 为什么涨跌 / 这条新闻意味着什么"时**先查再答**：个股先
+     get_stock_briefing 总览全局，关键条目再 read_news_detail 深读；查不到就如实说
+     查不到，不要凭印象编消息。**能自己查到的就直接查、直接答，不要反问"要我查吗"**。
+   - 上下文有【本轮聚焦】块时，用户说的"这条新闻 / 这件事"指的就是它：先围绕它
+     深读（read_news_detail）并看后续（get_topic_story），再结合行情回答，
+     不要脱离这条新闻空谈。
+   - 新闻类回答按固定角度组织，每个角度一两句话：这条消息说了什么 → 可信度如何 →
+     对该股偏利好还是利空、为什么 → 后续值得盯什么。不堆术语、不写长篇背景介绍，
+     用户要看懂，不是要被科普。
 
 工具返回统一是 {"ok", "data", "error", "meta"} 信封：
 - ok=true 表示工具给出了答案，答案在 data 里（data.valid=false 是"判断结果为否"，不是故障）；
@@ -47,10 +60,37 @@ SYSTEM_PROMPT = """你是股票策略助手。用户可能让你生成交易策�
 被问到“预测模型能不能用/准不准/可不可信”时，先调用 get_model_status 查一下再回答，
 不要凭印象说；查不到就说查不到。
 
+回答风格（对所有问题生效）：先结论后理由，句子短，直接说人话；
+专业词第一次出现就用一句大白话带过解释，能不用的词就不用。
+
 什么时候生成策略 JSON：仅当用户在描述、修改或验证一个交易策略时。此时先查行情和技术
 指标，必要时查看风险指标和模型状态，然后生成完整的策略 JSON，调用一次 validate_strategy
 校验，成功后调用 backtest_strategy 做一次历史回测，再调用 finalize_strategy。
 如果用户只是在问行情、问建议、闲聊或追问上一轮内容，直接回答即可，不要输出策略 JSON。
+
+默认值披露（铁律。2026-10-12 用户实例：满仓默认 100% 静默生效，用户首笔买入后才发现
+现金只剩几百元）：生成或修改策略 JSON 时，凡是你**替用户填**而用户没有明确说过的
+重要字段——仓位（position.size_pct）、均线/RSI 等条件参数窗口、initial_capital——
+必须在回复里逐项点名，例如："仓位我默认填了 100%（满仓：买入后个股每跌 1%，账户
+约跌 1%，没有现金缓冲），要降低吗？"不许静默使用默认值；仓位 100% 必须问一句，
+用户答复之后才算确认。修改策略时同理：凡与原配置不同的字段，并排报"原值 → 新值"
+（如"均线窗口 60 → 2/10，交易会明显更频繁"），让用户看见每一次偏离，而不是埋在 JSON 里。
+
+复盘（用户问"我的策略怎么样 / 复盘一下 / 为什么没交易 / 怎么改进"）：
+先 list_user_strategies 把"茅台策略"解析成 id（拿不准有几条就先列出来问），再
+review_strategy 取实际表现。你的复盘要像一个有纪律的老手，顺序是固定的：
+1. **先样本量后结论**：评估天数、成交笔数不足时明说"还不能下结论"，不要用两三笔
+   交易编出一个故事；
+2. **先分清"环境问题"还是"策略问题"**：traces 的 skipReasonHistogram 回答"为什么
+   没成交"——market_closed / data_unavailable / limit_blocked 是环境，t1_blocked /
+   insufficient_cash 是约束，而规则长期不触发（长期 skip 且无成交）才是策略本身
+   的问题。改进建议只针对策略问题，环境问题如实说明即可；
+3. **先风险后收益**：回撤、空仓占比、连续不动的天数放在收益前面说；journal 的
+   方向命中率量的是"方向判断对不对"，不是盈亏，不要混着用；
+4. **改进建议必须可回测**：给出修改后的完整策略 JSON，先 backtest_strategy 与原版
+   对比（原版配置就在 review 结果的 configJson 里），把两版数字并排摆给用户，
+   用户同意才 finalize_strategy。没有回测支撑的改动叫"想法"，不叫"建议"；
+5. 复盘里引用的每个数字都来自 review_strategy 或回测结果，不另外编造。
 
 如果校验失败，根据错误信息一次性修正后重新校验。回测结果只用于验证规则是否成立，
 不代表未来收益。不要反复猜测字段格式。
@@ -63,7 +103,7 @@ SYSTEM_PROMPT = """你是股票策略助手。用户可能让你生成交易策�
   "symbol": "600519",
   "initial_capital": 100000,
   "data": {"period": "day", "lookback_days": 250},
-  "position": {"type": "percent", "size_pct": 100},
+  "position": {"type": "percent", "size_pct": 50},
   "entry": {
     "logic": "all",
     "conditions": [
@@ -249,8 +289,51 @@ def _run_backtest(cfg):
     return data.get("backtest"), None
 
 
+def render_focus(focus) -> str:
+    """聚焦对象 → system 聚焦块（agent 互通 P2）。
+
+    只有 news_event 一种形状（未知 type 返回空串 —— 前端拼错字段名不该炸掉聊天）。
+    事实取不到（事件不存在/知识端点不可用）也返回空串：聚焦是增强上下文，
+    没有它这轮对话仍然是完整的一次聊天（fail-open），模型只是少了背景。
+    """
+    if not isinstance(focus, dict) or str(focus.get("type") or "") != "news_event":
+        return ""
+    try:
+        event_id = int(focus.get("event_id"))
+    except (TypeError, ValueError):
+        return ""
+    if event_id < 1:
+        return ""
+    from agent import news_knowledge
+
+    facts = news_knowledge.event_facts(event_id)
+    if not facts:
+        # 打点（2026-10-10 事故排查）：聚焦事实取不到（知识端点异常或事件不存在）
+        # 时降级为普通聊天 —— fail-open 没错，但必须留痕，否则就是"没收到新闻"的静默失效。
+        logger.warning("聚焦事件 %s 取不到事实，本轮降级为普通聊天", event_id)
+        return ""
+    lines = ["【本轮聚焦：用户正在询问下面这条新闻】"]
+    lines.append(f"标题：{facts.get('title') or ''}")
+    lines.append(f"来源：{facts.get('source_name') or ''}（级别 {facts.get('source_level')}）"
+                 f"｜时间：{facts.get('published_at') or '未知'}"
+                 + ("（仅日期，源站未给时刻）" if facts.get("date_only") else ""))
+    if facts.get("symbol"):
+        lines.append(f"标的：{facts.get('symbol')} {facts.get('name') or ''}".rstrip())
+    if facts.get("direction"):
+        lines.append(f"已判方向：{facts.get('direction')}（影响 {facts.get('impact_level') or '未知'}）")
+    if facts.get("credibility") is not None:
+        lines.append(f"可信度：{facts.get('credibility')}（{facts.get('credibility_grade') or '未分级'}）")
+    summary = str(facts.get("plain_summary") or "").strip()
+    if summary:
+        lines.append(f"库里的一句话解读：{summary[:160]}")
+    lines.append("请围绕这条新闻回答用户的追问；需要更多细节时优先调用 "
+                 "read_news_detail（带原文与分析）与 get_topic_story（这件事的后续），"
+                 "并结合行情工具回答\"对股价意味着什么\"。不要脱离这条新闻空谈。")
+    return "\n".join(lines)
+
+
 def run_agent(user_id, message, history=None, session_id=None, memory_user_id=None,
-              tool_mode=None, scopes=None, role=None):
+              tool_mode=None, scopes=None, role=None, focus=None):
     """跑一轮 agent。
 
     `tool_mode` / `scopes` 是给调用方（Java）的**声明式**开关：
@@ -266,6 +349,10 @@ def run_agent(user_id, message, history=None, session_id=None, memory_user_id=No
 
     注意 role 只是个**标记**，不是权限：权限仍然只由 `scopes` 决定。
     一个角色能做什么，永远不能靠它自己的名字去主张。
+
+    `focus`（agent 互通 P2）：{"type": "news_event", "event_id": 321} ——
+    用户正围绕某条新闻追问（雷达页"问 AI"）。取到事实就渲染成聚焦块拼进
+    system（复用记忆注入通道）；取不到就当没带（fail-open，普通聊天照常）。
     """
     # 记忆上下文（今天几号 + 前情提要 + 相关事实）。取不到就退化成"只有时间锚点"，
     # 绝不允许记忆层的故障影响用户这条消息的回复 —— 所以这里除了 recall 内部的
@@ -282,6 +369,10 @@ def run_agent(user_id, message, history=None, session_id=None, memory_user_id=No
             context_block = recall.render({})
         except Exception:  # noqa: BLE001
             context_block = ""
+    # 聚焦块在最前：它定义"这一轮对话围绕什么"，地位高于前情提要
+    focus_block = render_focus(focus)
+    if focus_block:
+        context_block = f"{focus_block}\n\n{context_block}" if context_block else focus_block
 
     messages = memory.build_messages(SYSTEM_PROMPT, history, message, context_block=context_block)
     stats = memory.history_stats(history)

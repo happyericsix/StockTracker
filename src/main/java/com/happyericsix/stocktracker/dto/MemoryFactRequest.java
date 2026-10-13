@@ -54,4 +54,13 @@ public class MemoryFactRequest {
 
     /** 用户是否确认过；模型推断的一律 false */
     private Boolean confirmed;
+
+    /**
+     * 是否进用户的"记忆"门面（2026-10-09 双层记忆改造）。
+     * null = true：用户说过的事实当然可见。系统遥测（快照/指标/元数据谓词）
+     * 由 {@code ObjectiveFactKeys.observation} 统一标 false —— 它们照常写入、
+     * 照常注入对话（recall 不受影响），只是不再冒充"助手记住的我"。
+     */
+    @JsonAlias("user_visible")
+    private Boolean userVisible;
 }

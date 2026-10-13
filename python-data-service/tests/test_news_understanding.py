@@ -621,6 +621,32 @@ def test_synthesize_read_bad_json_degrades_to_hidden(monkeypatch):
     assert result["read"] == ""
 
 
+def test_synthesize_market_topic_stays_a_short_label(monkeypatch):
+    """主题名是标签不是正文：既不许 sanitize 把免责短句拼上去，也不许模型自己
+    塞进来的免责后缀或超长主题存活 —— 手机上标签不收缩，正文会被挤成
+    每行两三字的竖条（2026-10 线上真实事故：四条主线全部中招）。"""
+    payload = json.dumps({
+        "read": "信息面围绕原油扰动与假期消费两条主线。",
+        "themes": [
+            # ① 模型把免责声明拼进了主题名（防御层：_market_topic 要剥掉）
+            {"topic": "中东原油扰动" + nu.AI_NOTICE, "count": 8,
+             "line": "沙特输油管道遇袭暂停。"},
+            # ② 正常但超长的主题名（防御层：限长兜底）
+            {"topic": "这是一个明显超过十六个字的主题名字应该被截断", "count": 3,
+             "line": "国庆档票房破 8 亿。"},
+        ],
+        "conflicts": "",
+    }, ensure_ascii=False)
+    patch_llm(monkeypatch, [payload])
+    result = nu.synthesize_market([make_item()])
+    assert result["ok"] is True
+    topics = [t["topic"] for t in result["themes"]]
+    assert topics[0] == "中东原油扰动"
+    assert all(len(t) <= 16 for t in topics)
+    # 正文行是正文：照旧走 sanitize（免责短句保留在那里）
+    assert nu.DISCLAIMER in result["themes"][0]["line"]
+
+
 def test_synthesize_endpoint_envelope(monkeypatch):
     monkeypatch.setattr(nu, "synthesize_read", lambda *a, **k: {
         "read": "信息面偏中性。", "highlights": [], "skepticism": "",

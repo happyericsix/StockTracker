@@ -6,6 +6,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -14,6 +15,16 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    /**
+     * 登录失败（用户名不存在/密码错误）必须给 401 + 明确文案，而不是掉进 500 兜底。
+     * 2026-10-05 云端实测：密码输错返回"服务器内部错误"，用户会以为网站坏了；
+     * 而这恰恰是用户最常触发的错误路径。不记 ERROR 日志（记了会淹没真异常）。
+     */
+    @ExceptionHandler(BadCredentialsException.class)
+    public ResponseEntity<Result<Void>> handleBadCredentials(BadCredentialsException ex) {
+        return ResponseEntity.status(401).body(Result.error(401, "用户名或密码错误"));
+    }
 
     @ExceptionHandler(FavoriteAlreadyExistsException.class)
     public ResponseEntity<Result<Void>> handleFavoriteAlreadyExists(FavoriteAlreadyExistsException ex) {
@@ -30,13 +41,40 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(ex.getCode()).body(Result.error(ex.getCode(), ex.getMessage()));
     }
 
+    /**
+     * 参数校验失败：Spring 的默认消息是英文（"must not be blank"）且直接透给前端 ——
+     * 2026-10-10 用户反馈"怎么能把后端报错直接拿上来"。常见消息翻译成中文，
+     * 未收录的罕见消息保留原文（比错译好），外面包一层"参数不合法"。
+     */
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<Result<Void>> handleValidation(MethodArgumentNotValidException ex) {
         String message = ex.getBindingResult().getFieldErrors().stream()
-                .map(e -> e.getField() + ": " + e.getDefaultMessage())
-                .reduce((a, b) -> a + "; " + b)
-                .orElse("Validation failed");
-        return ResponseEntity.badRequest().body(Result.error(400, message));
+                .map(e -> e.getField() + "：" + translateValidationMessage(e.getDefaultMessage()))
+                .reduce((a, b) -> a + "；" + b)
+                .orElse("参数校验未通过");
+        return ResponseEntity.badRequest().body(Result.error(400, "参数不合法：" + message));
+    }
+
+    private static String translateValidationMessage(String raw) {
+        if (raw == null) {
+            return "格式不正确";
+        }
+        if (raw.contains("must not be blank") || raw.contains("must not be null")) {
+            return "不能为空";
+        }
+        if (raw.contains("must be greater than")) {
+            return "数值太小";
+        }
+        if (raw.contains("must be less than")) {
+            return "数值太大";
+        }
+        if (raw.contains("size must be between")) {
+            return "长度不在允许范围内";
+        }
+        if (raw.contains("must be a valid")) {
+            return "格式不正确";
+        }
+        return raw;
     }
 
     /** 唯一键冲突 / NOT NULL 违反等：此前会落到默认 500 白页 */

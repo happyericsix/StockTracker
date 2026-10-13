@@ -74,6 +74,15 @@ public class NewsEvent {
     private String eventTypeRaw;
 
     /**
+     * 跨源归并留下的印证证据（2026-10-09 多源化）：同一事件的其它报道源名，
+     * JSON 字符串数组（如 {@code ["新浪财经","同花顺"]}）。Python 取数层
+     * {@code merge_cross_source} 归并通稿转载时写入，解读时回传给
+     * {@code news_credibility} 作交叉印证加分。null = 单源报道（多数条目）。
+     */
+    @Column(name = "also_reported_by", columnDefinition = "TEXT")
+    private String alsoReportedBy;
+
+    /**
      * 资讯雷达的"文件夹"分类（封闭枚举，见 {@code NewsCategory}）。
      * 落库时由关键词规则打初值，AI 解读返回的 category 优先覆写 ——
      * 规则兜底保证"没解读的条目也有文件夹可归"，模型修正错分。

@@ -40,8 +40,13 @@ ALLOWED_DOMAIN_SUFFIXES = (
 
 FETCH_TIMEOUT_S = 8
 MAX_BYTES = 2 * 1024 * 1024
+MAX_PDF_BYTES = 5 * 1024 * 1024   # 研报 PDF 普遍 0.5~3MB
 MIN_BODY_CHARS = 200
 MAX_BODY_CHARS = 20000
+# 已知信源容器的门槛：命中 .txtinfos 这类**专用正文容器**的本来就是正文页，
+# 而快讯类文章常常只有几十字 —— 200 字会把真正文丢掉再误报"JS 渲染页"。
+# 2026-10-12 实测：东财全球快讯 318 条失败的主因就是 83 字真正文被 200 门槛击杀。
+MIN_BODY_CHARS_KNOWN = 50
 
 _HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -97,7 +102,8 @@ def _extract_text(html: str) -> str:
         node = soup.select_one(selector)
         if node:
             text = node.get_text("\n", strip=True)
-            if len(text) >= MIN_BODY_CHARS:
+            # 已知正文容器用低门槛（快讯几十字也是完整原文），启发式才用高门槛
+            if len(text) >= MIN_BODY_CHARS_KNOWN:
                 return text
 
     # 启发式：取"连续 <p> 文本总量最大"的容器（正文页的 p 都长在同一个父节点下）
@@ -113,26 +119,129 @@ def _extract_text(html: str) -> str:
 
 
 def fetch_article_body(url: str) -> str:
-    """抓取资讯原文正文。任何失败都抛 FetchError，绝不返回半截内容。"""
+    """抓取资讯原文正文。任何失败都抛 FetchError，绝不返回半截内容。
+
+    三条路（按 URL 形态自动选）：
+    1. 东财公告详情页（data.eastmoney.com/notices/detail/...）→ 页面本身 JS 渲染，
+       静态 HTML 只有页脚免责声明；正文走东财公开 JSON API（np-cnotice-stock）。
+    2. PDF（pdf.dfcfw.com 等）→ pypdf 抽文本。
+    3. 普通 HTML → 选择器 + 启发式。
+    2026-10-05 实测：527 条事件正文抽取率 0.76%；公告 API 与 PDF 分支就是为
+    补齐 158 条公告详情页和 45 条研报 PDF 来的。
+    """
     safe_url = _check_url(url)
     _reject_private_ip(safe_url)
+
+    if "/notices/detail/" in safe_url:
+        body = _fetch_notice_via_api(safe_url)
+        if len(body) >= MIN_BODY_CHARS:
+            return body[:MAX_BODY_CHARS]
+        if body:
+            # API 给了但太短：可能是超短公告，直接返回（比丢掉诚实）
+            return body[:MAX_BODY_CHARS]
+        raise FetchError("公告正文 API 未返回内容")
+
     try:
         response = requests.get(safe_url, headers=_HEADERS, timeout=FETCH_TIMEOUT_S,
                                 allow_redirects=True, stream=True)
         response.raise_for_status()
+        # getattr 兼容测试桩（最小响应对象没有 headers）；生产路径恒有
+        resp_headers = getattr(response, "headers", None) or {}
+        content_type = str(resp_headers.get("Content-Type") or "").lower()
+        looks_pdf = ("application/pdf" in content_type
+                     or safe_url.lower().split("?")[0].endswith(".pdf"))
+        cap = MAX_PDF_BYTES if looks_pdf else MAX_BYTES
         chunks, total = [], 0
         for chunk in response.iter_content(chunk_size=64 * 1024):
             chunks.append(chunk)
             total += len(chunk)
-            if total > MAX_BYTES:
+            if total > cap:
                 raise FetchError("页面超过大小上限，放弃抓取")
-        html = b"".join(chunks).decode(response.encoding or "utf-8", errors="replace")
+        payload = b"".join(chunks)
     except FetchError:
         raise
     except requests.RequestException as exc:
         raise FetchError(f"请求失败：{exc}") from exc
 
+    if looks_pdf or payload[:5] == b"%PDF-":
+        return _extract_pdf_text(payload)
+
+    html = payload.decode(response.encoding or "utf-8", errors="replace")
     body = _extract_text(html)
-    if len(body) < MIN_BODY_CHARS:
+    if _looks_like_boilerplate(body):
+        raise FetchError("页面只有站点模板文字（JS 渲染页），没有正文")
+    # 门槛判定已在 _extract_text 内按路径分档（已知容器 50 / 启发式 200）：
+    # 这里只挡"一个字都没抽到"，不再重复高门槛 —— 否则短快讯又被杀一次
+    if not body:
         raise FetchError("抽取不到有效正文（可能是 JS 渲染页）")
     return body[:MAX_BODY_CHARS]
+
+
+def _fetch_notice_via_api(url: str) -> str:
+    """东财公告详情页 → 正文 JSON API。
+
+    页面本身是 JS 渲染（静态 HTML 只有"数据来源：Choice 郑重声明"页脚，
+    直接抽会把免责声明当正文喂给模型），所以走 np-cnotice-stock 的公开 API。
+    长公告分页，取前 3 页（对阅读理解足够；公告主体信息都在前几页）。
+    """
+    import re
+    # [0-9A-Za-z]+ 而不是 [^/?#]+：后者会把 ".html" 一起吞进 art_code
+    m = re.search(r"/notices/detail/[^/]+/(AN[0-9A-Za-z]+)", url)
+    if not m:
+        return ""
+    art_code = m.group(1)
+    parts: list[str] = []
+    for page in (1, 2, 3):
+        try:
+            resp = requests.get(
+                f"https://np-cnotice-stock.eastmoney.com/api/content/ann"
+                f"?art_code={art_code}&client_source=web&page_index={page}",
+                headers={**_HEADERS, "Referer": "https://data.eastmoney.com/"},
+                timeout=FETCH_TIMEOUT_S)
+            resp.raise_for_status()
+            data = (resp.json() or {}).get("data") or {}
+        except Exception:  # noqa: BLE001 —— API 抖动按"无内容"处理
+            break
+        parts.append(str(data.get("notice_content") or ""))
+        try:
+            total_pages = int(data.get("page_size") or 1)
+        except (TypeError, ValueError):
+            total_pages = 1
+        if page >= total_pages:
+            break
+    return "\n".join(p for p in parts if p.strip())
+
+
+def _looks_like_boilerplate(text: str) -> bool:
+    """识别"抽到的其实是站点模板"：JS 渲染页的静态壳里只有页脚/免责声明。
+
+    判据：包含东财页脚签名串且长度撑不过几行正文的量。宁可误杀一次重试，
+    也不能把"郑重声明"当资讯正文存进库（2026-10-05 实测 158 条公告详情页全中）。
+    """
+    if not text:
+        return True
+    signature = "郑重声明"
+    if signature not in text:
+        return False
+    return ("数据来源" in text or "东方财富网发布此信息" in text) and len(text) < 900
+
+
+def _extract_pdf_text(payload: bytes) -> str:
+    """PDF → 纯文本（研报正文）。pypdf 纯 Python 无系统依赖，作为可选依赖延迟导入。"""
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:  # noqa: PERF203
+        raise FetchError("服务器未安装 pypdf，无法解析 PDF 研报") from exc
+    try:
+        import io
+        reader = PdfReader(io.BytesIO(payload))
+        # 研报动辄几十页，先读前 12 页（覆盖摘要/核心观点），够做阅读理解
+        parts = []
+        for page in reader.pages[:12]:
+            parts.append(page.extract_text() or "")
+        text = "\n".join(parts).strip()
+    except Exception as exc:  # noqa: BLE001 —— 各种损坏 PDF 都见过
+        raise FetchError(f"PDF 解析失败：{exc}") from exc
+    if len(text) < MIN_BODY_CHARS:
+        raise FetchError("PDF 里抽不出足够文本（可能是扫描件/图片版）")
+    return text[:MAX_BODY_CHARS]

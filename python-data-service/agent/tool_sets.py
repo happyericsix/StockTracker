@@ -30,13 +30,18 @@ TOOL_SETS = {
     "core": ("get_quote", "get_history", "memory_search", "get_news"),
     "market": ("search_stock", "get_quote", "get_quotes", "get_history",
                "get_indicators", "get_risk_metrics"),
-    "strategy": ("validate_strategy", "backtest_strategy", "backtest_matrix", "finalize_strategy"),
+    "strategy": ("list_user_strategies", "review_strategy",
+                 "validate_strategy", "backtest_strategy", "backtest_matrix", "finalize_strategy"),
     "memory": ("memory_search",),
     "model": ("get_model_status", "get_model_consensus"),
     # 外部内容型数据源（T2a）：单独成集，因为它们是唯一"内容不可信"的一类。
     # search_news 是资讯雷达同款链路（多源聚合 + 可信度标注）：
     # "这消息靠谱吗"是行情/策略分析里的常见追问，比快讯慢但每条带可信度。
-    "news": ("get_news", "search_news"),
+    # 2026-10-09 加三个知识工具（read_news_detail / get_topic_story /
+    # get_stock_briefing）：读雷达**落库后的**分析、可信度与专题故事线，
+    # 信息密度比原始快讯高一档 —— "聊聊这条新闻 / 这事后来怎样了"靠它们。
+    "news": ("get_news", "search_news", "read_news_detail",
+             "get_topic_story", "get_stock_briefing"),
     "fundamental": ("get_financial_abstract",),
 }
 

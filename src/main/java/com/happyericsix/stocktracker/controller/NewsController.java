@@ -2,16 +2,24 @@ package com.happyericsix.stocktracker.controller;
 
 import com.happyericsix.stocktracker.dto.NewsEventResponse;
 import com.happyericsix.stocktracker.dto.NewsSearchRequest;
+import com.happyericsix.stocktracker.dto.NewsTopicResponse;
 import com.happyericsix.stocktracker.dto.Result;
 import com.happyericsix.stocktracker.dto.StockNewsTimelineResponse;
+import com.happyericsix.stocktracker.entity.NewsTopic;
+import com.happyericsix.stocktracker.service.JobRunService;
 import com.happyericsix.stocktracker.service.NewsService;
+import com.happyericsix.stocktracker.service.NewsTopicService;
 import lombok.RequiredArgsConstructor;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Page;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDateTime;
+import java.time.format.DateTimeParseException;
 import java.util.List;
 
 /**
@@ -30,6 +38,9 @@ public class NewsController {
     private static final Logger log = LoggerFactory.getLogger(NewsController.class);
 
     private final NewsService newsService;
+    private final NewsTopicService newsTopicService;
+    private final ObjectMapper objectMapper;
+    private final JobRunService jobRunService;
 
     /**
      * 搜索：body {@code {symbol?, keyword?, types?, days=7, scope?, page=0, size=20}}。
@@ -84,6 +95,15 @@ public class NewsController {
      * <p>拿不到时返回 {@code data = null}（不是错误）：**"这次给不出结论"是合法状态**，
      * 前端据此隐藏整块，而不是显示一段空话占住页面最显眼的位置。
      */
+    /**
+     * 市场级综合（资讯雷达顶部"今日信息面"）：近 48h 快讯按主题关联。
+     * 服务端 10 分钟缓存，全站共用一份；不可用时返回 data=null（前端隐藏整块）。
+     */
+    @GetMapping("/market-read")
+    public Result<JsonNode> marketRead() {
+        return Result.success(newsService.marketRead());
+    }
+
     @GetMapping("/stock-read")
     public Result<String> stockRead(
             @RequestParam String symbol,
@@ -94,14 +114,45 @@ public class NewsController {
 
     /**
      * 手动触发增量刷新（运维/调试用）：{@code day=YYYYMMDD} 表示"从那天补到今天"，
-     * 缺省只补今天。Agent 侧的每日增量 Job（N5a）与它共用同一段落库逻辑。
+     * 缺省只补今天。定时采集（{@code NewsIngestJob}）与它共用同一段落库逻辑 ——
+     * 定时负责常态供给，手动按钮降级为兜底手段。
      */
     @PostMapping("/refresh")
     public Result<String> refresh(
             @RequestParam(required = false) String day,
             Authentication authentication) {
         log.info("User {} 手动触发资讯增量刷新（day={}）", authentication.getName(), day);
-        return Result.success(newsService.refresh(day));
+        // 成败都记一行（与定时趟同一心跳键，监控看到的是同一条管道），但失败要如实
+        // 抛给用户 —— 心跳只留痕，不吞错。
+        try {
+            String summary = newsService.refresh(day);
+            jobRunService.record(JobRunService.JOB_NEWS_REFRESH, JobRunService.STATUS_OK, summary);
+            return Result.success(summary);
+        } catch (Exception e) {
+            jobRunService.record(JobRunService.JOB_NEWS_REFRESH, JobRunService.STATUS_FAILED,
+                    e.toString());
+            throw e;
+        }
+    }
+
+    /**
+     * 新资讯计数（资讯页"新消息"横幅）：{@code since} 之后发布的条数。
+     *
+     * <p>前端记上次浏览时间戳并轮询这里，有新增就提示"N 条新资讯，点击载入"——
+     * 仿新闻 App 的红点。只报个数不推内容：轻查询，分钟级轮询也不构成压力。
+     */
+    @GetMapping("/count-since")
+    public Result<Long> countSince(@RequestParam String since) {
+        LocalDateTime moment;
+        try {
+            moment = LocalDateTime.parse(since);
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException("since 格式不对，要用 ISO 时间（如 2026-10-12T09:00:00）");
+        }
+        if (moment.isAfter(LocalDateTime.now().plusMinutes(5))) {
+            throw new IllegalArgumentException("since 不能是未来时间");
+        }
+        return Result.success(newsService.countSince(moment));
     }
 
     /**
@@ -122,6 +173,39 @@ public class NewsController {
     }
 
     /**
+     * 事件线列表（雷达页"事件线"区块）：同一事件的多条报道聚成的故事。
+     *
+     * <p><b>默认只返回已撰稿的线</b>（卡片 = 标题 + digest 一行，点开看全文）：
+     * 未撰稿的线大半是总编判定"信息量不足"的程序性披露，不占页面位置
+     * （成员报道仍在信息流里）。{@code includeUnsynthesized=true} 供调试看全量。
+     */
+    @GetMapping("/topics")
+    public Result<List<NewsTopicResponse>> topics(
+            @RequestParam(defaultValue = "7") int days,
+            @RequestParam(required = false) String symbol,
+            @RequestParam(defaultValue = "false") boolean includeClosed,
+            @RequestParam(defaultValue = "false") boolean includeUnsynthesized) {
+        return Result.success(newsTopicService
+                .listTopics(days, symbol, includeClosed, includeUnsynthesized).stream()
+                .map(topic -> NewsTopicResponse.from(topic, objectMapper))
+                .toList());
+    }
+
+    /** 专题详情：事件线本体 + 成员资讯（时间倒序）。 */
+    @GetMapping("/topics/{id}")
+    public Result<TopicDetailResponse> topicDetail(@PathVariable Long id) {
+        NewsTopic topic = newsTopicService.topic(id);
+        if (topic == null) {
+            return Result.error(404, "事件线不存在");
+        }
+        return Result.success(new TopicDetailResponse(
+                NewsTopicResponse.from(topic, objectMapper),
+                newsTopicService.loadMembers(id).stream()
+                        .map(event -> NewsEventResponse.from(event, objectMapper))
+                        .toList()));
+    }
+
+    /**
      * {@code POST /analyze} 的请求体。
      *
      * <p>刻意做成控制器内的 record 而不是新开一个 DTO 文件：它只有两个字段、
@@ -129,4 +213,7 @@ public class NewsController {
      * （plan 的文件清单里也只列了 {@code NewsEventResponse} 与 {@code NewsSearchRequest}）。
      */
     public record AnalyzeRequest(List<Long> eventIds, Boolean force) {}
+
+    /** 专题详情响应：线本体 + 成员（复用 {@link NewsEventResponse}，前端同一套卡片渲染）。 */
+    public record TopicDetailResponse(NewsTopicResponse topic, List<NewsEventResponse> events) {}
 }

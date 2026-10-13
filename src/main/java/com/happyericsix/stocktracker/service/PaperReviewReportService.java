@@ -32,6 +32,12 @@ import java.util.Map;
  * 于是"长期帮我盯着"这件事在两周内自然死亡。所以报告的目标是
  * "每天用 10 秒能看懂今天有没有值得注意的事，以及这条规则此刻的证据是什么"。
  *
+ * <h3>2026-10-10 起的形态：文本工厂，不再推消息</h3>
+ * 消息中心已收窄为"预警 + 系统告警"：日报/简报不再写消息表（用户反馈
+ * "既然页面上能看，消息里就不要再发一遍"），模拟盘页面通过
+ * PaperReportController 实时取这里生成的文本。生成逻辑（确定性拼装、不调
+ * 模型、不假装）一条没变 —— 变的只是出口。
+ *
  * <h3>三条纪律</h3>
  * <ol>
  *   <li><b>确定性</b>：报告全部由代码拼装（痕迹 + 账户 + 已验证的客观事实），
@@ -48,15 +54,6 @@ public class PaperReviewReportService {
 
     private static final Logger log = LoggerFactory.getLogger(PaperReviewReportService.class);
 
-    /** 报告消息的 type。与 ALERT / CHAT_* 并列，前端消息中心按它分流。 */
-    public static final String TYPE_PAPER_REPORT = "PAPER_REPORT";
-
-    /** 日报的去重键前缀；同一策略同一天只会有一条。 */
-    static final String REPORT_KEY_DAILY = "paper_daily";
-    /** 每日简报的去重键前缀（安静的日子用它，与"有事才推"的日报互不覆盖）。 */
-    static final String REPORT_KEY_BRIEFING = "paper_brief";
-    /** 空转期周报的去重键前缀。 */
-    static final String REPORT_KEY_WEEKLY = "paper_weekly";
 
     /** 连续多少个**交易日**没交易才算"值得说的沉默"。低于它就不报（缺失即不报，不假装）。 */
     public static final int IDLE_DAYS_THRESHOLD = 20;
@@ -66,7 +63,6 @@ public class PaperReviewReportService {
     private final PaperTraceService paperTraceService;
     private final PaperEquitySnapshotRepository paperEquitySnapshotRepository;
     private final StrategyService strategyService;
-    private final MessageService messageService;
     /** 预期登记/回填。允许为 null（单测）；读失败只是少一行。 */
     private final ExpectationService expectationService;
 
@@ -78,30 +74,28 @@ public class PaperReviewReportService {
     public PaperReviewReportService(PaperTraceService paperTraceService,
                                     PaperEquitySnapshotRepository paperEquitySnapshotRepository,
                                     StrategyService strategyService,
-                                    MessageService messageService,
                                     ExpectationService expectationService) {
         this.paperTraceService = paperTraceService;
         this.paperEquitySnapshotRepository = paperEquitySnapshotRepository;
         this.strategyService = strategyService;
-        this.messageService = messageService;
         this.expectationService = expectationService;
     }
 
     /**
-     * 日报：只在这一天"真的发生了事"时推送（成交，或阻塞型跳过）。
+     * 日报文本：只在这一天"真的发生了事"时才有内容（成交，或阻塞型跳过）。
      *
-     * @return 推送出去的消息；无事可报或已推过则返回 null
+     * @return 报告全文；无事可报 / 当天连痕迹都没有 / 策略信息不全 → null。
+     *         连痕迹都没有说明结算没走到留痕那一步（异常路径），此时生成
+     *         一段"今天很平静"是**假话**，宁可没有。
      */
-    public Message composeDailyReport(Strategy strategy, PaperAccount account, LocalDate tradeDate) {
+    public String dailyReportText(Strategy strategy, PaperAccount account, LocalDate tradeDate) {
         try {
-            if (strategy == null || strategy.getId() == null || strategy.getUser() == null) {
+            if (strategy == null || strategy.getId() == null) {
                 return null;
             }
             List<PaperTradeTrace> traces = paperTraceService.listForDay(strategy.getId(), tradeDate);
             if (traces.isEmpty()) {
-                // 连痕迹都没有：说明这一天的结算根本没走到留痕那一步（异常路径），
-                // 这时候发一条"今天很平静"是**假话**，宁可什么都不发。
-                log.debug("No traces for strategy id={} on {}, skipping daily report",
+                log.debug("No traces for strategy id={} on {}, no daily report",
                         strategy.getId(), tradeDate);
                 return null;
             }
@@ -111,12 +105,9 @@ public class PaperReviewReportService {
                 log.debug("Nothing noteworthy for strategy id={} on {}", strategy.getId(), tradeDate);
                 return null;
             }
-
-            String content = dailyReportText(strategy, account, tradeDate, traces, noteworthy);
-            return messageService.saveReport(strategy.getUser(), TYPE_PAPER_REPORT,
-                    dailyDedupeKey(strategy.getId(), tradeDate), strategy.getSymbol(), content);
+            return dailyReportText(strategy, account, tradeDate, traces, noteworthy);
         } catch (Exception e) {
-            // 报告是**增强**：结算与痕迹都已经落库，推不出去只是少一条消息
+            // 报告是**增强**：结算与痕迹都已经落库，生成失败只是页面上少一段
             log.warn("盘后复盘日报生成失败 strategyId={}: {}",
                     strategy == null ? null : strategy.getId(), e.getMessage());
             return null;
@@ -124,35 +115,30 @@ public class PaperReviewReportService {
     }
 
     /**
-     * 每日简报：**每个交易日一条**，安静的日子也发，内容就是"为什么没动"。
+     * 每日简报文本：安静的日子也有内容 —— "今天动没动、为什么、下次什么时候"。
      *
      * <h3>它和日报的区别，以及为什么两个都要</h3>
-     * {@link #composeDailyReport} 是"有事才说"（成交 / 阻塞型跳过）——那条纪律解决的是噪声，
+     * {@link #dailyReportText} 是"有事才说"（成交 / 阻塞型跳过）——那条纪律解决的是噪声，
      * 但它留下一个更贵的代价：**"没消息"与"服务没在跑"在用户那边长得一模一样**。
      * 实测反馈正是这句话："我不问 AI 都不知道有模拟盘这个功能"。
-     * 所以这里补上另一半：每天一条确定性的简报，把"今天动没动、为什么、下次什么时候"讲清楚。
+     * 所以这里补上另一半：把"为什么没动"讲清楚。
      *
-     * <p>仍然**不调模型**（与所有报告同源：报告是判断依据，不能每次生成都不一样），
-     * 也**不假装**：这一天连痕迹都没有时什么都不发 —— 那是结算根本没走到留痕那一步，
-     * 此时说"今天很平静"是假话。
-     *
-     * @return 推送出去的消息；已推过（同一天）或没有痕迹则返回 null
+     * <p>仍然**不调模型**（报告是判断依据，不能每次生成都不一样），
+     * 也**不假装**：这一天连痕迹都没有时返回 null —— 那是结算根本没走到
+     * 留痕那一步，此时说"今天很平静"是假话。
      */
-    public Message composeDailyBriefing(Strategy strategy, PaperAccount account, LocalDate tradeDate) {
+    public String briefingText(Strategy strategy, PaperAccount account, LocalDate tradeDate) {
         try {
-            if (strategy == null || strategy.getId() == null || strategy.getUser() == null) {
+            if (strategy == null || strategy.getId() == null) {
                 return null;
             }
             List<PaperTradeTrace> traces = paperTraceService.listForDay(strategy.getId(), tradeDate);
             if (traces.isEmpty()) {
-                log.debug("No traces for strategy id={} on {}, skipping daily briefing",
+                log.debug("No traces for strategy id={} on {}, no briefing",
                         strategy.getId(), tradeDate);
                 return null;
             }
-            String content = briefingText(strategy, account, tradeDate, traces);
-            return messageService.saveReport(strategy.getUser(), TYPE_PAPER_REPORT,
-                    REPORT_KEY_BRIEFING + ":" + strategy.getId() + ":" + tradeDate,
-                    strategy.getSymbol(), content);
+            return briefingText(strategy, account, tradeDate, traces);
         } catch (Exception e) {
             log.warn("每日简报生成失败 strategyId={}: {}",
                     strategy == null ? null : strategy.getId(), e.getMessage());
@@ -181,15 +167,14 @@ public class PaperReviewReportService {
     }
 
     /**
-     * 空转期摘要：这一周一条日报都没推过时，改用一条"什么都没发生 + 为什么"的消息。
+     * 空转期摘要文本：这一周一次"值得说的结算"都没有时，把**沉默本身**说清楚 ——
+     * 多少天没动、净值变化、规则层面的结论（这条规则是不是已经不值得跑了）。
      *
-     * <p>为什么不能简单"没发生就不发"：连续三周零消息，用户会以为系统坏了（或忘了它）。
-     * 这条消息的内容不是"今天很平静"，而是**沉默本身的数据**：多少天没动、
-     * 净值变化、以及规则层面的结论 —— 也就是"这条规则是不是已经不值得跑了"。
+     * @return 摘要全文；本周有过值得说的结算（该说的已经说了）或数据不全 → null
      */
-    public Message composeIdleWeeklyReport(Strategy strategy, PaperAccount account, LocalDate weekEnding) {
+    public String idleWeeklyText(Strategy strategy, PaperAccount account, LocalDate weekEnding) {
         try {
-            if (strategy == null || strategy.getId() == null || strategy.getUser() == null) {
+            if (strategy == null || strategy.getId() == null) {
                 return null;
             }
             List<PaperTradeTrace> recent = paperTraceService.listRecent(strategy.getId(), 200);
@@ -199,13 +184,11 @@ public class PaperReviewReportService {
                     .anyMatch(trace -> !trace.getTradeDate().isBefore(windowStart)
                             && isWorthTelling(trace));
             if (reportedThisWeek) {
-                return null;   // 这周已经有日报了，不再叠加一条
+                return null;   // 这周已经有值得说的了，空转摘要没有意义
             }
 
             long silentDays = silentTradingDays(recent, weekEnding);
-            String content = idleReportText(strategy, account, weekEnding, recent, silentDays);
-            return messageService.saveReport(strategy.getUser(), TYPE_PAPER_REPORT,
-                    REPORT_KEY_WEEKLY + ":" + strategy.getId() + ":" + weekEnding, strategy.getSymbol(), content);
+            return idleReportText(strategy, account, weekEnding, recent, silentDays);
         } catch (Exception e) {
             log.warn("空转期摘要生成失败 strategyId={}: {}",
                     strategy == null ? null : strategy.getId(), e.getMessage());
@@ -232,10 +215,6 @@ public class PaperReviewReportService {
         return true;
     }
 
-    static String dailyDedupeKey(Long strategyId, LocalDate tradeDate) {
-        return REPORT_KEY_DAILY + ":" + strategyId + ":" + tradeDate;
-    }
-
     // ==================== 报告正文 ====================
 
     private String dailyReportText(Strategy strategy, PaperAccount account, LocalDate tradeDate,
@@ -252,8 +231,16 @@ public class PaperReviewReportService {
         text.append(decisionModeLine(strategy)).append('\n');
         appendExpectationLine(text, strategy);
 
+        // 结算次数数的是**实际尝试次数**（repeat_count 含同 hash 的重试），不是痕迹行数：
+        // no_bar 重试三次的日子，"日线 1 次"是假话；盘中同理（2026-10-09 线上事故）。
+        long dailyRuns = all.stream().filter(t -> ExecutionContract.SETTLEMENT_DAILY
+                .equals(t.getSettlementKind()))
+                .mapToLong(t -> t.getRepeatCount() == null ? 1L : t.getRepeatCount())
+                .sum();
         long evaluated = all.stream().filter(t -> ExecutionContract.SETTLEMENT_REALTIME
-                .equals(t.getSettlementKind())).count();
+                .equals(t.getSettlementKind()))
+                .mapToLong(t -> t.getRepeatCount() == null ? 1L : t.getRepeatCount())
+                .sum();
         Map<String, Integer> skipCounts = new LinkedHashMap<>();
         for (PaperTradeTrace trace : all) {
             if (ExecutionContract.DECISION_SKIP.equals(trace.getDecision())
@@ -261,7 +248,7 @@ public class PaperReviewReportService {
                 skipCounts.merge(trace.getSkipReason(), 1, Integer::sum);
             }
         }
-        text.append("今天的结算：日线 1 次，盘中评估 ").append(evaluated).append(" 次");
+        text.append("今天的结算：日线 ").append(dailyRuns).append(" 次，盘中评估 ").append(evaluated).append(" 次");
         if (!skipCounts.isEmpty()) {
             text.append("；跳过原因：");
             List<String> parts = new ArrayList<>();
@@ -397,12 +384,12 @@ public class PaperReviewReportService {
                         strategy.getUser() == null ? null : strategy.getUser().getId(), strategy.getId());
         if (summary == null) {
             return "规则证据：还没有做过样本外验证（多标的 × 多时段）。\n"
-                    + "  在得出结论之前，请把当前表现当作**单个标的的偶然**。";
+                    + "  在得出结论之前，请把当前表现当作单个标的的偶然。";
         }
         StringBuilder line = new StringBuilder("规则证据（样本外验证，");
         line.append(shortDate(summary.ranAt())).append(" 跑）：\n");
         if (!summary.hasSample()) {
-            line.append("  这次验证没有可用样本（K 线不足或取数失败），因此它**不构成结论**。\n");
+            line.append("  这次验证没有可用样本（K 线不足或取数失败），因此它不构成结论。\n");
             return line.toString();
         }
         line.append("  · ").append(summary.validCells()).append(" 个有效格子里 ")
@@ -442,10 +429,10 @@ public class PaperReviewReportService {
         if (!ExecutionContract.DECISION_MODE_AGENT.equals(mode)) {
             return "决策来源：策略规则（确定性，同输入同输出）。";
         }
-        StringBuilder line = new StringBuilder("决策来源：**agent 多角色委员会**");
+        StringBuilder line = new StringBuilder("决策来源：agent 多角色委员会");
         if (strategy.getDecisionModeSince() != null) {
             line.append("（自 ").append(strategy.getDecisionModeSince()).append(" 起）");
-            line.append("\n  该日之前的净值由规则决策产生，与当前段**口径不同、数字不可比** ——"
+            line.append("\n  该日之前的净值由规则决策产生，与当前段口径不同、数字不可比 ——"
                     + "想比较请看两段各自的区间表现，不要看一整条线。");
         }
         return line.toString();

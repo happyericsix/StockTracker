@@ -37,6 +37,10 @@ import logging
 import re
 from datetime import datetime, timedelta
 
+# 2-gram 相似度与 news_client 的跨源归并共用同一实现 —— 两处各写一套迟早分叉
+# （详见 text_similarity 模块 docstring）
+from text_similarity import title_similarity, title_tokens
+
 logger = logging.getLogger(__name__)
 
 # ==================== 信源分级 ====================
@@ -50,10 +54,13 @@ _SOURCE_BASE_DEFAULT = 50  # 未知级别：不给好处也不一棍子打死
 
 # 持牌/主流财经媒体与官方渠道：在这些渠道出现的条目加成。
 # 名单宁缺毋滥——加错一家营销号，整个分数的公信力就没了。
+# 2026-10-09 多源化新增：央视/新闻联播（官方）、新浪财经/同花顺/富途（持牌门户）。
+# 匹配是 endswith/包含语义，所以写短词根（"央视"能命中"央视·新闻联播"）。
 _TRUSTED_SOURCES = frozenset({
     "上交所", "深交所", "巨潮资讯", "上海证券报", "中国证券报", "证券时报",
     "证券日报", "财新", "财新网", "21世纪经济报道", "第一财经", "每日经济新闻",
     "界面新闻", "经济观察报", "中国基金报", "新京报", "澎湃新闻", "澎湃",
+    "央视", "新闻联播", "新浪财经", "同花顺", "富途",
 })
 _TRUSTED_BOOST = 8   # 已知可靠信源加成（封顶不越过 100）
 _AGGREGATOR_HINT = frozenset({"号", "自媒体", "看点", "头条号"})  # 名单里带这些词 → 疑似聚合号
@@ -107,20 +114,12 @@ def _clamp(value: int, low: int = 0, high: int = 100) -> int:
 
 
 def _title_tokens(title: str) -> set[str]:
-    """标题分词：中文没有天然分隔，按 2-gram + 去停用词近似。
-
-    Jaccard 只用于"这两条是不是在讲同一件事"的粗筛，不需要真分词器——
-    精度差一点顶多多算/少算一次印证，分数本身还有另外两个维度兜着。
-    """
-    text = re.sub(r"[\s\W]+", "", str(title or ""))
-    grams = {text[i:i + 2] for i in range(len(text) - 1)}
-    return {g for g in grams if g not in _STOPWORDS and not g.isdigit()}
+    """标题分词：委托共享实现（news_client 的跨源归并用同一套，理由见 text_similarity）。"""
+    return title_tokens(title)
 
 
 def _title_similarity(a: set[str], b: set[str]) -> float:
-    if not a or not b:
-        return 0.0
-    return len(a & b) / len(a | b)
+    return title_similarity(a, b)
 
 
 def _score_source(item: dict) -> tuple[int, list[str]]:
@@ -183,10 +182,23 @@ def _parse_time(value) -> datetime | None:
 
 
 def _find_corroboration(item: dict, peers: list[dict]) -> tuple[bool, list[str]]:
-    """在同批条目里找"同标的 + 同日 + 标题相似"的其他信源条目。"""
+    """在同批条目里找"同标的 + 同日 + 标题相似"的其他信源条目。
+
+    2026-10-09 多源化新增优先分支：`also_reported_by`（news_client 跨源归并时
+    记下的"同一事件的其他报道源"）是**取数时点就确认过的**证据，比批内标题
+    相似度更可靠，且不依赖"恰好和印证对象落在同一个分析批次"——宏观快讯
+    没有 symbol，批内印证对它们永远不生效，这是唯一能让它们拿到印证分的路径。
+    """
+    name = str(item.get("source_name") or "").strip()
+    extras = sorted({str(s or "").strip() for s in (item.get("also_reported_by") or [])
+                     if str(s or "").strip() and str(s or "").strip() != name})
+    if extras:
+        shown = "、".join(extras[:3])
+        more = f" 等 {len(extras)} 家" if len(extras) > 3 else ""
+        return True, [f"另有 {len(extras)} 家信源报道同一事件（{shown}{more}）"]
+
     symbol = str(item.get("symbol") or "").strip().upper()
     moment = _parse_time(item.get("published_at"))
-    name = str(item.get("source_name") or "").strip()
     tokens = _title_tokens(item.get("title"))
 
     if not symbol or moment is None or not tokens:

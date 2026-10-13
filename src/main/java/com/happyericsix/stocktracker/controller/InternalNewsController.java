@@ -1,7 +1,10 @@
 package com.happyericsix.stocktracker.controller;
 
+import com.happyericsix.stocktracker.dto.NewsTopicResponse;
 import com.happyericsix.stocktracker.entity.NewsEvent;
 import com.happyericsix.stocktracker.repository.NewsEventRepository;
+import com.happyericsix.stocktracker.service.NewsBriefingService;
+import com.happyericsix.stocktracker.service.NewsTopicService;
 import com.happyericsix.stocktracker.util.CnTime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,10 +14,13 @@ import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -58,11 +64,20 @@ public class InternalNewsController {
     private static final int MAX_LIMIT = 5000;
 
     private final NewsEventRepository newsEventRepository;
+    private final NewsBriefingService newsBriefingService;
+    private final NewsTopicService newsTopicService;
+    private final ObjectMapper objectMapper;
     private final String internalToken;
 
     public InternalNewsController(NewsEventRepository newsEventRepository,
+                                  NewsBriefingService newsBriefingService,
+                                  NewsTopicService newsTopicService,
+                                  ObjectMapper objectMapper,
                                   @Value("${internal.api-token:}") String internalToken) {
         this.newsEventRepository = newsEventRepository;
+        this.newsBriefingService = newsBriefingService;
+        this.newsTopicService = newsTopicService;
+        this.objectMapper = objectMapper;
         this.internalToken = internalToken;
     }
 
@@ -118,6 +133,55 @@ public class InternalNewsController {
         row.put("credibility", event.getCredibility());
         row.put("credibility_grade", nullToEmpty(event.getCredibilityGrade()));
         return row;
+    }
+
+    // ==================== agent 知识端点（agent 互通 P1，2026-10-09） ====================
+    //
+    // 给 Python 侧新闻工具取库内事实：聊天 agent 的 read_news_detail /
+    // get_topic_story / get_stock_briefing 与聚焦注入（chat focus）都从这里读。
+    // 同一条纪律：只读、无 LLM（综合是消费方 agent 的事）、fail-open（Python 侧兜）。
+
+    /** 单条事件完整事实（含分析/可信度/正文）：read_news_detail 与 chat focus 注入的数据源。 */
+    @GetMapping("/events/{id}")
+    public ResponseEntity<JsonNode> eventById(
+            @PathVariable Long id,
+            @RequestHeader(value = "X-Internal-Token", required = false) String token) {
+        if (!authorized(token)) {
+            return unauthorized();
+        }
+        JsonNode facts = newsBriefingService.eventFacts(id);
+        return facts == null
+                ? ResponseEntity.status(HttpStatus.NOT_FOUND).build()
+                : ResponseEntity.ok(facts);
+    }
+
+    /** 个股信息面简报：近 N 天事件（含分析/可信度）+ 已撰稿专题。 */
+    @GetMapping("/briefing")
+    public ResponseEntity<JsonNode> briefing(
+            @RequestParam String symbol,
+            @RequestParam(required = false, defaultValue = "7") int days,
+            @RequestParam(required = false, defaultValue = "12") int maxEvents,
+            @RequestHeader(value = "X-Internal-Token", required = false) String token) {
+        if (!authorized(token)) {
+            return unauthorized();
+        }
+        return ResponseEntity.ok(newsBriefingService.briefing(
+                symbol, Math.max(1, Math.min(days, 30)), Math.max(1, Math.min(maxEvents, 30))));
+    }
+
+    /** 某标的已撰稿专题列表（get_topic_story 的数据源）。 */
+    @GetMapping("/topics")
+    public ResponseEntity<List<NewsTopicResponse>> topics(
+            @RequestParam String symbol,
+            @RequestParam(required = false, defaultValue = "7") int days,
+            @RequestHeader(value = "X-Internal-Token", required = false) String token) {
+        if (!authorized(token)) {
+            return unauthorized();
+        }
+        return ResponseEntity.ok(newsTopicService
+                .listTopics(Math.max(1, Math.min(days, 30)), symbol, false, false).stream()
+                .map(topic -> NewsTopicResponse.from(topic, objectMapper))
+                .toList());
     }
 
     private static String nullToEmpty(String value) {

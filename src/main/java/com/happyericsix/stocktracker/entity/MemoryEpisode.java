@@ -7,6 +7,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 
 /**
  * 情节记忆（L1）—— 一个会话的"前情提要"。
@@ -31,6 +32,9 @@ import java.time.LocalDateTime;
 @NoArgsConstructor
 @Builder
 public class MemoryEpisode {
+
+    /** 记忆表统一业务时区（与 MemoryService.ZONE 一致；prePersist 兜底用） */
+    private static final ZoneId ZONE_CN = ZoneId.of("Asia/Shanghai");
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -87,7 +91,7 @@ public class MemoryEpisode {
     @PrePersist
     void prePersist() {
         if (createdAt == null) {
-            createdAt = LocalDateTime.now();
+            createdAt = LocalDateTime.now(ZONE_CN);
         }
         if (version == null) {
             version = 1;

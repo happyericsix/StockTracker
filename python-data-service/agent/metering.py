@@ -47,6 +47,10 @@ class Meter:
         self._llm: dict = {"calls": 0, "failures": 0, "prompt_tokens": 0,
                            "completion_tokens": 0, "total_tokens": 0, "latency_ms": 0}
         self._turns = 0
+        # 按日滚动的 LLM token 用量（Asia/Shanghai 日期）：预算线（如委员会的
+        # LLM_DAILY_TOKEN_BUDGET）是**每日**口径，拿进程终身累计去比会让超限一天后
+        # 委员会从此不再开会直到重启 —— "每日"就必须按日清零。
+        self._llm_daily = {"date": _cn_today(), "tokens": 0}
 
     # ---------- 内部 ----------
 
@@ -122,6 +126,7 @@ class Meter:
                 self._bump("llm.total_tokens", max(0, int(total_tokens)))
                 if not ok:
                     self._bump("llm.failures")
+                self._roll_daily_locked(max(0, int(total_tokens)))
         except Exception as exc:  # noqa: BLE001
             logger.debug("计量失败 record_llm: %s", exc)
 
@@ -150,6 +155,30 @@ class Meter:
     def since(self, baseline: dict) -> dict:
         return self.delta(baseline or {}, self.baseline())
 
+    # ---------- 按日窗口（给"每日预算"类判断用） ----------
+
+    def _roll_daily_locked(self, tokens: int) -> None:
+        """累加当日用量；跨天时先清零再累加（调用方必须已持有锁）。"""
+        today = _cn_today()
+        if self._llm_daily.get("date") != today:
+            self._llm_daily = {"date": today, "tokens": 0}
+        self._llm_daily["tokens"] = self._llm_daily.get("tokens", 0) + tokens
+
+    def daily_llm_tokens(self) -> int:
+        """今天（Asia/Shanghai）累计的 LLM token 数。
+
+        每日预算线必须拿这个数比，而不是 `snapshot()["totals"]["llm_tokens"]`
+        （那是进程终身累计，超限一次之后预算就永远关着，直到重启）。
+        """
+        try:
+            with self._lock:
+                if self._llm_daily.get("date") != _cn_today():
+                    return 0   # 昨天之后还没有任何 LLM 调用：今天用量是 0
+                return int(self._llm_daily.get("tokens", 0))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("计量失败 daily_llm_tokens: %s", exc)
+            return 0
+
     # ---------- 观测 ----------
 
     def snapshot(self) -> dict:
@@ -163,6 +192,9 @@ class Meter:
                 }
             llm = dict(self._llm)
             llm["latency_ms_avg"] = round(llm["latency_ms"] / llm["calls"]) if llm["calls"] else 0
+            if self._llm_daily.get("date") != _cn_today():
+                self._llm_daily = {"date": _cn_today(), "tokens": 0}
+            daily = dict(self._llm_daily)
             totals = {
                 "turns": self._turns,
                 "tool_calls": self._counters.get("tools.calls", 0),
@@ -177,6 +209,7 @@ class Meter:
         return {
             "totals": totals,
             "llm": llm,
+            "llm_daily": daily,
             "tools": tools,
             # 外部源的**用量**只有一个来源：从健康状态派生，不在这里重复计数
             "external": _external_rollup(),
@@ -190,7 +223,14 @@ class Meter:
             self._refusals.clear()
             self._llm = {"calls": 0, "failures": 0, "prompt_tokens": 0,
                          "completion_tokens": 0, "total_tokens": 0, "latency_ms": 0}
+            self._llm_daily = {"date": _cn_today(), "tokens": 0}
             self._turns = 0
+
+
+def _cn_today() -> str:
+    """A 股口径的今天（Asia/Shanghai 的日期字符串）—— 预算按交易日滚动。"""
+    from datetime import datetime, timezone, timedelta
+    return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
 
 
 def _external_rollup() -> dict:
@@ -240,6 +280,11 @@ def since(baseline_snapshot) -> dict:
 
 def snapshot() -> dict:
     return METER.snapshot()
+
+
+def daily_llm_tokens() -> int:
+    """今天（Asia/Shanghai）累计的 LLM token 数 —— 每日预算线的判定口径。"""
+    return METER.daily_llm_tokens()
 
 
 def describe_turn(delta: dict) -> str:

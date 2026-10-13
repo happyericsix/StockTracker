@@ -27,6 +27,7 @@ import static org.mockito.Mockito.when;
 class NewsRetentionJobTest {
 
     private NewsEventRepository repository;
+    private com.happyericsix.stocktracker.repository.JobRunRepository jobRunRepository;
     private NewsRetentionJob job;
     private LocalDateTime now;
 
@@ -39,9 +40,11 @@ class NewsRetentionJobTest {
                 anyString(), anyCollection(), any())).thenReturn(0L);
         when(repository.deleteByCategoryIsNullAndSourceLevelNotInAndPublishedAtBefore(
                 anyCollection(), any())).thenReturn(0L);
+        jobRunRepository = mock(com.happyericsix.stocktracker.repository.JobRunRepository.class);
         // 全默认值：快讯 3 天、普通分类 30 天、披露类 180 天
         job = new NewsRetentionJob(repository, new NewsRetention(
-                3, 30, 30, 30, 7, 30, 30, 30, 30, 180));
+                3, 30, 30, 30, 7, 30, 30, 30, 30, 180),
+                jobRunRepository, new com.happyericsix.stocktracker.service.JobRunService(jobRunRepository));
         now = LocalDateTime.now();
     }
 

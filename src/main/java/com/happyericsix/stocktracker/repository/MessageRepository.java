@@ -45,6 +45,14 @@ public interface MessageRepository extends JpaRepository<Message, Long> {
 
     long countByUserIdAndReadFalse(Long userId);
 
+    /** 消息中心口径内的类型分页（口径收窄后列表/未读都按白名单查，见 MessageService）。 */
+    Page<Message> findByUserIdAndTypeIn(Long userId, List<String> types, Pageable pageable);
+
+    Page<Message> findByUserIdAndTypeInAndCreatedAtGreaterThanEqual(
+            Long userId, List<String> types, LocalDateTime since, Pageable pageable);
+
+    long countByUserIdAndReadFalseAndTypeIn(Long userId, List<String> types);
+
     /** 冷却判断：指定预警在 since 之后是否触发过 */
     boolean existsByAlertIdAndCreatedAtGreaterThan(Long alertId, LocalDateTime since);
 

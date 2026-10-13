@@ -11,8 +11,16 @@ ENV TZ=Asia/Shanghai
 WORKDIR /srv/python-data-service
 
 # 安装依赖
+# pip 走阿里云镜像：直连 PyPI 在国内普遍 25~60KB/s，一次完整安装要 40 分钟+
+# （2026-10-05 给 requirements 加 pypdf 触发重装时实测）；镜像源几分钟搞定。
 COPY python-data-service/requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ \
+    -r requirements.txt
+
+# lightgbm 的 OpenMP 运行时：python:3.11-slim 不带 libgomp，缺它 import 即 OSError
+# （本地镜像自检实测踩过）。放在 pip 层**之后**是为了保住上面漫长的依赖安装缓存。
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
 
 # 复制源码（vendor 在仓库根，此前 COPY . . 的上下文里没有它 →
 # 容器内 THS 路由首次调用即 RuntimeError，这是那次断链的修复）

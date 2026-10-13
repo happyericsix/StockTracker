@@ -74,6 +74,9 @@ logger = _logging.getLogger(__name__)
 
 SCOPE_MARKET_READ = "market:read"
 SCOPE_STRATEGY_COMPUTE = "strategy:compute"
+# 复盘是"读用户自己的策略与模拟盘结果"，与 compute（跑回测/定稿）分开授权：
+# 将来想给只读用户开复盘而不给回测时，不用动 compute
+SCOPE_STRATEGY_READ_OWN = "strategy:read:own"
 SCOPE_MODEL_DIAGNOSE = "model:diagnose"
 SCOPE_MEMORY_READ_OWN = "memory:read:own"
 # 外部数据源单独授权：新闻/财报是第三方内容，将来按套餐开关时它是最该被单独控的一类
@@ -847,6 +850,170 @@ def _tool_memory_search(args):
     return tc.ok({"facts": found, "lessons": lessons, "count": len(found) + len(lessons)})
 
 
+def _tool_list_strategies(args):
+    """列出**当前用户自己的**策略（复盘的第一步：把"茅台策略"解析成 id）。
+
+    身份从 tool_scope 取（同 memory_search 的越权防线）：查谁的数据不交给模型决定。
+    """
+    from agent import strategy_store, tool_scope
+
+    user_id = tool_scope.user_id()
+    if not user_id:
+        return tc.fail(tc.INVALID_ARGS, "当前会话没有用户身份，无法查询策略列表")
+
+    items = strategy_store.list_strategies(user_id)
+    if not items:
+        return tc.ok({"strategies": [], "count": 0,
+                      "note": "该用户还没有策略。用户想建策略时走正常的策略生成流程，不要编造已有策略。"})
+    compact = [{"id": it.get("id"), "name": it.get("name"), "symbol": it.get("symbol"),
+                "paperEnabled": it.get("paperEnabled"), "decisionMode": it.get("decisionMode")}
+               for it in items]
+    return tc.ok({"strategies": compact, "count": len(compact),
+                  "note": "拿 id 调 review_strategy 可取该策略的模拟盘实际表现。"})
+
+
+def _tool_review_strategy(args):
+    """取一条策略的复盘数据包：配置 + 账户 + 净值 + 成交 + 痕迹 + 决策日志 + 预期。
+
+    数据是 Java 侧确定性拼装的（不经过模型），复盘结论由 agent 在这份事实上综合。
+    取不到（策略不存在/不属于该用户/后端不可用）返回明确的失败，不要猜。
+    """
+    from agent import strategy_store, tool_scope
+
+    user_id = tool_scope.user_id()
+    if not user_id:
+        return tc.fail(tc.INVALID_ARGS, "当前会话没有用户身份，无法复盘")
+
+    strategy_id = _int_arg(args, "strategy_id", 0, minimum=1)
+    if not strategy_id:
+        raise ValueError("strategy_id is required (positive integer)")
+
+    bundle = strategy_store.review(user_id, strategy_id)
+    if bundle is None:
+        return tc.fail(tc.INVALID_ARGS,
+                       f"strategy_id={strategy_id} 取不到复盘数据（不存在、不属于该用户或后端暂不可用）。"
+                       "先用 list_user_strategies 确认 id。")
+    return tc.ok(bundle)
+
+
+# ==================== 新闻知识工具（agent 互通 P1，2026-10-09） ====================
+#
+# 与 search_news（外部多源搜索）的分工：这三个工具读的是**新闻雷达落库后的
+# 知识**（已分析字段、可信度、专题故事线）——库里有解读与专题聚合，比原始
+# 快讯的信息密度高一档。数据经 Java 内部知识端点（agent/news_knowledge），
+# 只读、无 LLM 综合（综合是 agent 的本职）。
+
+
+def _tool_read_news_detail(args):
+    """深读一条已落库的资讯：完整事实 + 分析 + 可信度。
+
+    已分析的条目直接回库里的结论；未分析的现场补一次 deep 解读
+    （结果标注 ad_hoc，不落库 —— 落库走雷达页的解读管线，那是唯一真相源）。
+    """
+    from agent import news_knowledge
+
+    # 不用 _int_arg：它会把 default 钳到 minimum，缺参会被静默当成 event_id=1
+    try:
+        event_id = int(args.get("event_id"))
+    except (TypeError, ValueError):
+        return tc.fail(tc.INVALID_ARGS,
+                       "read_news_detail 需要 event_id（资讯雷达事件卡的 id，正整数）。",
+                       retryable=False)
+    if event_id < 1:
+        return tc.fail(tc.INVALID_ARGS,
+                       "read_news_detail 需要 event_id（资讯雷达事件卡的 id，正整数）。",
+                       retryable=False)
+    facts = news_knowledge.event_facts(event_id)
+    if facts is None:
+        # "不存在"与"端点不可用"在这里不可区分（都是 None）——按可重试的源不可用
+        # 处理：模型换路（search_news）或稍后再试，比把它断言成"参数错"更诚实。
+        return tc.fail(tc.SOURCE_UNAVAILABLE,
+                       f"event_id={event_id} 取不到（不存在，或新闻知识端点暂不可用）。"
+                       "可先用 search_news 按关键词找。", retryable=True)
+    data = {"event": facts}
+    if not facts.get("analyzed"):
+        try:
+            import news_understanding
+            ad_hoc = news_understanding.analyze_one(
+                {"symbol": facts.get("symbol") or "", "name": facts.get("name") or "",
+                 "title": facts.get("title") or "", "content": facts.get("content") or "",
+                 "body": facts.get("body") or "", "url": "",
+                 "source_level": facts.get("source_level") or 2,
+                 "source_name": facts.get("source_name") or "",
+                 "event_type_raw": "", "published_at": facts.get("published_at") or ""},
+                mode="deep")
+            data["ad_hoc_analysis"] = {
+                key: ad_hoc.get(key) for key in
+                ("direction", "confidence", "impact_level", "plain_summary",
+                 "risks", "opportunities")}
+            data["note"] = "该条此前未解读，以上分析为本轮现场生成（未落库）。"
+        except Exception as exc:  # noqa: BLE001 - 现场解读失败不挡事实返回
+            logger.warning("read_news_detail 现场解读失败 id=%s: %s", event_id, exc)
+            data["note"] = "该条尚未解读，现场解读暂不可用；以下为原始事实。"
+    return tc.ok(data)
+
+
+def _tool_get_topic_story(args):
+    """某标的的事件线（新闻专题）：同一事件多条报道的来龙去脉。"""
+    from agent import news_knowledge
+
+    symbol = str(args.get("symbol") or "").strip()
+    if not symbol:
+        return tc.fail(tc.INVALID_ARGS,
+                       "get_topic_story 需要 symbol；只想扫快讯用 get_news。", retryable=False)
+    code = str(resolve_symbol(symbol) or "").strip()
+    if not code:
+        return tc.fail(tc.INVALID_ARGS,
+                       f"无法识别股票：{symbol}。请先用 search_stock 解析代码。", retryable=False)
+    days = _int_arg(args, "days", 7, minimum=1, maximum=30)
+
+    found = news_knowledge.topics(code, days)
+    if found is None:
+        return tc.fail(tc.SOURCE_UNAVAILABLE,
+                       "新闻知识端点暂不可用，稍后再试；可先用 search_news 搜原始报道。",
+                       retryable=True)
+    slim = [{
+        "title": topic.get("title") or "",
+        "digest": topic.get("digest") or "",
+        "story": (topic.get("summary") or "")[:400],
+        "outlook": topic.get("outlook") or "",
+        "direction": topic.get("direction"),
+        "event_count": topic.get("event_count") or 0,
+        "source_count": topic.get("source_count") or 0,
+        "span": f"{str(topic.get('firstEventAt') or '')[:10]} ~ {str(topic.get('lastEventAt') or '')[:10]}",
+    } for topic in found if isinstance(topic, dict)]
+    data = {"symbol": code, "topics": slim,
+            "note": "专题由 AI 聚类撰稿生成，仅供参考，不构成投资建议。"}
+    if not slim:
+        data["note"] = f"该标的近 {days} 天没有已撰稿专题（不代表没有新闻）；可用 search_news 搜原始报道。"
+    return tc.ok(data)
+
+
+def _tool_get_stock_briefing(args):
+    """个股信息面简报：近 N 天事件（含分析/可信度）+ 专题 digest。"""
+    from agent import news_knowledge
+
+    symbol = str(args.get("symbol") or "").strip()
+    if not symbol:
+        return tc.fail(tc.INVALID_ARGS, "get_stock_briefing 需要 symbol。", retryable=False)
+    code = str(resolve_symbol(symbol) or "").strip()
+    if not code:
+        return tc.fail(tc.INVALID_ARGS,
+                       f"无法识别股票：{symbol}。请先用 search_stock 解析代码。", retryable=False)
+    days = _int_arg(args, "days", 7, minimum=1, maximum=30)
+
+    payload = news_knowledge.briefing(code, days)
+    if payload is None:
+        return tc.fail(tc.SOURCE_UNAVAILABLE,
+                       "新闻知识端点暂不可用，稍后再试；可先用 search_news。",
+                       retryable=True)
+    payload["note"] = ("事件与专题均来自资讯雷达落库数据；可信度 0-100（信源/措辞/交叉印证），"
+                       "综合判断由你在这些事实上做出。")
+    if not (payload.get("events") or []) and not (payload.get("topics") or []):
+        payload["note"] = f"近 {days} 天没有已落库的资讯记录，按'没有消息'处理，不要编造。"
+    return tc.ok(payload)
+
+
 # ==================== 声明表（唯一真相源） ====================
 
 REGISTRY = ToolRegistry()
@@ -1116,6 +1283,66 @@ _SPECS = (
             {"symbol": "600519", "days": 7},
         ),
     ),
+    # ===== 新闻知识工具（P1）：读雷达落库后的知识，不是外部搜索 =====
+    ToolSpec(
+        name="read_news_detail", namespace="news",
+        description=("Read one archived news event in full: title, original text (body), "
+                     "AI analysis (direction / impact / plain-language summary / risks & "
+                     "opportunities) and credibility with reasons. The event_id is the id "
+                     "shown in the news radar. If the item was never analyzed, a one-off "
+                     "deep analysis is generated in-call and marked ad_hoc_analysis. "
+                     "Use it when the user pastes/mentions one specific article and asks "
+                     "what it really means or whether it is credible."),
+        parameters=_obj({
+            "event_id": {"type": "integer", "minimum": 1,
+                         "description": "News event id from the radar page."},
+        }, ["event_id"]),
+        handler=_tool_read_news_detail,
+        layer=LAYER_INTEGRATION, scopes=(SCOPE_NEWS_READ,),
+        cost_class=COST_EXPENSIVE,      # 未分析条目会现场补一次 deep 解读
+        timeout_s=45.0, tags=("news",),
+        result_budget_chars=3600,
+        examples=({"event_id": 321},),
+    ),
+    ToolSpec(
+        name="get_topic_story", namespace="news",
+        description=("Get the story lines (event topics) of one A-share symbol: each is a "
+                     "cluster of reports about the SAME event, with an AI-written digest, "
+                     "timeline narrative (story), outlook and direction. Higher signal than "
+                     "raw news flashes — use it when the user asks 'what is going on with "
+                     "this stock lately' or wants the follow-up of an event they saw. "
+                     "Topics are AI-generated, cite them as such."),
+        parameters=_obj({
+            "symbol": {"type": "string",
+                       "description": "A-share code or name, e.g. 600519 / 茅台."},
+            "days": {"type": "integer", "default": 7, "minimum": 1, "maximum": 30,
+                     "description": "Look-back window in days."},
+        }, ["symbol"]),
+        handler=_tool_get_topic_story,
+        layer=LAYER_INTEGRATION, scopes=(SCOPE_NEWS_READ,),
+        timeout_s=12.0, tags=("news",),
+        result_budget_chars=3200,
+        examples=({"symbol": "600519", "days": 7},),
+    ),
+    ToolSpec(
+        name="get_stock_briefing", namespace="news",
+        description=("Get the news-side briefing of one A-share symbol: recent events "
+                     "(each with direction / impact / credibility / one-line summary) plus "
+                     "its story-line digests. The factual basis for answering '消息面怎么样 / "
+                     "现在适合关注吗' — synthesize the judgement yourself from these facts, "
+                     "and honor credibility scores (low-credibility items are leads, not facts)."),
+        parameters=_obj({
+            "symbol": {"type": "string",
+                       "description": "A-share code or name."},
+            "days": {"type": "integer", "default": 7, "minimum": 1, "maximum": 30,
+                     "description": "Look-back window in days."},
+        }, ["symbol"]),
+        handler=_tool_get_stock_briefing,
+        layer=LAYER_INTEGRATION, scopes=(SCOPE_NEWS_READ,),
+        timeout_s=12.0, tags=("news",),
+        result_budget_chars=4200,
+        examples=({"symbol": "600519", "days": 7},),
+    ),
     ToolSpec(
         name="get_financial_abstract", namespace="fundamental",
         description=("Get key financial metrics by report period (revenue, net profit, ROE, margins, "
@@ -1147,6 +1374,37 @@ _SPECS = (
         layer=LAYER_INTEGRATION, scopes=(SCOPE_MARKET_READ,),
         timeout_s=20.0, tags=("quote",),
         examples=({"symbols": ["600519", "000858", "000001"]},),
+    ),
+    ToolSpec(
+        name="list_user_strategies", namespace="strategy",
+        description=("List the current user's own strategies (id, name, symbol, paper-running "
+                     "state, decision mode). Always call this FIRST when the user refers to 'my "
+                     "strategy / 我的策略 / 复盘' to resolve which strategy id they mean — never "
+                     "guess an id. Read-only."),
+        parameters=_obj({}, []),
+        handler=_tool_list_strategies,
+        layer=LAYER_INTEGRATION, scopes=(SCOPE_STRATEGY_READ_OWN,),
+        timeout_s=10.0, tags=("strategy", "review"),
+        examples=({},),
+    ),
+    ToolSpec(
+        name="review_strategy", namespace="strategy",
+        description=("Fetch one strategy's paper-trading review bundle: config JSON, paper "
+                     "account, equity summary, recent trades, settlement traces (with a "
+                     "skip-reason histogram answering 'why no trades happened'), decision "
+                     "journal (said-vs-happened hit rate) and any registered expectation. "
+                     "All numbers are deterministic facts assembled by the backend — base your "
+                     "review strictly on them, do not invent metrics. Use it when the user asks "
+                     "how their strategy is doing / why it hasn't traded / what to improve."),
+        parameters=_obj({
+            "strategy_id": {"type": "integer", "minimum": 1,
+                            "description": "Strategy id from list_user_strategies."},
+        }, ["strategy_id"]),
+        handler=_tool_review_strategy,
+        layer=LAYER_INTEGRATION, scopes=(SCOPE_STRATEGY_READ_OWN,),
+        timeout_s=10.0, tags=("strategy", "review"),
+        result_budget_chars=5000,
+        examples=({"strategy_id": 10},),
     ),
     ToolSpec(
         name="memory_search", namespace="memory",

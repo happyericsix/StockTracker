@@ -104,6 +104,33 @@ def main() -> int:
           len(caixin) > 0 and all(not i["title"] and not i["published_at"] for i in caixin),
           f"{len(caixin)} 条")
 
+    print("\n[L2 多源快讯（2026-10-09 接入）]")
+    sina = news_client.fetch_sina_flash()
+    check("新浪快讯 > 0 且标题已从【】剥出",
+          len(sina) > 0 and all(i["title"] and i["published_at"] for i in sina),
+          f"{len(sina)} 条，示例: {sina[0]['title'][:30] if sina else ''}")
+    ths = news_client.fetch_ths_flash()
+    check("同花顺快讯 > 0 且字段齐全",
+          len(ths) > 0 and all(i["title"] and i["url"] and i["published_at"] for i in ths),
+          f"{len(ths)} 条")
+    futu = news_client.fetch_futu_flash()
+    check("富途快讯 > 0 且字段齐全",
+          len(futu) > 0 and all(i["title"] and i["url"] and i["published_at"] for i in futu),
+          f"{len(futu)} 条")
+    cctv = news_client.fetch_cctv_news(days=2)
+    check("新闻联播 > 0 且时间为日期+00:00:00",
+          len(cctv) > 0 and all(i["published_at"].endswith(" 00:00:00") for i in cctv),
+          f"{len(cctv)} 条（近2天）")
+
+    print("\n[跨源同事件归并]")
+    flash_pool = market + sina + ths + futu
+    merged = news_client.merge_cross_source([dict(i) for i in flash_pool])
+    corroborated = sum(1 for i in merged if i.get("also_reported_by"))
+    check("归并后条数 ≤ 原始条数", len(merged) <= len(flash_pool),
+          f"{len(flash_pool)} → {len(merged)}（其中 {corroborated} 条带跨源印证）")
+    check("被归并条目的源名保留在 also_reported_by",
+          all(i.get("also_reported_by") for i in merged if i.get("also_reported_by") is not None))
+
     print("\n[L3 研报]")
     reports = news_client.fetch_research_reports("600519", days=30)
     check("30 天窗口内研报 > 0", len(reports) > 0, f"{len(reports)} 条")

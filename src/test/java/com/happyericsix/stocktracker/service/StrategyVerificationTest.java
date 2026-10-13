@@ -55,7 +55,8 @@ class StrategyVerificationTest {
     private final ObjectMapper mapper = new ObjectMapper();
 
     private final StrategyService service = new StrategyService(
-            strategyRepository, strategyClient, userRepository, memoryFactService, memoryService);
+            strategyRepository, strategyClient, userRepository, memoryFactService, memoryService,
+            event -> { });
 
     private static User user() {
         return User.builder().id(1L).username("alice").password("x").email("a@b.c").build();
@@ -214,7 +215,7 @@ class StrategyVerificationTest {
     @Test
     void readingWithoutMemoryServiceIsSafe() {
         StrategyService withoutMemory = new StrategyService(strategyRepository, strategyClient,
-                userRepository, null, null);
+                userRepository, null, null, event -> { });
         assertNull(withoutMemory.latestVerification(1L, 10L));
         assertNull(withoutMemory.verifyMatrix(user(), null));
         verify(strategyClient, never()).backtestMatrix(anyString(), anyList(), anyInt(), anyString(), anyString());

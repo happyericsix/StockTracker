@@ -5,6 +5,7 @@ import com.happyericsix.stocktracker.dto.MemoryFactRequest;
 import com.happyericsix.stocktracker.dto.StrategyRequest;
 import com.happyericsix.stocktracker.entity.Strategy;
 import com.happyericsix.stocktracker.entity.User;
+import com.happyericsix.stocktracker.event.DecisionModeSwitchedEvent;
 import com.happyericsix.stocktracker.repository.StrategyRepository;
 import com.happyericsix.stocktracker.repository.UserRepository;
 import org.junit.jupiter.api.Test;
@@ -13,20 +14,25 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.ApplicationEventPublisher;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -48,6 +54,9 @@ class StrategyServiceTest {
 
     @Mock
     private MemoryService memoryService;
+
+    @Mock
+    private ApplicationEventPublisher eventPublisher;
 
     @InjectMocks
     private StrategyService strategyService;
@@ -72,6 +81,94 @@ class StrategyServiceTest {
                 () -> strategyService.updateStrategy("alice", 99L, request));
 
         verifyNoInteractions(strategyClient);
+    }
+
+    // ==================== 编辑面板的守门员（2026-10-10） ====================
+
+    private User alice() {
+        return User.builder().id(1L).username("alice")
+                .password("secret").email("alice@example.com").build();
+    }
+
+    private Strategy ownedStrategy(User owner) {
+        return Strategy.builder()
+                .id(42L).name("均线上穿").symbol("601988")
+                .configJson("{\"entry\":{\"logic\":\"all\",\"conditions\":[]}}")
+                .user(owner).build();
+    }
+
+    /** 改坏的规则进不了库：DSL 校验失败时拒绝保存（fail-closed），错误原文透传给用户。 */
+    @Test
+    void invalidConfigIsRejectedBeforeSave() {
+        User owner = alice();
+        Strategy strategy = ownedStrategy(owner);
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(owner));
+        when(strategyRepository.findByIdAndUserId(42L, owner.getId())).thenReturn(Optional.of(strategy));
+        when(strategyClient.validateConfig(any())).thenReturn(
+                mapper.readTree("{\"valid\":false,\"error\":\"stop_loss_pct 的 value 必须为负数\"}"));
+
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> strategyService.updateStrategy("alice", 42L,
+                        new StrategyRequest("改名", null,
+                                "{\"exit\":{\"conditions\":[{\"type\":\"stop_loss_pct\",\"value\":8}]}}")));
+
+        assertTrue(ex.getMessage().contains("必须为负数"), ex.getMessage());
+        verify(strategyRepository, never()).save(any());
+    }
+
+    /** 校验服务本身挂了也 fail-closed：宁可不保存，不把没验过的规则放进下一次结算。 */
+    @Test
+    void unavailableValidatorBlocksTheEdit() {
+        User owner = alice();
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(owner));
+        when(strategyRepository.findByIdAndUserId(42L, owner.getId()))
+                .thenReturn(Optional.of(ownedStrategy(owner)));
+        when(strategyClient.validateConfig(any())).thenThrow(new RuntimeException("python down"));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> strategyService.updateStrategy("alice", 42L,
+                        new StrategyRequest("改名", null, "{\"entry\":{}}")));
+        verify(strategyRepository, never()).save(any());
+    }
+
+    /** 换标的被拒绝：账户、成交历史、验证结论都挂在原标的上，换票=新建策略。 */
+    @Test
+    void changingSymbolIsRejected() {
+        User owner = alice();
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(owner));
+        when(strategyRepository.findByIdAndUserId(42L, owner.getId()))
+                .thenReturn(Optional.of(ownedStrategy(owner)));
+
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> strategyService.updateStrategy("alice", 42L,
+                        new StrategyRequest("改名", "600519", null)));
+        assertTrue(ex.getMessage().contains("换票"), ex.getMessage());
+        verifyNoInteractions(strategyClient);
+    }
+
+    /** 合法编辑：校验通过才落库，且 configUpdatedAt 打上口径分界点（改名不动它）。 */
+    @Test
+    void validEditStampsConfigUpdatedAt() {
+        User owner = alice();
+        Strategy strategy = ownedStrategy(owner);
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(owner));
+        when(strategyRepository.findByIdAndUserId(42L, owner.getId())).thenReturn(Optional.of(strategy));
+        when(strategyClient.validateConfig(any())).thenReturn(mapper.readTree("{\"valid\":true}"));
+        when(strategyRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        String newConfig = "{\"entry\":{\"logic\":\"all\",\"conditions\":"
+                + "[{\"type\":\"price_cross_ma\",\"direction\":\"above\",\"window\":30}]}}";
+        var response = strategyService.updateStrategy("alice", 42L,
+                new StrategyRequest("新名字", null, newConfig));
+
+        assertEquals("新名字", response.getName());
+        assertNotNull(strategy.getConfigUpdatedAt(), "规则变更必须打点（口径分界）");
+        assertEquals(newConfig, strategy.getConfigJson());
+
+        // 只改名不打点：口径分界线只属于"规则真的变了"这件事
+        strategy.setConfigUpdatedAt(null);
+        strategyService.updateStrategy("alice", 42L, new StrategyRequest("再改名", null, null));
+        assertEquals(null, strategy.getConfigUpdatedAt());
     }
 
     /**
@@ -115,8 +212,16 @@ class StrategyServiceTest {
         assertEquals("-18.3", sent.get(ObjectiveFactKeys.BACKTEST_MAX_DRAWDOWN_PCT).getObject());
         assertEquals("7", sent.get(ObjectiveFactKeys.BACKTEST_TRADE_COUNT).getObject());
         // 没出现在结果里的字段不许补 0：假的 0 会取代上一次真实的值
-        assertEquals(4, sent.size());
+        // +1 = 聚合叙事（run_summary，双层记忆 2026-10-09）：用户看到的"策略结论"
+        assertEquals(5, sent.size());
         assertEquals("strategy:42", sent.get(ObjectiveFactKeys.BACKTEST_TOTAL_RETURN_PCT).getSubject());
+        MemoryFactRequest story = sent.get(ObjectiveFactKeys.RUN_SUMMARY);
+        assertNotNull(story, "回测必须附一句话结论");
+        assertTrue(story.getObject().contains("总收益 12.5%"));
+        assertEquals("decision", story.getFactType());
+        assertTrue(story.getUserVisible(), "叙事是给用户看的，必须可见");
+        assertFalse(sent.get(ObjectiveFactKeys.BACKTEST_TOTAL_RETURN_PCT).getUserVisible(),
+                "裸指标只供取代链，不进用户门面");
     }
 
     /**
@@ -170,5 +275,42 @@ class StrategyServiceTest {
         assertNotNull(strategyService.runBacktest("alice", 42L));
 
         verify(memoryFactService, never()).recordObjective(any(), any(), any());
+    }
+
+    /**
+     * 切换决策来源只在**真正变化**时广播一次（模拟盘侧据此立刻开第一次委员会）。
+     *
+     * <p>重复设成同一个模式是空操作：多广播一次就会多开一次会（多花一次 LLM 往返），
+     * 而"确认一下"不该有任何副作用 —— 生效日也不许刷新（否则分界点往后漂）。
+     */
+    @Test
+    void switchingDecisionModeBroadcastsOnlyOnActualChange() {
+        User owner = User.builder().id(1L).username("alice")
+                .password("secret").email("alice@example.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(42L).name("MA cross").symbol("600519").configJson("{}")
+                .user(owner).paperEnabled(true).decisionMode("rule").build();
+
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(owner));
+        when(strategyRepository.findByIdAndUserId(42L, 1L)).thenReturn(Optional.of(strategy));
+        when(strategyRepository.save(any(Strategy.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        strategyService.switchDecisionMode("alice", 42L, "agent");
+
+        ArgumentCaptor<Object> captor = ArgumentCaptor.forClass(Object.class);
+        verify(eventPublisher, times(1)).publishEvent(captor.capture());
+        DecisionModeSwitchedEvent event = (DecisionModeSwitchedEvent) captor.getValue();
+        assertEquals(42L, event.strategyId());
+        assertEquals("agent", event.mode());
+        assertTrue(event.paperEnabled());
+
+        // 再"切"一次同样的模式：不广播、不刷新生效日
+        strategyService.switchDecisionMode("alice", 42L, "agent");
+        verify(eventPublisher, times(1)).publishEvent(any(Object.class));
+        assertNotNull(strategy.getDecisionModeSince());
+        LocalDate since = strategy.getDecisionModeSince();
+        strategyService.switchDecisionMode("alice", 42L, "agent");
+        assertEquals(since, strategy.getDecisionModeSince());
     }
 }

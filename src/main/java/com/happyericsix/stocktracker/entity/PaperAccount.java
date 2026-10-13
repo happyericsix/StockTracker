@@ -34,6 +34,16 @@ public class PaperAccount {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    /**
+     * 乐观锁：盘中结算（45s 节流的事件链）与手动 startPaper 可以并发跑同一策略，
+     * 没有 @Version 时两边都基于旧账户做 check-then-act（如 lastBarTime 判重、
+     * isHolding 判定），后提交者静默覆盖先提交者的写入 —— 典型后果是同一根 bar
+     * 买两次。冲突改为抛 {@code OptimisticLockException}（上层捕获记日志、下一轮重试），
+     * 比"钱的账本被静默双写"好得多。
+     */
+    @Version
+    private Long version;
+
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "user_id", nullable = false)
     private User user;

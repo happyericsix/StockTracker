@@ -104,7 +104,7 @@ class StrategyVerificationLiveTest {
         when(memoryService.currentSessionKey(1L)).thenReturn("1:live");
         StrategyService verification = new StrategyService(
                 mock(StrategyRepository.class), realStrategyClient,
-                mock(UserRepository.class), factService, memoryService);
+                mock(UserRepository.class), factService, memoryService, event -> { });
 
         Strategy strategy = strategy();
         JsonNode result = verification.verifyMatrix(strategy.getUser(), strategy);
@@ -124,7 +124,7 @@ class StrategyVerificationLiveTest {
         MemoryFactService readingFacts = mock(MemoryFactService.class);
         when(readingFacts.activeFactValues(eq(1L), eq("strategy:999"), anyList())).thenReturn(facts);
         StrategyService reading = new StrategyService(mock(StrategyRepository.class), realStrategyClient,
-                mock(UserRepository.class), readingFacts, memoryService);
+                mock(UserRepository.class), readingFacts, memoryService, event -> { });
         StrategyService.VerificationSummary summary = reading.latestVerification(1L, 999L);
 
         assertNotNull(summary);
@@ -142,23 +142,20 @@ class StrategyVerificationLiveTest {
                 .build();
         when(traceService.listForDay(eq(999L), any(LocalDate.class))).thenReturn(List.of(blocking));
 
-        MessageService messageService = mock(MessageService.class);
         PaperReviewReportService report = new PaperReviewReportService(traceService,
                 mock(com.happyericsix.stocktracker.repository.PaperEquitySnapshotRepository.class),
-                reading, messageService, mock(com.happyericsix.stocktracker.service.ExpectationService.class));
+                reading, mock(com.happyericsix.stocktracker.service.ExpectationService.class));
 
         PaperAccount account = PaperAccount.builder().id(1L)
                 .initialCapital(new java.math.BigDecimal("100000.00"))
                 .cash(new java.math.BigDecimal("100000.00"))
                 .shares(java.math.BigDecimal.ZERO)
                 .equity(new java.math.BigDecimal("100000.00")).build();
-        report.composeDailyReport(strategy, account, LocalDate.now());
+        String text = report.dailyReportText(strategy, account, LocalDate.now());
+        org.junit.jupiter.api.Assertions.assertNotNull(text);
 
-        ArgumentCaptor<String> content = ArgumentCaptor.forClass(String.class);
-        verify(messageService).saveReport(any(), eq(PaperReviewReportService.TYPE_PAPER_REPORT),
-                eq("paper_daily:999:" + LocalDate.now()), eq("600519"), content.capture());
+        org.junit.jupiter.api.Assertions.assertTrue(text.contains("样本外验证"), text);
 
-        String text = content.getValue();
         System.out.println("=== 真实端到端生成的复盘报告 ===\n" + text);
         // 报告必须同时引用**痕迹**与**真实验证结论**
         assertTrue(text.contains(PaperTradeTraceResponse.sentenceFor(

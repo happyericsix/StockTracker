@@ -21,13 +21,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import news_client  # noqa: E402
 _REAL_MARKET_OPINION = news_client.fetch_market_opinion
+# autouse 桩会把模块名换成空实现，直接调用真实函数的用例必须用这份"进口时快照"
+# （与 _REAL_MARKET_OPINION 同一模式）
+_REAL_SINA_FLASH = news_client.fetch_sina_flash
+_REAL_THS_FLASH = news_client.fetch_ths_flash
+_REAL_FUTU_FLASH = news_client.fetch_futu_flash
+_REAL_CCTV_NEWS = news_client.fetch_cctv_news
 
 
 # 大盘口径的 search_news 默认会带舆情源（股吧人气榜）；测试必须离线，
 # 统一桩掉它的上游取数（个别用例需要真实形状时自己再覆盖这个桩）。
+# 2026-10-09 多源化：四条新快讯源同理桩成空 —— 大盘口径的既有用例
+# 仍然只关心"东财快讯源返回了什么"，不该因为多了几家源就真打网络。
 @pytest.fixture(autouse=True)
 def _no_market_opinion(monkeypatch):
     monkeypatch.setattr(news_client, "fetch_market_opinion", lambda limit=10: [])
+    monkeypatch.setattr(news_client, "fetch_sina_flash", lambda: [])
+    monkeypatch.setattr(news_client, "fetch_ths_flash", lambda: [])
+    monkeypatch.setattr(news_client, "fetch_futu_flash", lambda: [])
+    monkeypatch.setattr(news_client, "fetch_cctv_news", lambda days=2: [])
 
 # ==================== 工具 ====================
 
@@ -83,6 +95,40 @@ CAIXIN_ROW = {
     "tag": "周刊提前读",
     "summary": "【本文系数据通用户提前专享】战事给这一中东经济枢纽带来了什么？",
     "url": "https://database.caixin.com/2026-09-19/102486442.html?cxapp_link=true",
+}
+
+# ===== 2026-10-09 多源化新增：形状逐字取自当日的真实网络实测 =====
+
+SINA_PUBLISHED = days_ago(0, with_time=True)
+SINA_ROW = {
+    # 新浪只有 [时间, 内容]：标题藏在内容的【】里，没有链接
+    "时间": SINA_PUBLISHED,
+    "内容": "【皇岗口岸周日上午举行开通仪式】香港特区政府保安局局长邓炳强今日（9日）表示，"
+            "皇岗口岸定于10月12日正式开通运行。",
+}
+
+THS_PUBLISHED = days_ago(0, with_time=True)
+THS_ROW = {
+    "标题": "中广核贝谷两款自主CT安检设备获中国民航局使用许可",
+    "内容": "近日，由中广核核技术发展股份有限公司受托管理的中广核贝谷科技有限公司自主研发的"
+            "BGCT‑0824中型CT安检设备正式取得《中国民用航空局安全检查设备使用许可证》。",
+    "发布时间": THS_PUBLISHED,
+    "链接": "https://news.10jqka.com.cn/20261009/c680515671.shtml",
+}
+
+FUTU_PUBLISHED = days_ago(0, with_time=True)
+FUTU_ROW = {
+    "标题": "凯投宏观：主要政府债券收益率曲线趋陡空间有限",
+    "内容": "凯投宏观亚洲市场主管托马斯·马修斯表示，尽管近期期限溢价明显上升。",
+    "发布时间": FUTU_PUBLISHED,
+    "链接": "https://news.futunn.com/flash/1000769402/capital-economics-limited-scope",
+}
+
+CCTV_ROW = {
+    # date 是 YYYYMMDD 纯日期，没有时刻也没有链接
+    "date": "20261008",
+    "title": "【新思想引领新征程】以人的需求为原点 激活消费大市场",
+    "content": "习近平总书记强调，要把扩大消费同改善人民生活品质结合起来。" + "长正文。" * 300,
 }
 
 
@@ -242,6 +288,115 @@ def test_fetch_caixin_news_has_no_title_or_time(monkeypatch):
     assert items[0]["content"]
 
 
+# ==================== 多源快讯（2026-10-09 接入，列名逐字取自当日实测） ====================
+
+
+def test_fetch_sina_flash_extracts_title_from_brackets(monkeypatch):
+    """新浪只有 [时间, 内容]：标题必须从内容的【】里剥出来，不能拿整段正文当标题。"""
+    _patch(monkeypatch, "stock_info_global_sina", df([SINA_ROW]))
+    items = _REAL_SINA_FLASH()
+    assert len(items) == 1
+    item = items[0]
+    assert item["title"] == "皇岗口岸周日上午举行开通仪式"
+    assert item["content"].startswith("【皇岗口岸")     # 正文保持原样（含前缀）
+    assert item["source_name"] == "新浪财经"
+    assert item["source_level"] == news_client.LEVEL_MEDIA
+    assert item["published_at"] == SINA_PUBLISHED
+    assert item["url"] == ""                            # 源站不给链接，去重靠三元组
+
+
+def test_fetch_sina_flash_title_fallback_without_brackets(monkeypatch):
+    """无【】前缀的条目：裁正文开头当标题（有时间可排序，缺的只是短标题）。"""
+    _patch(monkeypatch, "stock_info_global_sina",
+           df([{"时间": SINA_PUBLISHED, "内容": "没有括号前缀的一条快讯正文"}]))
+    item = _REAL_SINA_FLASH()[0]
+    assert item["title"].startswith("没有括号前缀")
+
+
+def test_fetch_ths_flash_maps_measured_columns(monkeypatch):
+    _patch(monkeypatch, "stock_info_global_ths", df([THS_ROW]))
+    item = _REAL_THS_FLASH()[0]
+    assert item["title"] == THS_ROW["标题"]
+    assert item["url"] == THS_ROW["链接"]
+    assert item["source_name"] == "同花顺"
+    assert item["published_at"] == THS_PUBLISHED
+
+
+def test_fetch_futu_flash_maps_measured_columns(monkeypatch):
+    _patch(monkeypatch, "stock_info_global_futu", df([FUTU_ROW]))
+    item = _REAL_FUTU_FLASH()[0]
+    assert item["title"] == FUTU_ROW["标题"]
+    assert item["url"] == FUTU_ROW["链接"]
+    assert item["source_name"] == "富途"
+    assert item["published_at"] == FUTU_PUBLISHED
+
+
+def test_fetch_futu_flash_title_fallback_when_blank(monkeypatch):
+    """实测 50 条里约一半标题为空（正文完整）：必须裁正文当标题，否则整条被落库丢弃。"""
+    _patch(monkeypatch, "stock_info_global_futu",
+           df([{"标题": "", "内容": "摩根大通：将霍尼韦尔科技的目标价从255美元下调至240美元。",
+                "发布时间": FUTU_PUBLISHED, "链接": "https://news.futunn.com/flash/1"}]))
+    item = _REAL_FUTU_FLASH()[0]
+    assert item["title"].startswith("摩根大通")
+    assert item["content"]
+
+
+def test_fetch_cctv_news_builds_date_only_published(monkeypatch):
+    """新闻联播：date 纯日期（YYYYMMDD）→ published_at 补 00:00:00（与公告同"同日无序"语义）。"""
+    _patch(monkeypatch, "news_cctv", df([CCTV_ROW]))
+    item = _REAL_CCTV_NEWS(days=1)[0]
+    assert item["source_name"] == "央视·新闻联播"
+    assert item["event_type_raw"] == "新闻联播"
+    assert item["published_at"].endswith(" 00:00:00")
+    assert len(item["published_at"]) == 19
+    assert item["url"] == ""
+    # 全文数千字必须裁剪（_event 统一裁到 NEWS_ITEM_CHARS，超长补省略号 +1），否则批量解读输入失控
+    assert len(item["content"]) <= news_client.NEWS_ITEM_CHARS + 1
+    assert item["content"].endswith("…")
+
+
+def test_fetch_cctv_news_caps_days(monkeypatch):
+    """窗口传得再大最多拉 CCTV_MAX_DAYS 天（每天一次 HTTP），老政策稿没有增量。"""
+    calls = []
+
+    def fake_news_cctv(date=None):
+        calls.append(date)
+        return df([dict(CCTV_ROW, date=date)])
+
+    monkeypatch.setattr(news_client.akshare, "news_cctv", fake_news_cctv)
+    items = _REAL_CCTV_NEWS(days=30)
+    assert len(calls) == news_client.CCTV_MAX_DAYS
+    assert len(items) == news_client.CCTV_MAX_DAYS
+
+
+def test_fetch_cctv_news_single_day_failure_degrades(monkeypatch):
+    """某一天接口挂了只丢那一天，其它天的稿照常返回。"""
+    def flaky(date=None):
+        if date == datetime.now().strftime("%Y%m%d"):
+            raise RuntimeError("今天还没更新")
+        return df([CCTV_ROW])
+
+    monkeypatch.setattr(news_client.akshare, "news_cctv", flaky)
+    items = _REAL_CCTV_NEWS(days=2)
+    assert len(items) == 1
+
+
+@pytest.mark.parametrize("call,akshare_name", [
+    (lambda: _REAL_SINA_FLASH(), "stock_info_global_sina"),
+    (lambda: _REAL_THS_FLASH(), "stock_info_global_ths"),
+    (lambda: _REAL_FUTU_FLASH(), "stock_info_global_futu"),
+    (lambda: _REAL_CCTV_NEWS(days=1), "news_cctv"),
+])
+def test_new_sources_fail_soft(monkeypatch, call, akshare_name):
+    """多源化的核心契约：新源挂掉返回空，绝不拖垮其它源（与既有源同一约定）。
+
+    走 `_REAL_*` 快照 —— autouse 桩盖住了模块名，直接调 `news_client.fetch_*`
+    测到的是桩而不是真实实现（那样的"绿"是假的）。
+    """
+    _patch(monkeypatch, akshare_name, error=RuntimeError("502"))
+    assert call() == []
+
+
 def test_fetch_research_reports_window_and_content(monkeypatch):
     """研报 771 条里只留窗口内的；机构+评级+行业要拼进 content（研报无正文）。"""
     fresh = dict(REPORT_ROW, **{"日期": days_ago(3)})
@@ -372,6 +527,159 @@ def test_search_news_macro_only_when_no_symbol(monkeypatch):
     macro = news_client.search_news(days=30)
     assert macro["counts"]["market"] == 1
     assert any("数据中心" in i["title"] for i in macro["items"])
+
+
+def test_search_news_symbol_scope_skips_flash_sources(monkeypatch):
+    """个股口径不该碰任何大盘快讯源 —— 多余的 HTTP 只是个股页的纯等待。"""
+    def boom(*args, **kwargs):
+        raise AssertionError("个股口径不该调用大盘快讯源")
+
+    monkeypatch.setattr(news_client, "fetch_market_news", boom)
+    monkeypatch.setattr(news_client, "fetch_sina_flash", boom)
+    monkeypatch.setattr(news_client, "fetch_ths_flash", boom)
+    monkeypatch.setattr(news_client, "fetch_futu_flash", boom)
+    monkeypatch.setattr(news_client, "fetch_cctv_news", boom)
+    _patch_notices(monkeypatch, [])
+    _patch(monkeypatch, "stock_news_em", df([]))
+    _patch(monkeypatch, "stock_research_report_em", df([]))
+    assert news_client.search_news(symbol="600519", days=30)["items"] == []
+
+
+def test_search_news_market_scope_aggregates_new_sources(monkeypatch):
+    """大盘口径聚合四家媒体源（东财/新浪/同花顺/新闻联播），counts 同口径。
+    2026-10-12 富途移出循环（JS 空壳页抓不到原文）：移除源必须同步改这里，
+    防止"悄悄加回来/悄悄少一家"无人知晓。"""
+    from news_client import LEVEL_FORUM, LEVEL_MEDIA
+
+    def item(title, source, published, url="", symbol="", level=LEVEL_MEDIA, **extra):
+        return {"symbol": symbol, "name": "", "title": title, "content": title,
+                "url": url, "source_level": level, "source_name": source,
+                "event_type_raw": "", "published_at": published, **extra}
+
+    monkeypatch.setattr(news_client, "fetch_market_news", lambda: [
+        item("东财独家的快讯", "东方财富·全球快讯", days_ago(0, with_time=True),
+             url="https://eastmoney.com/a/1")])
+    monkeypatch.setattr(news_client, "fetch_sina_flash", lambda: [
+        item("新浪独家的快讯", "新浪财经", days_ago(0, with_time=True))])
+    monkeypatch.setattr(news_client, "fetch_ths_flash", lambda: [
+        item("同花顺独家的快讯", "同花顺", days_ago(0, with_time=True),
+             url="https://10jqka.com/a/1")])
+    monkeypatch.setattr(news_client, "fetch_cctv_news", lambda days=2: [
+        item("新闻联播的政策稿", "央视·新闻联播", days_ago(1) + " 00:00:00")])
+    _patch_notices(monkeypatch, [])
+    result = news_client.search_news(days=3)
+    titles = [i["title"] for i in result["items"]]
+    assert len(titles) == 4
+    assert result["counts"]["market"] == 4
+    assert result["counts"].get("forum", 0) == 0
+    assert LEVEL_FORUM not in [i["source_level"] for i in result["items"]]
+
+
+# ==================== 跨源同事件归并（2026-10-09 多源化） ====================
+
+
+def _flash(title, source, published, url="", symbol=""):
+    return {"symbol": symbol, "name": "", "title": title, "content": title,
+            "url": url, "source_level": news_client.LEVEL_MEDIA, "source_name": source,
+            "event_type_raw": "", "published_at": published}
+
+
+SAME_EVENT_TITLE = "央行开展3000亿元MLF操作中标利率维持不变"
+OTHER_EVENT_TITLE = "某公司获得国家科技进步一等奖"
+
+
+def test_merge_cross_source_collapses_same_event():
+    """同一通稿被三家报道 → 保留一条（有 URL 的最早那条），其余名字进 also_reported_by。"""
+    def hours_ago(h):
+        return (datetime.now() - timedelta(hours=h)).strftime("%Y-%m-%d %H:%M:%S")
+
+    items = [
+        _flash(SAME_EVENT_TITLE, "新浪财经", hours_ago(3)),
+        _flash(SAME_EVENT_TITLE, "东方财富·全球快讯", hours_ago(2),
+               url="https://eastmoney.com/a/mlf"),
+        _flash(SAME_EVENT_TITLE, "同花顺", hours_ago(1),
+               url="https://10jqka.com/a/mlf"),
+        _flash(OTHER_EVENT_TITLE, "富途", hours_ago(0),
+               url="https://futunn.com/a/other"),
+    ]
+    merged = news_client.merge_cross_source(items)
+    assert len(merged) == 2
+    kept = next(i for i in merged if i["title"] == SAME_EVENT_TITLE)
+    assert kept["url"] == "https://eastmoney.com/a/mlf"      # 有 URL + 时间最早
+    assert set(kept["also_reported_by"]) == {"新浪财经", "同花顺"}
+    other = next(i for i in merged if i["title"] == OTHER_EVENT_TITLE)
+    assert "also_reported_by" not in other                   # 独家报道不带这个键
+
+
+def test_merge_cross_source_keeps_different_events():
+    """标题不相似的条目绝不能被归并 —— 归并判错等于把独立新闻从时间轴上抹掉。"""
+    items = [
+        _flash("央行开展3000亿元MLF操作", "新浪财经", days_ago(0, with_time=True)),
+        _flash("证监会发布上市公司分红新规", "同花顺", days_ago(0, with_time=True)),
+    ]
+    assert len(news_client.merge_cross_source(items)) == 2
+
+
+def test_merge_cross_source_time_window():
+    """48 小时外的"标题相似"是后续进展，该各自成条，不归并。"""
+    now = days_ago(0, with_time=True)
+    three_days_ago = days_ago(3, with_time=True)
+    items = [
+        _flash(SAME_EVENT_TITLE, "新浪财经", three_days_ago),
+        _flash(SAME_EVENT_TITLE, "同花顺", now),
+    ]
+    assert len(news_client.merge_cross_source(items)) == 2
+
+
+def test_merge_cross_source_ignores_undated_and_stock_items():
+    """无时间的条目无从验证"相近时间"，不归并（保守）；个股条目不参与归并。"""
+    now = days_ago(0, with_time=True)
+    items = [
+        _flash(SAME_EVENT_TITLE, "新浪财经", ""),               # 无时间
+        _flash(SAME_EVENT_TITLE, "同花顺", now),
+        _flash(SAME_EVENT_TITLE + "茅台", "富途", now, symbol="SH600519"),  # 个股
+        dict(_flash(SAME_EVENT_TITLE, "东财", now), symbol="SH600519"),
+    ]
+    merged = news_client.merge_cross_source(items)
+    assert len(merged) == 4
+
+
+def test_merge_cross_source_preserves_order():
+    """输出保持输入顺序（调用方已按时间排好），只删不重排。
+
+    两条"独立事件"的标题必须真的不相似：中文 2-gram 下"甲公司中标海外大单"
+    与"乙公司发布年度业绩预告"只有零星公共 gram，不会被误并。
+    """
+    now = days_ago(0, with_time=True)
+    items = [
+        _flash("甲公司中标海外光伏大单", "富途", now, url="https://f/a"),
+        _flash(SAME_EVENT_TITLE, "新浪财经", now),
+        _flash("乙公司发布年度业绩预告", "同花顺", now, url="https://t/b"),
+        _flash(SAME_EVENT_TITLE, "同花顺", now, url="https://t/a"),
+    ]
+    merged = news_client.merge_cross_source(items)
+    assert [i["title"] for i in merged] == [
+        "甲公司中标海外光伏大单", "乙公司发布年度业绩预告", SAME_EVENT_TITLE]
+
+
+def test_search_news_merges_cross_source_duplicates(monkeypatch):
+    """端到端：三家报道同一事件 → 雷达只显示一条，counts 与列表一致（不吞也不虚增）。"""
+    now = days_ago(0, with_time=True)
+    monkeypatch.setattr(news_client, "fetch_market_news", lambda: [
+        _flash(SAME_EVENT_TITLE, "东方财富·全球快讯", now, url="https://e/1")])
+    monkeypatch.setattr(news_client, "fetch_sina_flash", lambda: [
+        _flash(SAME_EVENT_TITLE, "新浪财经", now)])
+    monkeypatch.setattr(news_client, "fetch_ths_flash", lambda: [
+        _flash(SAME_EVENT_TITLE, "同花顺", now, url="https://t/1")])
+    monkeypatch.setattr(news_client, "fetch_futu_flash", lambda: [])
+    monkeypatch.setattr(news_client, "fetch_cctv_news", lambda days=2: [])
+    _patch_notices(monkeypatch, [])
+
+    result = news_client.search_news(days=3)
+    assert len(result["items"]) == 1
+    assert set(result["items"][0]["also_reported_by"]) == {"新浪财经", "同花顺"}
+    assert result["counts"]["market"] == 1
+    assert sum(result["counts"].values()) == len(result["items"])
 
 
 def test_search_news_reports_missing_forum_source(monkeypatch):
@@ -860,10 +1168,15 @@ def test_fetch_market_opinion_retries_once_then_degrades(monkeypatch):
 
 def test_search_news_without_symbol_includes_opinion(monkeypatch):
     """大盘口径：舆情源进聚合（此前是'暂无数据源'的空占位）。"""
+    # published_at 用"几小时前"动态生成：写死日历日期的话，测试一过窗口期就
+    # 被 days 过滤掉、永远失败（2026-10-06 全量回归时就是这么挂的）。
+    from datetime import datetime, timedelta
+
+    recent = (datetime.now() - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
     monkeypatch.setattr(news_client, "fetch_market_opinion", lambda: [
         {"symbol": "", "name": "", "title": "股吧人气榜", "content": "前十",
          "url": "", "source_level": 4, "source_name": "东方财富·股吧",
-         "event_type_raw": "", "published_at": "2026-10-02 12:00:00"}])
+         "event_type_raw": "", "published_at": recent}])
     monkeypatch.setattr(news_client, "fetch_announcements", lambda: [])
     monkeypatch.setattr(news_client, "fetch_market_news", lambda: [])
     out = news_client.search_news(symbol="", keyword="", types=[4], days=1)

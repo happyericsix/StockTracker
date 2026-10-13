@@ -40,6 +40,8 @@ from akshare_client import (
     normalize_symbol,
     resolve_symbol,
 )
+# 标题 2-gram 相似度：跨源归并判"同一事件"用（与 news_credibility 的交叉印证同一实现）
+from text_similarity import title_similarity, title_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +62,18 @@ SOURCES_WITH_DATA = (LEVEL_NOTICE, LEVEL_MEDIA, LEVEL_REPORT)
 NOTICE_MAX_PER_DAY = 2000
 MARKET_MAX = 200
 REPORT_MAX = 50
+# ===== 2026-10-09 多源化新增的快讯源上限（实测条数：新浪 20 / 同花顺 20 / 富途 50）=====
+# 2026-10-12 富途移出采集循环：其落地页是 JS 空壳（混淆脚本，实测静态抽取率 0/95），
+# 且 futunn.com 不在抓取白名单 —— 留在循环里只产出"永远抓不到原文"的噪音条目。
+# 解析器与单测保留（口径⑥）：哪天富途给出静态页或开放 API，把它加回循环即可。
+SINA_MAX = 20
+THS_MAX = 20
+FUTU_MAX = 50
+# 新闻联播每天一次 HTTP、约 15 条/日。窗口默认拉 2 天（今天 + 昨天：今天的稿要
+# 19:30 后才齐，昨天才是完整的一天），硬上限 3 天 —— 政策面时效以"天"计，
+# 多拉纯属请求浪费。full text 很长（数千字），由 _event 统一裁到 NEWS_ITEM_CHARS。
+CCTV_MAX_DAYS = 3
+CCTV_DEFAULT_DAYS = 2
 # 单次搜索返回的条目上限。宏观查询（symbol 为空）会把当日全市场公告都收进来
 # （实测 1032 条），不加这道闸就会把上千条 JSON 推过 HTTP —— 而 N1 的职责是
 # "取最近的资讯"，历史与全量检索是 N3 落库之后的事（库才是档案）。
@@ -86,6 +100,14 @@ _MAP = {
     # 财新要闻（stock_news_main_cx）：实测只有 tag / summary / url，
     # **没有标题、没有发布时间** —— 所以它不能进时间轴（见 fetch_caixin_news）。
     "caixin": {"tag": "tag", "content": "summary", "url": "url"},
+    # ===== 2026-10-09 多源化新增（列名均为当日真实网络实测）=====
+    # 新浪全球快讯：只有 [时间, 内容]，**无标题无链接** —— 标题从内容的【】里剥。
+    "sina": {"published": "时间", "content": "内容"},
+    # 同花顺全球财经直播 / 富途快讯：字段与东财快讯同形（标题/内容/发布时间/链接）。
+    "ths": {"title": "标题", "content": "内容", "published": "发布时间", "url": "链接"},
+    "futu": {"title": "标题", "content": "内容", "published": "发布时间", "url": "链接"},
+    # 新闻联播文字稿：date 是 YYYYMMDD 纯日期（无时刻、无链接）。
+    "cctv": {"title": "title", "content": "content", "published": "date"},
 }
 
 _NAN_LIKE = {"", "nan", "none", "null", "nat", "—", "-"}
@@ -486,6 +508,142 @@ def fetch_caixin_news() -> list[dict]:
     ) for _, row in _frame_rows(df)]
 
 
+# ==================== L2 媒体·多源快讯（2026-10-09 接入） ====================
+#
+# <h3>为什么必须多源</h3>
+# 此前快讯只有东财一家：接口一抖动整个雷达就瞎，而且 news_credibility 的
+# 交叉印证维度（"另一家不同信源讲同一件事"）在单源时代**永远触发不了**——
+# 它是为多源设计的证据维度，缺的不是规则是数据。新增三家快讯 + 新闻联播后，
+# 同一事件天然会被多家报道，归并证据（also_reported_by）随之产生。
+#
+# <h3>源画像（2026-10-09 实测）</h3>
+# | 源 | 条数 | 列 | 特点 |
+# |---|---|---|---|
+# | 新浪全球快讯 | 20 | 时间/内容 | 无标题无链接，标题从【】里剥；最快的一档 |
+# | 同花顺直播 | 20 | 标题/内容/发布时间/链接 | 字段最全；偏产业端 |
+# | 富途快讯 | 50 | 标题/内容/发布时间/链接 | 量最大；含海外宏观观点（凯投宏观这类） |
+# | 新闻联播 | ~15/日 | date/title/content | 政策/宏观权威源；date 纯日期无时刻 |
+#
+# 财联社（stock_info_global_cls）当日实测 404 已失效，不在接入列表里；
+# 等上游修复再评估，不为此升级 akshare（会动全部既有接口映射）。
+
+
+def _sina_title(content: str) -> str:
+    """从新浪快讯的 `【标题】正文` 里剥标题。
+
+    剥不出（极少数无【】前缀的条目）时裁正文前 60 字当标题 —— 与财新
+    "没标题就不进时间轴"不同，新浪有时间可以排序，缺的只是可扫读的短标题，
+    用正文开头当标题是**如实转写**而不是编造。
+    """
+    text = str(content or "").strip()
+    match = re.match(r"^【([^】]{1,120})】", text)
+    if match:
+        return match.group(1).strip()
+    return _clip_text(text, 60)
+
+
+def fetch_sina_flash() -> list[dict]:
+    """新浪全球财经快讯（大盘口径）。失败返回 `[]`，从不抛异常。"""
+    try:
+        df = akshare.stock_info_global_sina()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("新浪快讯取数失败: %s", exc)
+        return []
+
+    columns = _MAP["sina"]
+    return [_event(
+        title=_sina_title(_row_get(row, columns["content"])),
+        content=_row_get(row, columns["content"]),
+        url="",                       # 源站就不给链接，去重靠 (symbol,标题,时间) 三元组兜底
+        source_level=LEVEL_MEDIA,
+        source_name="新浪财经",
+        published_at=parse_datetime(_row_get(row, columns["published"])),
+    ) for _, row in _frame_rows(df)][:SINA_MAX]
+
+
+def fetch_ths_flash() -> list[dict]:
+    """同花顺全球财经直播（大盘口径）。失败返回 `[]`，从不抛异常。"""
+    try:
+        df = akshare.stock_info_global_ths()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("同花顺快讯取数失败: %s", exc)
+        return []
+
+    columns = _MAP["ths"]
+    return [_event(
+        title=_row_get(row, columns["title"]),
+        content=_row_get(row, columns["content"]),
+        url=_row_get(row, columns["url"]),
+        source_level=LEVEL_MEDIA,
+        source_name="同花顺",
+        published_at=parse_datetime(_row_get(row, columns["published"])),
+    ) for _, row in _frame_rows(df)][:THS_MAX]
+
+
+def fetch_futu_flash() -> list[dict]:
+    """富途快讯（大盘口径，含海外宏观观点）。失败返回 `[]`，从不抛异常。
+
+    2026-10-09 实测：50 条里约一半 `标题` 列为空（正文完整，多为海外机构观点的
+    短讯）。标题兜底裁正文开头 60 字（与新浪无【】前缀时同一处理）——
+    没有 title 的条目会在 Java 落库时被整条丢弃（NOT NULL），那等于白抓。
+    """
+    try:
+        df = akshare.stock_info_global_futu()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("富途快讯取数失败: %s", exc)
+        return []
+
+    columns = _MAP["futu"]
+    items = []
+    for _, row in _frame_rows(df):
+        content = _row_get(row, columns["content"])
+        title = _row_get(row, columns["title"]) or _clip_text(content, 60)
+        if not title:
+            continue          # 标题正文双空：脏行，跳过（_event 也救不了它）
+        items.append(_event(
+            title=title,
+            content=content,
+            url=_row_get(row, columns["url"]),
+            source_level=LEVEL_MEDIA,
+            source_name="富途",
+            published_at=parse_datetime(_row_get(row, columns["published"])),
+        ))
+    return items[:FUTU_MAX]
+
+
+def fetch_cctv_news(days: int = CCTV_DEFAULT_DAYS) -> list[dict]:
+    """新闻联播文字稿（政策/宏观权威源，大盘口径）。失败返回 `[]`，从不抛异常。
+
+    `date` 是 `YYYYMMDD` 纯日期：published_at 补 `00:00:00`，与公告同
+    "同日无序"语义（排序时同级同日条目顺序不定，下游不要当因果序）。
+    每天一次 HTTP，最多 `CCTV_MAX_DAYS` 天 —— 窗口传得再大也截住，
+    老政策稿对"今日信息面"没有增量。
+    """
+    span = max(1, min(int(days or 1), CCTV_MAX_DAYS))
+    items: list[dict] = []
+    columns = _MAP["cctv"]
+    for offset in range(span):
+        day = (datetime.now(CN_TZ) - timedelta(days=offset)).strftime("%Y%m%d")
+        try:
+            df = akshare.news_cctv(date=day)
+        except Exception as exc:  # noqa: BLE001 - 单日失败不拖垮其它天
+            logger.warning("新闻联播取数失败 day=%s: %s", day, exc)
+            continue
+        for _, row in _frame_rows(df):
+            # date 列就是请求的 day（YYYYMMDD），直接构造，不走 parse_datetime
+            # （"20261008" 不含分隔符，parse_datetime 对它返回 ""）
+            items.append(_event(
+                title=_row_get(row, columns["title"]),
+                content=_row_get(row, columns["content"]),
+                url="",
+                source_level=LEVEL_MEDIA,
+                source_name="央视·新闻联播",
+                event_type_raw="新闻联播",
+                published_at=f"{day[:4]}-{day[4:6]}-{day[6:8]} 00:00:00",
+            ))
+    return items
+
+
 # ==================== L3 研报 ====================
 
 
@@ -799,6 +957,121 @@ def dedup(items: list[dict]) -> list[dict]:
     return result
 
 
+# ==================== 跨源同事件归并（2026-10-09 多源化新增） ====================
+
+# 判"同一事件"的相似度门槛。比 news_credibility 交叉印证的 0.45 高：
+# 印证判错只是多加一次分，归并判错会**把一条独立新闻从时间轴上抹掉**——
+# 代价不对称，门槛必须更严。实测同一通稿在东财/新浪/同花顺的标题几乎逐字相同
+# （Jaccard > 0.8），0.55 仍然留足余量而不至于吞掉 merely 相似的两条。
+MERGE_SAME_EVENT_THRESHOLD = 0.55
+# 同一事件的跨源报道都发生在相近时间里；超过这个时间窗的"标题相似"更可能是
+# 后续进展（该各自成条）而不是转载。
+MERGE_TIME_WINDOW_HOURS = 48
+# also_reported_by 最多记几家（可信度 reason 有截断，存太多只是浪费列宽）
+ALSO_REPORTED_MAX = 4
+
+
+def _merge_keep_key(item: dict):
+    """归并组里"保留哪条"的确定性排序键。
+
+    优先级：① 级别小的（公告 > 研报 > 媒体的责任主体排序）；② 有 URL 的
+    （URL 是落库去重主键，无 URL 的条目靠三元组兜底、稳定性差一档）；
+    ③ 时间早的（同一事件保留最早的报道，"谁先发的"本身是信息）。
+    """
+    return (item.get("source_level") or LEVEL_MEDIA,
+            0 if normalize_url(item.get("url", "")) else 1,
+            item.get("published_at") or "")
+
+
+def _merge_time(item: dict) -> datetime | None:
+    text = str(item.get("published_at") or "").strip()
+    try:
+        return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def merge_cross_source(items: list[dict]) -> list[dict]:
+    """把多家快讯源报道的**同一事件**归并成一条（只对无标的的快讯生效）。
+
+    <h3>为什么 URL 去重在这里不够</h3>
+    同一通稿在东财/新浪/同花顺/富途的 URL 各不相同（新浪甚至没有 URL），
+    URL 键对它们完全无效 —— 不归并的话，雷达大盘页一条新闻会显示三四遍，
+    这正是 spec §1.2 反对的资讯噪音。
+
+    <h3>为什么只归并"无标的"的快讯</h3>
+    个股口径条目本来就少（≤10 条新闻 + 公告 + 研报），且"公告与媒体报道标题相似"
+    往往意味着它们**本该各自成条**：公告是"公司正式披露了这个事实"，
+    报道是"媒体解读了这个事实"，两条独立记录，归并会丢掉其中一个维度。
+
+    <h3>归并的证据去哪了</h3>
+    被归并的条目不丢名字：`also_reported_by` 记下其它报道源，供
+    news_credibility 的交叉印证维度加分（"另有 N 家信源报道同一事件"）——
+    这是单源时代永远触发不了的证据通道。
+
+    <h3>顺序契约</h3>
+    输出保持输入顺序（调用方已按时间排好），只删条目、不重排。
+    """
+    indexed = [(i, item) for i, item in enumerate(items)
+               if not str(item.get("symbol") or "").strip()]
+    if len(indexed) < 2:
+        return list(items)
+
+    tokens = {i: title_tokens(item.get("title")) for i, item in indexed}
+    moments = {i: _merge_time(item) for i, item in indexed}
+    parent = {i: i for i, _ in indexed}
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        parent[find(a)] = find(b)
+
+    window = timedelta(hours=MERGE_TIME_WINDOW_HOURS)
+    for pos, (i, item) in enumerate(indexed):
+        moment = moments[i]
+        if moment is None or not tokens[i]:
+            continue    # 无时间无法验证"相近时间"，无 token 无从判相似 —— 都不归并（保守）
+        for j, other in indexed[pos + 1:]:
+            other_moment = moments[j]
+            if other_moment is None or not tokens[j]:
+                continue
+            if abs(moment - other_moment) > window:
+                continue
+            if title_similarity(tokens[i], tokens[j]) >= MERGE_SAME_EVENT_THRESHOLD:
+                union(i, j)
+
+    groups: dict[int, list[tuple[int, dict]]] = {}
+    for i, item in indexed:
+        groups.setdefault(find(i), []).append((i, item))
+
+    dropped: set[int] = set()
+    extra_reporters: dict[int, list[str]] = {}
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda pair: _merge_keep_key(pair[1]))
+        keep_index, kept = members[0]
+        names = sorted({str(m.get("source_name") or "").strip()
+                        for _, m in members[1:]
+                        if str(m.get("source_name") or "").strip()
+                        and str(m.get("source_name") or "").strip() != str(kept.get("source_name") or "").strip()})
+        if names:
+            extra_reporters[keep_index] = names[:ALSO_REPORTED_MAX]
+        dropped.update(i for i, _ in members[1:])
+
+    merged = []
+    for index, item in enumerate(items):
+        if index in dropped:
+            continue
+        reporters = extra_reporters.get(index)
+        merged.append(dict(item, also_reported_by=reporters) if reporters else item)
+    return merged
+
+
 def search_news(symbol: str = "", keyword: str = "", types: list[int] | None = None,
                 days: int = 7, with_body: bool = False, only_relevant: bool = False) -> dict:
     """N1 的唯一对外入口：聚合 → 去重 → 排序 → 截窗口（可选补公告正文）。
@@ -867,9 +1140,17 @@ def search_news(symbol: str = "", keyword: str = "", types: list[int] | None = N
             collected.extend(news)
             counts["news"] = len(news)
         else:
-            market = fetch_market_news()
-            collected.extend(market)
-            counts["market"] = len(market)
+            # 大盘口径：东财快讯 + 新浪/同花顺 + 新闻联播（多源化，2026-10-09；
+            # 2026-10-12 富途移出——JS 空壳页抓不到原文，见 FUTU_MAX 处注释）。
+            # 每家独立失败（fetch_* 内 warning + 返回 []），一家挂了不拖垮其余。
+            # 同一通稿的跨源重复在下面的 merge_cross_source 里归并。
+            for fetch_flash in (fetch_market_news, fetch_sina_flash, fetch_ths_flash):
+                flash = fetch_flash()
+                collected.extend(flash)
+                counts["market"] += len(flash)
+            cctv = fetch_cctv_news(days=int(days))
+            collected.extend(cctv)
+            counts["market"] += len(cctv)
 
     if LEVEL_REPORT in wanted and symbol:
         reports = fetch_research_reports(symbol, days=max(int(days), 1))
@@ -882,6 +1163,12 @@ def search_news(symbol: str = "", keyword: str = "", types: list[int] | None = N
                  if keyword_text in (item.get("title", "") + item.get("content", "")).lower()]
     items.sort(key=_sort_key, reverse=True)
     items = dedup(items)
+    # 跨源归并放在 URL 去重之后、正文补抓/截断之前：
+    # - 之后的理由：URL 去重先干掉"同一篇的多个入口参数"，归并只处理"不同 URL 的转载"；
+    # - 之前的理由：先归并才不会给同一条公告的转载们重复补正文、浪费截断名额。
+    # 只在无标的（大盘快讯）口径做 —— 个股条目少且"公告+报道"本该各自成条（见函数 docstring）。
+    if not symbol:
+        items = merge_cross_source(items)
 
     # 补正文放在**去重之后**：同一份公告可能同时来自公告源与媒体转述，
     # 先去重能让"补几次正文"等于"真的有几条不同公告"，省掉重复请求。

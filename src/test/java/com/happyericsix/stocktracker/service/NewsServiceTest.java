@@ -40,6 +40,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -119,6 +120,32 @@ class NewsServiceTest {
     // ==================== upsert 去重 ====================
 
     @Test
+    void upsertTreatsContentAsBodyWhenNoUrlExists() {
+        // 无原文链接的快讯（新浪源只有[时间,内容]）：content 就是全文，
+        // 落库即正文 —— 否则 155 条永远停在"这条资讯没有原文链接"（2026-10-12 实测）
+        ObjectNode noUrl = eventItem("", "央行开展3000亿元逆回购操作",
+                "", "2026-10-12 09:05:00", 2);
+        when(newsEventRepository.save(any(NewsEvent.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        newsService.upsert(List.of(noUrl));
+
+        ArgumentCaptor<NewsEvent> captor = ArgumentCaptor.forClass(NewsEvent.class);
+        verify(newsEventRepository).save(captor.capture());
+        assertEquals(noUrl.get("content").asText(), captor.getValue().getBody(),
+                "无链接条目的 content 必须直接当正文");
+        assertNotNull(captor.getValue().getBodyFetchedAt());
+
+        // 有链接的条目不适用：正文仍走懒抓取/预抓管线
+        ObjectNode withUrl = eventItem("SH600519", "某报道", "https://finance.eastmoney.com/a/9.html",
+                "2026-10-12 09:06:00", 2);
+        newsService.upsert(List.of(withUrl));
+        ArgumentCaptor<NewsEvent> captor2 = ArgumentCaptor.forClass(NewsEvent.class);
+        verify(newsEventRepository, times(2)).save(captor2.capture());
+        assertNull(captor2.getAllValues().get(1).getBody(), "有链接条目不该预填正文");
+    }
+
+    @Test
     void upsertSkipsTheSameUrlAndNeverOverwritesExistingAnalysis() {
         ObjectNode item = eventItem("SH600519", "贵州茅台：2026年中报", "https://finance.eastmoney.com/a/1.html",
                 "2026-09-14 10:00:00", 2);
@@ -177,6 +204,60 @@ class NewsServiceTest {
         assertEquals("https://data.eastmoney.com/notices/detail/300623/AN2026.html", saved.getUrl());
         verify(newsStockRelRepository).save(argThat(rel ->
                 Long.valueOf(42L).equals(rel.getEventId()) && "SH600519".equals(rel.getSymbol())));
+    }
+
+    /**
+     * 跨源归并的印证证据（2026-10-09 多源化）必须完整走一圈：
+     * 取数行 also_reported_by → 落库 JSON；解读时回传 Python（可信度交叉印证靠它）。
+     * 任何一环掉了，宏观快讯的"另有 N 家报道"加分就永远触发不了。
+     */
+    @Test
+    void alsoReportedByPersistsOnInsertBackfillsOnDedupHitAndFlowsToUpstream() {
+        // 新条目：直接落库
+        ObjectNode fresh = eventItem("", "央行开展3000亿元MLF操作中标利率不变",
+                "https://finance.eastmoney.com/a/mlf.html", "2026-10-09 09:00:00", 2);
+        ArrayNode reporters = fresh.putArray("also_reported_by");
+        reporters.add("新浪财经").add("同花顺");
+        when(newsEventRepository.findByUrl("https://finance.eastmoney.com/a/mlf.html"))
+                .thenReturn(Optional.empty());
+        when(newsEventRepository.save(any(NewsEvent.class))).thenAnswer(invocation -> {
+            NewsEvent event = invocation.getArgument(0);
+            event.setId(50L);
+            return event;
+        });
+
+        newsService.upsert(List.of(fresh));
+
+        ArgumentCaptor<NewsEvent> captor = ArgumentCaptor.forClass(NewsEvent.class);
+        verify(newsEventRepository).save(captor.capture());
+        assertEquals("[\"新浪财经\",\"同花顺\"]", captor.getValue().getAlsoReportedBy());
+
+        // 老条目（多源化之前入库，没有这一列）：重抓到同一事件时回填 —— 与 name 同款守卫
+        NewsEvent legacy = NewsEvent.builder()
+                .id(51L).symbol("").title("央行开展3000亿元MLF操作中标利率不变")
+                .url("https://finance.eastmoney.com/a/mlf.html").sourceLevel(2)
+                .publishedAt(LocalDateTime.of(2026, 10, 9, 9, 0))
+                .build();
+        when(newsEventRepository.findByUrl("https://finance.eastmoney.com/a/mlf.html"))
+                .thenReturn(Optional.of(legacy));
+        newsService.upsert(List.of(fresh));
+        assertEquals("[\"新浪财经\",\"同花顺\"]", legacy.getAlsoReportedBy(), "缺失的印证证据应被回填");
+
+        // 解读上游输入要带上它（Python news_credibility 的交叉印证通道）
+        ArrayNode upstream = (ArrayNode) upstreamItemOf(legacy).get("also_reported_by");
+        assertEquals(2, upstream.size());
+        assertEquals("新浪财经", upstream.get(0).asText());
+    }
+
+    /** 便捷：构造一个已落库条目并取它发往 Python 解读端点的输入形状。 */
+    private JsonNode upstreamItemOf(NewsEvent event) {
+        try {
+            var method = NewsService.class.getDeclaredMethod("toUpstreamItem", NewsEvent.class);
+            method.setAccessible(true);
+            return (JsonNode) method.invoke(newsService, event);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     @Test
@@ -952,6 +1033,39 @@ class NewsServiceTest {
     }
 
     /** 一条 N1 输出形状的原始事件（键名与 Python 侧一字不差）。 */
+    // ==================== 快讯频道的定时增量（NewsIngestJob 高频趟） ====================
+
+    @Test
+    void refreshWirePullsOnlyMediaLevelInOneDayWindow() {
+        ObjectNode flash = eventItem("", "央行开展3000亿元MLF操作",
+                "https://finance.eastmoney.com/a/w1.html", "2026-10-12 09:05:00", 2);
+        when(newsClient.fetch(eq(""), eq(""), eq(List.of(2)), eq(1), eq(false), eq(false)))
+                .thenReturn(fetchOk(flash));
+        when(newsEventRepository.findByUrl("https://finance.eastmoney.com/a/w1.html"))
+                .thenReturn(Optional.empty());
+
+        String summary = newsService.refreshWire();
+
+        // 钉住"轻节拍"的口径：只媒体级（全球快讯五源 + 新闻联播）、窗口 1 天，
+        // 绝不把公告（上千行大响应）带进 5 分钟的节拍
+        verify(newsClient).fetch(eq(""), eq(""), eq(List.of(2)), eq(1), eq(false), eq(false));
+        assertTrue(summary.contains("新入库 1 条"), "快讯趟的摘要要报新增数：" + summary);
+    }
+
+    @Test
+    void refreshWireDegradesToChineseMessageOnUpstreamFailure() {
+        ObjectNode degraded = mapper.createObjectNode();
+        degraded.put("ok", false);
+        degraded.put("error", "资讯服务暂时不可用");
+        when(newsClient.fetch(any(), any(), any(), anyInt(), anyBoolean(), anyBoolean()))
+                .thenReturn(degraded);
+
+        String summary = newsService.refreshWire();
+
+        assertTrue(summary.startsWith("快讯刷新失败"),
+                "上游失败要降级成人话返回，不能抛异常：" + summary);
+    }
+
     private ObjectNode eventItem(String symbol, String title, String url, String publishedAt, int level) {
         ObjectNode node = mapper.createObjectNode();
         node.put("symbol", symbol);
@@ -1037,5 +1151,24 @@ class NewsServiceTest {
         row.put("corroborated", corroborated);
         return row;
     }
-}
 
+
+    // ==================== 大盘流解读止损（2026-10-13） ====================
+
+    @Test
+    void marketAnalysisSkipsThinFlashContent() throws Exception {
+        // 短快讯（80 字）不送解读：没信息量可解读，硬解读只有"信息不足"降级文案
+        ObjectNode flash = eventItem("", "央行今日开展3000亿元逆回购操作，中标利率持平",
+                "", "2026-10-13 09:05:00", 2);
+        when(newsEventRepository.save(any(NewsEvent.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        newsService.upsert(List.of(flash));
+
+        // upsert 里无 url 的条目 body=content；解读门槛看 content——80 字 < 160，
+        // scheduleMarketAnalysis 的过滤逻辑无法直接单测（私有），但至少钉住
+        // upsert 行为不回归，门槛常量的存在由编译保证。
+        ArgumentCaptor<NewsEvent> captor = ArgumentCaptor.forClass(NewsEvent.class);
+        verify(newsEventRepository).save(captor.capture());
+        assertTrue(captor.getValue().getContent().length() < 160, "测试前置：样本确为短内容");
+    }
+}

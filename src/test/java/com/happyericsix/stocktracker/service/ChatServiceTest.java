@@ -1,5 +1,6 @@
 package com.happyericsix.stocktracker.service;
 
+import com.happyericsix.stocktracker.dto.ChatSendRequest;
 import com.happyericsix.stocktracker.entity.Message;
 import com.happyericsix.stocktracker.entity.User;
 import com.happyericsix.stocktracker.repository.MessageRepository;
@@ -17,6 +18,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -136,5 +138,20 @@ class ChatServiceTest {
 
     private Message message(String type, String content) {
         return Message.builder().type(type).content(content).build();
+    }
+
+    /**
+     * 聚焦过滤（agent 互通 P2）：只有 type=news_event 且 eventId 齐备才透传 ——
+     * null / 未知 type / 缺 id 都按普通聊天处理（Python 侧对收到的 focus 同判）。
+     */
+    @Test
+    void focusFilterOnlyAcceptsCompleteNewsEvent() {
+        assertTrue(ChatService.isNewsFocus(new ChatSendRequest.Focus("news_event", 321L)),
+                "完整的 news_event 应透传");
+        assertFalse(ChatService.isNewsFocus(null), "无聚焦 = 普通聊天");
+        assertFalse(ChatService.isNewsFocus(new ChatSendRequest.Focus("unknown_type", 1L)),
+                "未知 type 不透传（前端拼错字段不能炸掉聊天）");
+        assertFalse(ChatService.isNewsFocus(new ChatSendRequest.Focus("news_event", null)),
+                "缺 eventId 不透传");
     }
 }

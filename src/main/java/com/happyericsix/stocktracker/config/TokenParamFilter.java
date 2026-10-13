@@ -10,6 +10,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.Enumeration;
+import java.util.Set;
 
 /**
  * EventSource 无法携带 Authorization 请求头，前端把 JWT 放在查询参数 token 中。
@@ -18,7 +19,11 @@ import java.util.Enumeration;
  */
 public class TokenParamFilter extends OncePerRequestFilter {
 
-    private static final String STREAM_PATH = "/api/v1/messages/stream";
+    /** 所有走 EventSource 的 SSE 流端点（新加流端点必须登记在这里，否则前端连不上）。 */
+    private static final Set<String> STREAM_PATHS = Set.of(
+            "/api/v1/messages/stream",
+            "/api/v1/stocks/stream"       // 行情实时推送（2026-10-08 快车道）
+    );
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
@@ -26,7 +31,7 @@ public class TokenParamFilter extends OncePerRequestFilter {
         String path = request.getRequestURI();
         String token = request.getParameter("token");
 
-        if (path != null && path.endsWith(STREAM_PATH)
+        if (path != null && STREAM_PATHS.stream().anyMatch(path::endsWith)
                 && token != null && !token.isBlank()
                 && request.getHeader("Authorization") == null) {
 

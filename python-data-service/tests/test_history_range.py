@@ -197,6 +197,42 @@ def test_the_request_carries_the_page_range_and_the_adjust_mode(monkeypatch):
     assert parts[5] == akshare_client.ADJUST_MODE
 
 
+def test_a_page_ending_today_is_fetched_with_an_open_end(monkeypatch):
+    """终点落在"今天"的那页要用**开放终点**取数（2026-10-09 事故）。
+
+    实测腾讯的封闭区间查询在特定根数下会悄悄丢掉最新一根：结算端点按
+    as-of 带 end=当天 取数，15:30 / 16:10 / 17:10 三次结算与晚间补跑全部
+    no_bar，而"最近 N 根"查询却看得到当天 bar —— 差别只在终点是否封死
+    （同一区间 limit 640 返回 596 根止于前一日，end 留空才返回 597 根含当天）。
+    as-of 语义由本地裁剪兜底（下一条用例盯着）。
+    """
+    seen = []
+    _patch_source(monkeypatch, _bars_for, seen)
+
+    bars = get_history("600519", "2023-01-01", TODAY, "day")
+
+    assert bars, "应当取到数据"
+    last_page_end = seen[-1].split(",")[3]
+    assert last_page_end == "", "覆盖今天的页必须开放终点，否则最新一根可能被源头丢掉"
+
+
+def test_open_end_fetch_still_clips_to_the_requested_as_of_date(monkeypatch):
+    """开放终点多取到的数据不能越过 as-of：本地裁剪是第二道防线。"""
+    def generous(param):
+        # 最后一页（开放终点）连"明天"都给回来 —— 本地必须裁掉
+        if param.split(",")[3] == "":
+            return _payload(["2026-10-08", "2026-10-09", "2026-10-10"])
+        return _bars_for(param)
+
+    seen = []
+    _patch_source(monkeypatch, generous, seen)
+
+    bars = get_history("600519", "2023-01-01", TODAY, "day")
+    dates = [bar["date"] for bar in bars]
+    assert dates, "应当取到数据"
+    assert dates[-1] <= TODAY, "as-of：不许有越过请求终点的数据"
+
+
 def test_a_long_range_issues_one_request_per_page_and_merges_them(monkeypatch):
     """端到端的分页：三年半的区间要发多页请求，合并后是一整条序列。
 

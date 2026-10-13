@@ -29,6 +29,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
 
 import java.net.URI;
@@ -81,6 +82,9 @@ public class NewsService {
 
     /** 1公告 2媒体 3研报 4舆情（与 Python 的 LEVEL_* 一致）。 */
     private static final List<Integer> ALL_LEVELS = List.of(1, 2, 3, 4);
+
+    /** 快讯频道的信源集：只媒体级 —— 全球快讯五源 + 新闻联播，不含公告/研报。 */
+    private static final List<Integer> WIRE_TYPES = List.of(2);
 
     private static final int DEFAULT_SEARCH_DAYS = 7;
     /**
@@ -559,12 +563,51 @@ public class NewsService {
         if (pending.isEmpty()) {
             return 0;
         }
+        // 公告（source_level=1）解读前先同步补正文：公告 API 快（~1s/条）且成功率高，
+        // 而"有原文可读"正是阅读理解式解读的原料。媒体页抽取慢且成败参半，
+        // 交给后台预抓慢慢来，不挡解读。每条失败只跳过（详见 prefetchBodies 注释）。
+        pending.stream()
+                .filter(event -> event.getSourceLevel() != null && event.getSourceLevel() == 1)
+                .forEach(event -> {
+                    try {
+                        getOrFetchBody(event.getId());
+                    } catch (Exception e) {
+                        log.debug("公告正文补抓失败 id={}：{}", event.getId(), e.getMessage());
+                    }
+                });
         int changed = 0;
         for (int start = 0; start < pending.size(); start += ANALYZE_BATCH_SIZE) {
             List<NewsEvent> batch = pending.subList(start, Math.min(start + ANALYZE_BATCH_SIZE, pending.size()));
             changed += analyzeAndPersist(batch, "batch");
         }
         return changed;
+    }
+
+    /**
+     * 某标的的时间轴事件（时间倒序、带上限）——给 agent 侧能力（新闻工具 / 委员会
+     * 证据包 / 内部查询端点）复用的公共入口。不带用户语境（不做 enrich/analyze）：
+     * 消费方要么只要库里的静态分析，要么自己决定要不要花 LLM。
+     */
+    public List<NewsEvent> timelineEvents(String symbol, int days, int limit) {
+        int window = resolveDays(days, DEFAULT_TIMELINE_DAYS);
+        return loadTimelineEvents(symbolVariants(symbol), windowStart(window)).stream()
+                .sorted(newestFirst())
+                .limit(Math.max(1, limit))
+                .toList();
+    }
+
+    /** 单条事件（agent 工具 / 聚焦注入用）；不存在返回 null。 */
+    public NewsEvent eventById(Long id) {
+        return id == null ? null : newsEventRepository.findById(id).orElse(null);
+    }
+
+    /**
+     * 市场信息面的**缓存值**（不触发生成）：agent/证据包场景只消费已有结论，
+     * 不该因为一次决策顺带付一次 LLM 综合的钱。没有缓存返回 null（fail-open）。
+     */
+    public JsonNode marketReadIfCached() {
+        String cached = marketReadCache.getIfPresent("market");
+        return cached == null || cached.isBlank() ? null : readTreeQuietly(cached);
     }
 
     /** 时间轴的两条来源合并：自有 ∪ 关联（关联表让宏观/行业资讯能进个股页）。 */
@@ -712,6 +755,77 @@ public class NewsService {
      * <p>返回 {@code null} 表示拿不到（模型不可用 / 没有事件 / 输出无法解析）。
      * **调用方据此隐藏整块**，而不是显示一段空话。
      */
+    /** 市场综合缓存：全站共用一份，10 分钟过期（快讯集合变化不频繁，语义上也不该分钟级变）。 */
+    private final Cache<String, String> marketReadCache = Caffeine.newBuilder()
+            .expireAfterWrite(Duration.ofMinutes(10))
+            .maximumSize(2)
+            .build();
+
+    /**
+     * 市场级综合（资讯雷达顶部的"今日信息面"）：把近 48h 快讯按主题关联。
+     *
+     * <p>与 {@link #stockRead} 的分工：那个按标的、由个股页触发；这个全站一份。
+     * 输入优先用**已解读**的条目（转述比标题信息量大），不足时用标题补位——
+     * 一屏全是标题时也值得给个"这批消息在说什么"的归纳，而不是空着。
+     *
+     * @return 综合结果 JSON（read/themes/conflicts）；不可用返回 null（前端隐藏整块）
+     */
+    public JsonNode marketRead() {
+        String cached = marketReadCache.getIfPresent("market");
+        if (cached != null) {
+            return cached.isBlank() ? null : readTreeQuietly(cached);
+        }
+        List<NewsEvent> recent = newsEventRepository.findByPublishedAtGreaterThanEqualOrderByPublishedAtDesc(
+                LocalDateTime.now().minusHours(48), PageRequest.of(0, 60));
+        if (recent.isEmpty()) {
+            marketReadCache.put("market", "");
+            return null;
+        }
+        List<NewsEvent> analyzedFirst = new ArrayList<>(recent.stream()
+                .filter(e -> !isBlank(e.getPlainSummary())).toList());
+        if (analyzedFirst.size() < 12) {
+            // 已解读的不够一屏：用未解读的标题补位（排在已解读之后）
+            recent.stream().filter(e -> isBlank(e.getPlainSummary()))
+                    .limit(40 - analyzedFirst.size())
+                    .forEach(analyzedFirst::add);
+        }
+        List<JsonNode> items = analyzedFirst.stream().map(this::toSynthesisItem).toList();
+        JsonNode response = newsClient.synthesizeMarket(items);
+        JsonNode data = NewsClient.isOk(response) ? response.path("data") : null;
+        boolean usable = data != null && data.path("ok").asBoolean(false)
+                && !data.path("read").asText("").isBlank();
+        if (!usable) {
+            // 失败不缓存（下次进来重试），但也别让前端空转
+            return null;
+        }
+        String serialized = data.toString();
+        marketReadCache.put("market", serialized);
+        return data;
+    }
+
+    /** 综合输入的紧凑形状：时间/来源级别/来源/标题/摘要（已解读的用转述）。 */
+    private JsonNode toSynthesisItem(NewsEvent event) {
+        ObjectNode node = mapper.createObjectNode();
+        node.put("published_at", event.getPublishedAt() == null ? "" : event.getPublishedAt().format(PUBLISHED_AT));
+        node.put("source_level", event.getSourceLevel() == null ? 2 : event.getSourceLevel());
+        node.put("source_name", event.getSourceName() == null ? "" : event.getSourceName());
+        node.put("title", event.getTitle() == null ? "" : event.getTitle());
+        String summary = event.getPlainSummary();
+        if (isBlank(summary)) {
+            summary = event.getContent();
+        }
+        node.put("summary", summary == null ? "" : summary);
+        return node;
+    }
+
+    private JsonNode readTreeQuietly(String json) {
+        try {
+            return mapper.readTree(json);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     public String stockRead(String username, String symbol, int days) {
         if (symbol == null || symbol.isBlank()) {
             throw new IllegalArgumentException("symbol 不能为空");
@@ -855,6 +969,43 @@ public class NewsService {
         throw new IllegalStateException(NewsClient.errorOf(response));
     }
 
+    // ==================== 正文预抓（后台补齐"可阅读的原文"） ====================
+
+    private static final int PREFETCH_BATCH = 4;
+    private static final Duration PREFETCH_RETRY_AFTER = Duration.ofHours(12);
+    private static final int PREFETCH_WINDOW_DAYS = 14;
+
+    /**
+     * 后台预抓一批正文（由 {@code NewsBodyPrefetchJob} 周期调用）。
+     *
+     * <p>为什么必须有它：懒抓取（{@link #getOrFetchBody}）只在用户点开时触发，
+     * 2026-10-05 实测 527 条事件只有 4 条有正文——阅读理解式的解读没有原料。
+     * 预抓把候选在后台慢慢补齐，用户点开时正文已在库里。
+     *
+     * <p>节流：每次 {@value #PREFETCH_BATCH} 条、任务间隔由 Job 控制（30s），
+     * 对信源约 8 篇/分钟封顶；失败 12 小时后才重试（见仓储查询注释）。
+     *
+     * @return 本批成功抓到的条数（失败安静跳过——getOrFetchBody 已记录时间戳）
+     */
+    public int prefetchBodies() {
+        List<NewsEvent> candidates = newsEventRepository.findBodyPrefetchCandidates(
+                LocalDateTime.now().minusDays(PREFETCH_WINDOW_DAYS),
+                LocalDateTime.now().minus(PREFETCH_RETRY_AFTER),
+                PageRequest.of(0, PREFETCH_BATCH));
+        int fetched = 0;
+        for (NewsEvent event : candidates) {
+            try {
+                if (!getOrFetchBody(event.getId()).isBlank()) {
+                    fetched++;
+                }
+            } catch (Exception e) {
+                // 预抓是增强功能：单条失败只跳过（时间戳已写，冷却后自然会重试）
+                log.debug("正文预抓失败 id={} url={}：{}", event.getId(), event.getUrl(), e.getMessage());
+            }
+        }
+        return fetched;
+    }
+
     public String refresh(String day) {
         int window = refreshWindowDays(day);
         // 手动增量是运维动作，不做相关度过滤（要的是"当天全市场都进来"）
@@ -868,6 +1019,32 @@ public class NewsService {
         int added = upsert(items);
         log.info("资讯增量刷新：窗口 {} 天，抓取 {} 条，新入库 {} 条", window, items.size(), added);
         return "增量刷新完成：抓取 " + items.size() + " 条，新入库 " + added + " 条（窗口 " + window + " 天）";
+    }
+
+    /**
+     * 快讯频道的定时增量（{@code NewsIngestJob} 高频趟专用）：只拉媒体级 ——
+     * 全球快讯五源 + 新闻联播，每源独立失败互不拖垮（见 Python search_news 的媒体分支）。
+     *
+     * <p>与 {@link #refresh} 的分工：那个是全量趟（公告是上千行的大响应），配日级节拍；
+     * 这个是分钟级节拍，必须轻 —— 窗口 1 天（{@code _in_window} 是 24 小时口径，
+     * 跨夜条目不会被日界切掉），去重落库同一套 {@link #upsert}，纯 HTTP、零 LLM 成本。
+     */
+    public String refreshWire() {
+        JsonNode response = newsClient.fetch("", "", WIRE_TYPES, 1, false, false);
+        if (!NewsClient.isOk(response)) {
+            String error = NewsClient.errorOf(response);
+            log.warn("快讯增量刷新失败：{}", error);
+            return "快讯刷新失败：" + error;
+        }
+        List<JsonNode> items = itemsOf(response);
+        int added = upsert(items);
+        log.info("快讯增量刷新：抓取 {} 条，新入库 {} 条", items.size(), added);
+        return "快讯刷新完成：抓取 " + items.size() + " 条，新入库 " + added + " 条";
+    }
+
+    /** 新资讯计数（资讯页"新消息"横幅）：{@code since} 之后发布的条数，纯读库。 */
+    public long countSince(LocalDateTime since) {
+        return newsEventRepository.countByPublishedAtGreaterThanEqual(since);
     }
 
     // ==================== 落库 ====================
@@ -919,6 +1096,14 @@ public class NewsService {
                     existing.setName(incomingName);
                     newsEventRepository.save(existing);
                 }
+                // 印证证据同款回填：多源化之前入库的老条目没有这一列，
+                // 重抓到同一事件（现在带跨源归并证据）时补上 —— 可信度的
+                // 交叉印证维度靠它，缺了这条信息就永远停在"单源"档。
+                String incomingReporters = reportersJson(item);
+                if (isBlank(existing.getAlsoReportedBy()) && !isBlank(incomingReporters)) {
+                    existing.setAlsoReportedBy(incomingReporters);
+                    newsEventRepository.save(existing);
+                }
                 // 关联行补一次（幂等）：同一条资讯被媒体转述后再来，也要能在这只票的时间轴里被找到
                 ensureRel(existing);
                 continue;
@@ -933,10 +1118,19 @@ public class NewsService {
                     .sourceLevel(sourceLevelOf(item))
                     .sourceName(clip(text(item, "source_name"), 64))
                     .eventTypeRaw(clip(text(item, "event_type_raw"), 64))
+                    .alsoReportedBy(reportersJson(item))
                     .publishedAt(publishedAt)
                     // 文件夹初值：关键词规则打标（解读管线之后可用模型的 category 覆写）
                     .category(NewsCategory.classify(symbol, title, text(item, "content")))
                     .build();
+            // 无原文链接的条目（新浪快讯只有[时间,内容]、股吧条目）：content 就是全文
+            // —— 直接当正文落库，点开即读。否则永远停在"这条资讯没有原文链接"，
+            // 而"原文"这个概念对它们根本不存在（2026-10-12：14 天窗口 155 条全空）。
+            if (event.getUrl() == null && event.getContent() != null
+                    && !event.getContent().isBlank()) {
+                event.setBody(event.getContent());
+                event.setBodyFetchedAt(LocalDateTime.now());
+            }
             NewsEvent saved = newsEventRepository.save(event);
             ensureRel(saved);
             added++;
@@ -1252,11 +1446,18 @@ public class NewsService {
         node.put("name", event.getName() == null ? "" : event.getName());
         node.put("title", event.getTitle() == null ? "" : event.getTitle());
         node.put("content", event.getContent() == null ? "" : event.getContent());
+        // 原文正文是解读的主要阅读材料（2026-10-05 前根本没传——模型只见过标题+摘要，
+        // 大批量回「信息不足」的直接原因）。截断 4000 字，Python 侧再截 3000。
+        String body = event.getBody() == null ? "" : event.getBody();
+        node.put("body", body.length() > 4000 ? body.substring(0, 4000) : body);
         node.put("url", event.getUrl() == null ? "" : event.getUrl());
         node.put("source_level", event.getSourceLevel() == null ? 2 : event.getSourceLevel());
         node.put("source_name", event.getSourceName() == null ? "" : event.getSourceName());
         node.put("event_type_raw", event.getEventTypeRaw() == null ? "" : event.getEventTypeRaw());
         node.put("published_at", event.getPublishedAt() == null ? "" : event.getPublishedAt().format(PUBLISHED_AT));
+        // 跨源印证证据回传：Python 的可信度引擎用它给交叉印证维度加分（单源时代没有这条通道）
+        ArrayNode reporters = node.putArray("also_reported_by");
+        stringList(readTreeQuietly(event.getAlsoReportedBy())).forEach(reporters::add);
         return node;
     }
 
@@ -1391,6 +1592,11 @@ public class NewsService {
             log.warn("资讯字段序列化失败，按空处理：{}", e.getMessage());
             return null;
         }
+    }
+
+    /** 取数行的跨源印证证据（also_reported_by）→ 落库 JSON；无证据返回 null。 */
+    private String reportersJson(JsonNode item) {
+        return writeJson(stringList(item.get("also_reported_by")));
     }
 
     /**

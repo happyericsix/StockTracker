@@ -6,7 +6,9 @@ import org.junit.jupiter.api.Test;
 import java.time.LocalDateTime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * 时效性分档（NewsEventResponse.freshnessLabel）。
@@ -44,5 +46,29 @@ class NewsEventResponseFreshnessTest {
     void futureTimestampsClampToZeroInsteadOfGoingNegative() {
         // 时钟偏差/源站时间略超前时，"负的新鲜度"比 0 更让人困惑
         assertEquals(Long.valueOf(0L), NewsEventResponse.freshHours(CnTime.now().plusMinutes(5)));
+    }
+
+    /**
+     * 日期级条目（公告/研报/新闻联播，00:00:00 占位）按天分档。
+     * 用户实测指出"10-09 00:00"像凌晨发布 —— 00:00 是排序占位不是事实时刻，
+     * 能诚实说的最细粒度就是"今天/N天前"："1小时内"是占位符制造的谎言
+     * （今天零点的公告在早上 7 点看恰好"7小时内"，在零点半看是"1小时内"）。
+     */
+    @Test
+    void dateOnlyEntriesBucketByDayNotByHour() {
+        LocalDateTime todayMidnight = CnTime.now().toLocalDate().atStartOfDay();
+        assertEquals("今天", NewsEventResponse.freshnessLabel(todayMidnight));
+        assertEquals("3天前", NewsEventResponse.freshnessLabel(todayMidnight.minusDays(3)));
+        assertEquals("2周前", NewsEventResponse.freshnessLabel(todayMidnight.minusDays(15)));
+        // 真实时刻（非占位）不受影响：零点后一分钟的快讯仍是小时档
+        assertEquals("1小时内", NewsEventResponse.freshnessLabel(CnTime.now().withNano(0).plusSeconds(30)));
+    }
+
+    @Test
+    void dateOnlyDetectsMidnightPlaceholderOnly() {
+        assertTrue(NewsEventResponse.isDateOnly(LocalDateTime.of(2026, 10, 9, 0, 0, 0)));
+        assertFalse(NewsEventResponse.isDateOnly(LocalDateTime.of(2026, 10, 9, 0, 0, 1)));
+        assertFalse(NewsEventResponse.isDateOnly(LocalDateTime.of(2026, 10, 9, 9, 30, 0)));
+        assertFalse(NewsEventResponse.isDateOnly(null));
     }
 }

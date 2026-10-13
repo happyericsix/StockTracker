@@ -121,7 +121,7 @@ def test_health_survives_a_broken_memory_subsystem(monkeypatch):
     r = c.get("/health")
 
     assert r.status_code == 200
-    assert r.json()["memory"] == {"error": "memory subsystem unavailable"}
+    assert r.json()["memory"] == {"error": "记忆子系统暂不可用"}
 
 
 def test_health_reports_the_objective_fact_channel():
@@ -241,7 +241,7 @@ def test_evaluate_bar_endpoint_without_data_still_reports_the_basis(monkeypatch)
 
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["error"] == "insufficient history data"
+    assert body["error"] == "历史 K 线数据不足，暂时无法评估"
     assert body["snapshot"] is None
     assert body["fill_basis"] == ec.FILL_CLOSE
     assert body["fingerprint"]["fill_basis"] == ec.FILL_CLOSE

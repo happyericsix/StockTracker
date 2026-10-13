@@ -30,10 +30,20 @@ logger = logging.getLogger(__name__)
 # 规范行：与 TradingAgents 的 `FINAL TRANSACTION PROPOSAL: **BUY**` 同形状。
 # 为什么认这行：模型在长辩论之后，最后一句才是它的结论；
 # 让它把结论写成一个**固定格式的行**，比去猜哪段散文是结论可靠得多。
+# 取**最后一个**匹配：辩论记录里 judge 可能先复述别人的规范行再给自己的结论，
+# 取第一个会把别人的结论当成它的（解析器只该认最后一句话）。
 _CANONICAL_RE = re.compile(
     r"FINAL\s+TRANSACTION\s+PROPOSAL\s*[:：]\s*\**\s*(BUY|SELL|HOLD)\b",
     re.IGNORECASE,
 )
+
+
+def _last_canonical(text: str) -> Optional[re.Match]:
+    """全文里**最后一条**规范行（没有则 None）。"""
+    last = None
+    for match in _CANONICAL_RE.finditer(text or ""):
+        last = match
+    return last
 
 # JSON 块（```json ... ``` 或裸 {...}）：结构化字段（仓位/置信度/止损）走它
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
@@ -49,6 +59,10 @@ class TradeDecision:
     `decision` 是**结算侧唯一认的字段**（buy/sell/skip）；`signal` 是模型的原话方向
     （buy/sell/hold）—— 两者分开，是因为"模型说要买"与"最终决定买"不是一回事：
     仓位为 0、或解析失败、或风控否决，都会让 signal=buy 而 decision=skip。
+
+    `authorization` 是**给下一交易日的盘中授权**（authorization 模式）：
+    委员会划定的边界，规则引擎（DSL）在边界内自动执行。它与会话级决策独立 ——
+    今天 HOLD 不代表明天盘中不许按规则动。None = 模型没给，调用方按"未授权"处理（保守）。
     """
 
     decision: str                      # buy | sell | skip（封闭集）
@@ -59,6 +73,7 @@ class TradeDecision:
     warnings: tuple[str, ...] = ()
     skip_reason: Optional[str] = None  # 仅 decision=skip 时有值（封闭集）
     raw_text: str = ""                 # 原始输出（调用方通常只存哈希/长度）
+    authorization: Optional[dict] = None
 
     def as_dict(self) -> dict:
         return {
@@ -69,11 +84,13 @@ class TradeDecision:
             "rationale": self.rationale,
             "warnings": list(self.warnings),
             "skip_reason": self.skip_reason,
+            "authorization": self.authorization,
         }
 
 
 def _skip(reason: str, warnings: list[str], *, raw_text: str = "",
-          rationale: str = "", signal: Optional[str] = None) -> TradeDecision:
+          rationale: str = "", signal: Optional[str] = None,
+          authorization: Optional[dict] = None) -> TradeDecision:
     return TradeDecision(
         decision=ec.DECISION_SKIP,
         signal=signal,
@@ -83,6 +100,7 @@ def _skip(reason: str, warnings: list[str], *, raw_text: str = "",
         warnings=tuple(warnings),
         skip_reason=ec.normalize_skip_reason(reason),
         raw_text=raw_text,
+        authorization=authorization,
     )
 
 
@@ -154,6 +172,57 @@ def _clean_text(raw: Any, limit: int) -> str:
     return str(raw).strip()[:limit]
 
 
+MAX_AUTH_NOTES_CHARS = 500
+
+
+def _clean_authorization(raw: Any, warnings: list[str]) -> Optional[dict]:
+    """把 JSON 块里的 authorization 归一成可落库的授权。
+
+    <h3>保守优先的语义</h3>
+    - 整块缺失 / 不是对象 → None（调用方按"未授权"处理，盘中不执行）；
+    - `intraday_execution` 缺省 false：授权必须**显式给出**，绝不默认打开；
+    - `allow_open` 缺省跟随 intray_execution；`allow_close` 缺省 true——
+      风控语义上"允许退出"应比"允许进场"宽松（不许出场的授权等于把人锁在车里）；
+    - `max_position_pct` ∈ [0,1]，缺省 1.0（不额外限制；结算侧还有策略 size_pct
+      与 agent size_fraction 两层夹取，这里只是委员会的显式边界）。
+    """
+    if not isinstance(raw, dict):
+        if raw is not None:
+            warnings.append("authorization 不是对象，按未授权处理")
+        return None
+
+    def flag(key: str, default: bool) -> bool:
+        value = raw.get(key, default)
+        return bool(value) if isinstance(value, bool) else default
+
+    intraday = flag("intraday_execution", False)
+    allow_open = flag("allow_open", intraday)
+    allow_close = flag("allow_close", True)
+
+    max_pct = 1.0
+    raw_pct = raw.get("max_position_pct")
+    if raw_pct is not None:
+        try:
+            value = float(raw_pct)
+        except (TypeError, ValueError):
+            warnings.append(f"max_position_pct 不是数字（{raw_pct!r}），按 1.0 处理")
+        else:
+            if value != value or value < 0.0 or value > 1.0:
+                clamped = min(1.0, max(0.0, value))
+                warnings.append(f"max_position_pct {value} 越界，已夹到 {clamped}")
+                max_pct = clamped
+            else:
+                max_pct = round(value, 4)
+
+    return {
+        "intraday_execution": intraday,
+        "allow_open": allow_open,
+        "allow_close": allow_close,
+        "max_position_pct": max_pct,
+        "notes": _clean_text(raw.get("notes"), MAX_AUTH_NOTES_CHARS),
+    }
+
+
 def parse_trade_decision(text: str) -> TradeDecision:
     """把模型的输出解析成决策（**确定性、可测、保守优先**）。
 
@@ -162,7 +231,7 @@ def parse_trade_decision(text: str) -> TradeDecision:
     两者冲突时以规范行为准，并留警告 —— 冲突这件事本身要被看见。
     """
     body = str(text or "")
-    canonical = _CANONICAL_RE.search(body)
+    canonical = _last_canonical(body)
     payload, warnings = _extract_json(body)
 
     json_signal = None
@@ -179,6 +248,9 @@ def parse_trade_decision(text: str) -> TradeDecision:
         warnings.append(
             f"规范行（{canonical.group(1).upper()}）与 JSON 的 signal（{json_signal.upper()}）不一致，"
             "以规范行为准")
+    # 盘中授权与会话级决策独立提取：解析不出方向时授权也不该被采纳
+    # （一个连结论都写不清楚的输出，不该拥有写授权的权力）。
+    authorization = _clean_authorization((payload or {}).get("authorization"), warnings)
     if signal is None:
         return _skip(ec.SKIP_AGENT_UNPARSABLE,
                      warnings + ["输出里既没有规范行也没有可用的 signal"],
@@ -202,6 +274,7 @@ def parse_trade_decision(text: str) -> TradeDecision:
             warnings=tuple(warnings),
             skip_reason=ec.SKIP_RULE_NOT_MET,
             raw_text=body,
+            authorization=authorization,
         )
 
     if size <= 0.0:
@@ -217,6 +290,7 @@ def parse_trade_decision(text: str) -> TradeDecision:
             warnings=tuple(warnings),
             skip_reason=ec.SKIP_RULE_NOT_MET,
             raw_text=body,
+            authorization=authorization,
         )
 
     return TradeDecision(
@@ -228,6 +302,7 @@ def parse_trade_decision(text: str) -> TradeDecision:
         warnings=tuple(warnings),
         skip_reason=None,
         raw_text=body,
+        authorization=authorization,
     )
 
 
@@ -236,14 +311,25 @@ def decision_prompt_contract() -> str:
 
     `prompt_versions` 会把这个契约的哈希写进痕迹：报告要能回答
     "这条决策是在哪一版输出契约下产生的"。
+
+    authorization（盘中授权）：委员会的产出不只是"今天动不动"，还有
+    "下一次开会之前，规则引擎可以在什么边界内自动执行"。这是 agent 模式
+    盘中执行的唯一来源——没有它，盘中就回到"只在日线结算时决策"。
     """
     return (
         "输出必须以一行规范结论结束，格式**严格**如下：\n"
         "FINAL TRANSACTION PROPOSAL: **BUY**  （或 **SELL** / **HOLD**）\n"
         "并在之前给出一个 JSON 块，字段：\n"
         '  {"signal": "BUY|SELL|HOLD", "size_fraction": 0.0-1.0, '
-        '"confidence": 0.0-1.0, "rationale": "一句话理由", "warnings": ["..."]}\n'
-        "约束：HOLD 的 size_fraction 必须为 0；读不懂或不一致时**宁可 HOLD**。"
+        '"confidence": 0.0-1.0, "rationale": "一句话理由", "warnings": ["..."],\n'
+        '   "authorization": {"intraday_execution": true|false, '
+        '"allow_open": true|false, "allow_close": true|false, '
+        '"max_position_pct": 0.0-1.0, "notes": "一句话理由"}}\n'
+        "约束：HOLD 的 size_fraction 必须为 0；读不懂或不一致时**宁可 HOLD**。\n"
+        "authorization 是**下一次开会之前**的盘中授权：规则引擎（策略 DSL）将在边界内"
+        "自动执行买卖信号；intraday_execution=false 表示盘中不自动执行（只等日线开会）。"
+        "给边界时依据今天的证据：趋势与波动支持规则执行就放行并给出仓位上限，"
+        "证据含糊或风险高就收紧或关闭；allow_close 通常应保持 true（允许退出风控）。"
     )
 
 

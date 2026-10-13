@@ -60,7 +60,8 @@ public class MemoryController {
         if (userId == null) {
             return Result.error(401, "登录已失效");
         }
-        return Result.success(factService.searchFacts(userId, null, null, factType, limit));
+        // 用户门面：只回可见层（visibleOnly=true）；系统遥测不冒充"助手记住的我"
+        return Result.success(factService.searchFacts(userId, null, null, factType, limit, true));
     }
 
     /** 长期画像（稳定身份信息，与注入给模型的那份一致，便于用户核对） */

@@ -1,6 +1,8 @@
 package com.happyericsix.stocktracker.job;
 
+import com.happyericsix.stocktracker.repository.JobRunRepository;
 import com.happyericsix.stocktracker.repository.NewsEventRepository;
+import com.happyericsix.stocktracker.service.JobRunService;
 import com.happyericsix.stocktracker.service.NewsRetention;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,19 +31,26 @@ public class NewsRetentionJob {
     private static final Logger log = LoggerFactory.getLogger(NewsRetentionJob.class);
     /** 公告 / 研报的信源级别（与 news_client 的 LEVEL_* 一致） */
     private static final List<Integer> DISCLOSURE_LEVELS = List.of(1, 3);
+    /** 心跳点名册的保留期：运维只关心"最近还好吗"，历史行没有复盘价值。 */
+    private static final int JOB_RUN_RETENTION_DAYS = 90;
 
     private final NewsEventRepository newsEventRepository;
     private final NewsRetention retention;
+    private final JobRunRepository jobRunRepository;
+    private final JobRunService jobRunService;
 
-    public NewsRetentionJob(NewsEventRepository newsEventRepository, NewsRetention retention) {
+    public NewsRetentionJob(NewsEventRepository newsEventRepository, NewsRetention retention,
+                            JobRunRepository jobRunRepository, JobRunService jobRunService) {
         this.newsEventRepository = newsEventRepository;
         this.retention = retention;
+        this.jobRunRepository = jobRunRepository;
+        this.jobRunService = jobRunService;
     }
 
     /** 03:40：避开整点（那是各种日报任务的高峰），且远离开收盘。 */
     @Scheduled(cron = "0 40 3 * * *", zone = "Asia/Shanghai")
     public void purgeExpired() {
-        try {
+        jobRunService.runWithHeartbeat(JobRunService.JOB_NEWS_RETENTION, () -> {
             LocalDateTime now = LocalDateTime.now();
             long removed = newsEventRepository
                     .deleteBySourceLevelInAndPublishedAtBefore(DISCLOSURE_LEVELS,
@@ -56,10 +65,10 @@ public class NewsRetentionJob {
             removed += newsEventRepository
                     .deleteByCategoryIsNullAndSourceLevelNotInAndPublishedAtBefore(
                             DISCLOSURE_LEVELS, now.minusDays(retention.defaultDays()));
-            log.info("资讯时效清理完成：删除过期条目 {} 条", removed);
-        } catch (Exception e) {
-            // 清理失败只是这一天库没瘦，绝不能因此中断调度线程
-            log.error("资讯时效清理失败：{}", e.getMessage(), e);
-        }
+            // 心跳点名册顺带瘦身（它和资讯一样：不清理就只增不减）
+            long purgedRuns = jobRunRepository.deleteByFinishedAtBefore(
+                    now.minusDays(JOB_RUN_RETENTION_DAYS));
+            return "删除过期资讯 " + removed + " 条、过期心跳 " + purgedRuns + " 行";
+        });
     }
 }

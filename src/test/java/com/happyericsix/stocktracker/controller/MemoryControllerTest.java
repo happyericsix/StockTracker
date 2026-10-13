@@ -98,7 +98,8 @@ class MemoryControllerTest {
     void factsAndLessonsAreQueriedForTheCurrentUserOnly() {
         MemoryFactService facts = Mockito.mock(MemoryFactService.class);
         MemoryLessonService lessons = Mockito.mock(MemoryLessonService.class);
-        when(facts.searchFacts(eq(7L), any(), any(), eq("constraint"), eq(50)))
+        // 用户门面走 visibleOnly=true 的重载（双层记忆 2026-10-09）
+        when(facts.searchFacts(eq(7L), any(), any(), eq("constraint"), eq(50), eq(true)))
                 .thenReturn(List.of(Map.of("predicate", "stop_loss_pct")));
         when(lessons.listForUser(7L, 50)).thenReturn(List.of(Map.of("symptom", "数据不足")));
 

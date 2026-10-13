@@ -1,6 +1,7 @@
 package com.happyericsix.stocktracker.service;
 
 import tools.jackson.databind.JsonNode;
+import com.happyericsix.stocktracker.dto.ChatSendRequest;
 import com.happyericsix.stocktracker.dto.MessageResponse;
 import com.happyericsix.stocktracker.dto.StrategyResponse;
 import com.happyericsix.stocktracker.entity.Message;
@@ -62,40 +63,66 @@ public class ChatService {
     /** LLM 单次调用最长 60 秒，超时兜底回复 */
     @Async
     public void processAsync(Long userId, String username, String text) {
+        processAsync(userId, username, text, null);
+    }
+
+    /**
+     * 带聚焦对象的聊天入口（agent 互通 P2）：focus 是"用户正围绕哪条新闻追问"，
+     * 透传给 Python 注入 agent 上下文。null = 普通聊天（原行为）。
+     */
+    @Async
+    public void processAsync(Long userId, String username, String text,
+                             ChatSendRequest.Focus focus) {
+        // 本轮的会话键在入口处定死，全程复用：LLM 一来一回可能跨过午夜，
+        // 逐次重算 currentSessionKey 会把用户消息记在昨天、回复记在今天，
+        // 那段对话在巩固时就被从中间劈开（两边各缺一半）。
+        String sessionKey = memoryService.currentSessionKey(userId);
         try {
-            String sessionKey = memoryService.currentSessionKey(userId);
             // 用户跨天（= 新会话）时，把上一段对话补成"前情提要"。
             // 异步执行且失败无害（内部 try/catch），不会拖慢这条消息的回复。
             memoryService.ensurePreviousSessionConsolidated(userId, sessionKey);
             // 会话内也要有节奏地巩固：否则"我改主意了，止损改成 5%"要等第二天才被记住
             memoryService.maybeConsolidateCurrentSession(userId, sessionKey);
 
-            JsonNode resp = callLlm(username, userId, sessionKey, text);
+            // focus==null 走旧入口（现有 spy 测试桩的就是它）；带 focus 才走新重载
+            JsonNode resp = focus == null
+                    ? callLlm(username, userId, sessionKey, text)
+                    : callLlm(username, userId, sessionKey, text, focus);
 
             JsonNode replies = resp != null ? resp.get("replies") : null;
             if (replies == null || !replies.isArray() || replies.isEmpty()) {
-                saveBotReply(userId, "抱歉，我暂时没有理解你的问题，换个问法试试？");
+                saveBotReply(userId, sessionKey, "抱歉，我暂时没有理解你的问题，换个问法试试？");
                 return;
             }
             for (JsonNode reply : replies) {
                 String content = reply.asText();
                 if (content != null && !content.isBlank()) {
-                    saveBotReply(userId, content);
+                    saveBotReply(userId, sessionKey, content);
                 }
             }
 
             JsonNode strategyJson = resp != null ? resp.get("strategy_json") : null;
             if (strategyJson != null && strategyJson.isObject()) {
-                createAndBacktestFromAgent(userId, username, strategyJson);
+                createAndBacktestFromAgent(userId, sessionKey, username, strategyJson);
             }
         } catch (Exception e) {
             log.error("LLM 调用失败 userId={}: {}", userId, e.getMessage());
-            saveBotReply(userId, "智能助手暂时不可用，请稍后再试。");
+            saveBotReply(userId, sessionKey, "智能助手暂时不可用，请稍后再试。");
         }
+    }
+
+    /** 聚焦对象是否是有效的 news_event（type + eventId 齐备才透传给 Python）。 */
+    static boolean isNewsFocus(ChatSendRequest.Focus focus) {
+        return focus != null && "news_event".equals(focus.type()) && focus.eventId() != null;
     }
 
     /** 调用 agent 聊天接口；独立成包可见方法，方便单测替换远程依赖。 */
     JsonNode callLlm(String username, Long userId, String sessionKey, String text) {
+        return callLlm(username, userId, sessionKey, text, null);
+    }
+
+    JsonNode callLlm(String username, Long userId, String sessionKey, String text,
+                     ChatSendRequest.Focus focus) {
         Map<String, Object> body = new HashMap<>();
         // 字段名必须是 user_id：Python 侧 app.py 的 agent_chat 读的是 data["user_id"]，
         // 取不到就直接 return {"replies": []}（连 LLM 都不会调用），
@@ -110,6 +137,17 @@ public class ChatService {
         // 会话历史：不带它的话，Python 侧每条消息都是一次全新、失忆的 agent，
         // "它呢？""把止损改成 5%" 这类追问必然失效（run_agent 一度根本不接 history）。
         body.put("history", buildHistory(userId, text));
+        // 聚焦对象（news_event）：有效才带，普通聊天不带这个键（Python 侧同判）
+        if (isNewsFocus(focus)) {
+            // 打点（2026-10-10 事故排查）："问 AI 没收到新闻"要么停在这一行之前
+            // （前端没送/反序列化失败），要么停在 Python 的知识端点 —— 两端都有日志后，
+            // 这类静默失效当场可归因，不用再靠猜。
+            log.info("聚焦对话透传：news_event id={}（随消息发给 agent）", focus.eventId());
+            Map<String, Object> focusBody = new HashMap<>();
+            focusBody.put("type", focus.type());
+            focusBody.put("event_id", focus.eventId());
+            body.put("focus", focusBody);
+        }
 
         return llmWebClient.post()
                 .uri("/api/v1/agent/chat")
@@ -162,11 +200,12 @@ public class ChatService {
         return history;
     }
 
-    private void saveBotReply(Long userId, String content) {
-        saveBotReply(userId, content, null, null);
+    private void saveBotReply(Long userId, String sessionKey, String content) {
+        saveBotReply(userId, sessionKey, content, null, null);
     }
 
-    private void saveBotReply(Long userId, String content, String relatedSymbol, String metadata) {
+    private void saveBotReply(Long userId, String sessionKey, String content,
+                              String relatedSymbol, String metadata) {
         User user = userRepository.findById(userId).orElse(null);
         if (user == null) {
             log.warn("推送回复失败：用户 {} 不存在", userId);
@@ -183,20 +222,21 @@ public class ChatService {
         message = messageRepo.save(message);
         sseService.push(userId, MessageResponse.from(message));
         // 记忆账本：助手回复也入账，否则前情提要只有一半（用户问了什么、但没有回答过什么）
-        appendToLedger(userId, "chat_bot", "assistant", content, relatedSymbol, metadata);
+        appendToLedger(userId, sessionKey, "chat_bot", "assistant", content, relatedSymbol, metadata);
         log.info("Bot replied to user {}: {}", userId, content);
     }
 
     /**
      * 写记忆账本。只追加，且失败绝不影响主流程 ——
      * 记忆是增强功能，不能因为它挂了就让用户收不到回复。
+     * sessionKey 必须由调用方传入本轮开始时定下的那个（见 processAsync），不在这里重算。
      */
-    private void appendToLedger(Long userId, String kind, String role, String content,
+    private void appendToLedger(Long userId, String sessionKey, String kind, String role, String content,
                                 String symbol, String metadata) {
         try {
             memoryService.append(MemoryEvent.builder()
                     .userId(userId)
-                    .sessionKey(memoryService.currentSessionKey(userId))
+                    .sessionKey(sessionKey)
                     .kind(kind)
                     .role(role)
                     .content(content)
@@ -210,28 +250,28 @@ public class ChatService {
         }
     }
 
-    private void createAndBacktestFromAgent(Long userId, String username, JsonNode strategyJson) {
+    private void createAndBacktestFromAgent(Long userId, String sessionKey, String username, JsonNode strategyJson) {
         try {
             StrategyResponse strategy = strategyService.createFromAgent(username, strategyJson);
             String metadata = "{\"strategyId\":" + strategy.getId() + "}";
             // 策略生成是"agent 做过的事"，必须进账本：
             // 否则下次用户说"把上次那个策略的止损改一下"，前情提要里根本没有这段。
-            appendToLedger(userId, "strategy", "assistant",
+            appendToLedger(userId, sessionKey, "strategy", "assistant",
                     "生成策略「" + strategy.getName() + "」（" + strategy.getSymbol() + "）",
                     strategy.getSymbol(), metadata);
             try {
                 JsonNode backtestResult = strategyService.runBacktest(username, strategy.getId());
-                saveBotReply(userId, buildBacktestSummary(strategy, backtestResult),
+                saveBotReply(userId, sessionKey, buildBacktestSummary(strategy, backtestResult),
                         strategy.getSymbol(), metadata);
             } catch (Exception backtestException) {
                 log.warn("Agent strategy auto backtest failed id={}: {}", strategy.getId(), backtestException.getMessage());
-                saveBotReply(userId,
+                saveBotReply(userId, sessionKey,
                         "策略「" + strategy.getName() + "」已保存，但自动回测暂时失败，请到策略详情重试。",
                         strategy.getSymbol(), metadata);
             }
         } catch (Exception createException) {
             log.error("Agent strategy save failed userId={}: {}", userId, createException.getMessage());
-            saveBotReply(userId, "策略已生成，但保存失败，请稍后再试。");
+            saveBotReply(userId, sessionKey, "策略已生成，但保存失败，请稍后再试。");
         }
     }
 

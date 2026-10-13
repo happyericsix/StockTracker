@@ -185,3 +185,39 @@ if __name__ == "__main__":
     for fn in fns:
         fn()
         print("PASS", fn.__name__)
+
+
+# ==================== bias_pct / volume_ratio（2026-10-13） ====================
+
+def _vol_records(closes, volumes):
+    return [{"date": f"2025-01-{i + 1:02d}", "open": c, "high": c, "low": c,
+             "close": c, "volume": v} for i, (c, v) in enumerate(zip(closes, volumes))]
+
+
+def test_bias_pct_blocks_overextended_price():
+    """乖离率防追高：价格偏离均线超过阈值时条件不成立（拦下追高入场）。"""
+    from agent.strategy_engine import _cond_met, compute_indicators
+    # 20 根 100 元横盘 + 一根 110（对 MA20≈100.5 乖离 +9.4%）
+    closes = [100.0] * 20 + [110.0]
+    ind = compute_indicators(_vol_records(closes, [1000] * 21))
+    cond = type("C", (), {"type": "bias_pct", "window": 20, "value": 5.0})()
+    assert not _cond_met(cond, ind, 20, None)        # 乖离 9.4% > 5%
+    cond_loose = type("C", (), {"type": "bias_pct", "window": 20, "value": 10.0})()
+    assert _cond_met(cond_loose, ind, 20, None)
+
+
+def test_volume_ratio_above_and_below():
+    """量比：当日量 / 过去 N 日均量；above=放量成立，below=缩量成立。"""
+    from agent.strategy_engine import _cond_met, compute_indicators
+    vols = [1000] * 20 + [2500]                       # 当日 2.5 倍 = 放量
+    ind = compute_indicators(_vol_records([100.0] * 21, vols))
+    vol_up = type("C", (), {"type": "volume_ratio", "window": 20,
+                            "value": 1.2, "direction": "above"})()
+    vol_down = type("C", (), {"type": "volume_ratio", "window": 20,
+                              "value": 1.2, "direction": "below"})()
+    assert _cond_met(vol_up, ind, 20, None)
+    assert not _cond_met(vol_down, ind, 20, None)
+    # 缩量日：400 / 1000 = 0.4 倍
+    ind2 = compute_indicators(_vol_records([100.0] * 21, [1000] * 20 + [400]))
+    assert not _cond_met(vol_up, ind2, 20, None)
+    assert _cond_met(vol_down, ind2, 20, None)

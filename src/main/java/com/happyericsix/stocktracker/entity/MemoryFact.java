@@ -7,6 +7,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 
 /**
  * 语义事实（L2）—— "用户是谁、偏好什么、持有什么、做了什么决定"。
@@ -49,6 +50,9 @@ import java.time.LocalDateTime;
 @NoArgsConstructor
 @Builder
 public class MemoryFact {
+
+    /** 记忆表统一业务时区（与 MemoryService.ZONE 一致；prePersist 兜底用） */
+    private static final ZoneId ZONE_CN = ZoneId.of("Asia/Shanghai");
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -126,6 +130,21 @@ public class MemoryFact {
     @Column(nullable = false)
     private Boolean confirmed;
 
+    /**
+     * 是否进用户的"记忆"门面（2026-10-09 双层记忆）。
+     * false = 系统遥测（快照/指标/元数据）：照常写入与注入对话（recall 读全部），
+     * 但不占用户页面的列表与计数 —— 机器观测不该冒充"助手记住的我"。
+     * 默认 true：null 语义就是"用户层记忆"。
+     *
+     * <p>columnDefinition 带 DEFAULT 1 是**存量保护**：ddl-auto 加 NOT NULL 列时
+     * MySQL 会用隐式默认（数值型 = 0 = 不可见）回填历史行 —— 用户的偏好记忆会
+     * 在一次升级里全部"消失"。显式 DEFAULT 1 让历史行先按可见回填，
+     * 遥测的不可见由 MemoryVisibilityBackfill 随后显式标下去。
+     */
+    @Column(name = "user_visible", nullable = false,
+            columnDefinition = "TINYINT(1) NOT NULL DEFAULT 1")
+    private Boolean userVisible;
+
     /** 来源账本事件 id，JSON 数组文本 */
     @Column(name = "source_event_ids", columnDefinition = "TEXT")
     private String sourceEventIds;
@@ -135,7 +154,10 @@ public class MemoryFact {
 
     @PrePersist
     void prePersist() {
-        LocalDateTime now = LocalDateTime.now();
+        // 记忆系统的业务时间（recordedAt/occurredAt）一律是 Asia/Shanghai 墙上时间，
+        // 兜底填充也必须同一个时区：LocalDateTime.now() 取 JVM 默认时区，
+        // 部署环境没钉 user.timezone 时 createdAt 会和 recordedAt 差出一个时区。
+        LocalDateTime now = LocalDateTime.now(ZONE_CN);
         if (createdAt == null) {
             createdAt = now;
         }
@@ -144,6 +166,9 @@ public class MemoryFact {
         }
         if (confirmed == null) {
             confirmed = false;
+        }
+        if (userVisible == null) {
+            userVisible = true;
         }
         if (timeZone == null) {
             timeZone = "Asia/Shanghai";

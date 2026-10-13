@@ -24,13 +24,15 @@ public class StrategyResponse {
      */
     private String decisionMode;
     private LocalDate decisionModeSince;
+    private java.time.LocalDateTime configUpdatedAt;
 
     public StrategyResponse() {}
 
     public StrategyResponse(Long id, String name, String symbol, String configJson,
                             Boolean paperEnabled, LocalDateTime createdAt,
                             LocalDateTime updatedAt, LocalDateTime lastBacktestAt,
-                            String decisionMode, LocalDate decisionModeSince) {
+                            String decisionMode, LocalDate decisionModeSince,
+                            java.time.LocalDateTime configUpdatedAt) {
         this.id = id;
         this.name = name;
         this.symbol = symbol;
@@ -41,6 +43,7 @@ public class StrategyResponse {
         this.lastBacktestAt = lastBacktestAt;
         this.decisionMode = decisionMode;
         this.decisionModeSince = decisionModeSince;
+        this.configUpdatedAt = configUpdatedAt;
     }
 
     public static StrategyResponse from(Strategy entity) {
@@ -59,7 +62,8 @@ public class StrategyResponse {
                 // 归一化后再出去：存量策略的 null 在界面与报告里都是"规则"这一路，
                 // 不能让两种写法在调用方那里变成两种含义。
                 ExecutionContract.normalizeDecisionMode(entity.getDecisionMode()),
-                entity.getDecisionModeSince()
+                entity.getDecisionModeSince(),
+                entity.getConfigUpdatedAt()
         );
     }
 
@@ -83,4 +87,6 @@ public class StrategyResponse {
     public void setDecisionMode(String decisionMode) { this.decisionMode = decisionMode; }
     public LocalDate getDecisionModeSince() { return decisionModeSince; }
     public void setDecisionModeSince(LocalDate decisionModeSince) { this.decisionModeSince = decisionModeSince; }
+    public java.time.LocalDateTime getConfigUpdatedAt() { return configUpdatedAt; }
+    public void setConfigUpdatedAt(java.time.LocalDateTime v) { this.configUpdatedAt = v; }
 }

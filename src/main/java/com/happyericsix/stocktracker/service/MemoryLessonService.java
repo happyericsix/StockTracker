@@ -47,6 +47,16 @@ public class MemoryLessonService {
 
     private static final Pattern ASCII_TOKEN = Pattern.compile("[a-zA-Z0-9_]{2,}");
 
+    /** 任务类型的中文标签（见 MemoryDisplayLabels：展示语义统一由 Java 出） */
+    private static final Map<String, String> TASK_TYPE_LABELS = Map.of(
+            "generate_strategy", "生成策略",
+            "backtest", "回测",
+            "quote_lookup", "查行情",
+            "analysis", "技术分析",
+            "screening", "选股",
+            "news_lookup", "新闻公告",
+            "general", "通用");
+
     private final MemoryLessonRepository lessonRepo;
     private final ObjectMapper mapper;
 
@@ -77,7 +87,7 @@ public class MemoryLessonService {
                 continue;
             }
             String taskType = item.getTaskType().trim().toLowerCase(Locale.ROOT);
-            String symptom = clip(item.getSymptom().trim(), MAX_SYMPTOM_CHARS);
+            String symptom = normalizeSymptomForStorage(item.getSymptom());
 
             MemoryLesson saved = lessonRepo.save(MemoryLesson.builder()
                     .userId(request.getUserId())
@@ -232,6 +242,9 @@ public class MemoryLessonService {
         Map<String, Object> item = new LinkedHashMap<>();
         item.put("id", lesson.getId());
         item.put("taskType", lesson.getTaskType());
+        // 中文任务类型（"回测""查行情"）：给前端做分类展示，没有它用户看到的是英文键
+        item.put("taskTypeLabel",
+                TASK_TYPE_LABELS.getOrDefault(lesson.getTaskType(), lesson.getTaskType()));
         item.put("symptom", lesson.getSymptom());
         item.put("resolution", lesson.getResolution());
         item.put("reusableRule", lesson.getReusableRule());
@@ -299,6 +312,35 @@ public class MemoryLessonService {
     }
 
     // ==================== 工具方法 ====================
+
+    /**
+     * 症状的规范化键：去空白与标点 + 小写。计数与去重都按它来。
+     *
+     * <p>为什么必须有：symptom 由 LLM 生成，同一现象每次的标点/空白几乎必然不同
+     * （"回测，数据不足。" vs "回测数据不足"），而 occurrences 是
+     * {@code countByUserIdAndTaskTypeAndSymptom} 的**精确**匹配——不收敛的话
+     * "复发 3 次建议升格"这个机制永远触发不了。
+     *
+     * <p>边界（有意为之）：只做字符级收敛，"回测时提示数据不足"与"回测提示数据不足"
+     * 这类措辞差异仍算不同症状——再进一步就要做语义相似度，误合并两个不同问题的
+     * 代价比漏计数更高。存量未规范化的行会在下一次同症状写入时开一条新键，
+     * 渐进收敛即可，不值得停机迁移。
+     */
+    static String normalizeSymptomKey(String symptom) {
+        if (symptom == null) {
+            return "";
+        }
+        return symptom
+                .replaceAll("[\\s\\p{Punct}\\p{IsPunctuation}]+", "")
+                .toLowerCase(Locale.ROOT);
+    }
+
+    private String normalizeSymptomForStorage(String raw) {
+        String clipped = clip(raw == null ? "" : raw.trim(), MAX_SYMPTOM_CHARS);
+        String normalized = normalizeSymptomKey(clipped);
+        // 全是标点的症状规范化后为空：保留原文，交给 isUsable 的非空校验兜底
+        return normalized.isEmpty() ? clipped : normalized;
+    }
 
     private List<String> chineseBigrams(String text, int limit) {
         List<String> grams = new ArrayList<>();

@@ -111,6 +111,35 @@ SKIP_AGENT_NO_NEW_INFORMATION = "agent_no_new_information"
 # 前者是"今天已经动过了"，后者是"今天看过、没动"。写成 rule_not_met 就是假话：
 # 那天恰恰是**唯一有成交**的一天，把它说成"规则没成立"会让审计与统计同时失真。
 SKIP_ALREADY_TRADED_TODAY = "already_traded_today"
+# ===== 盘中授权（authorization）模式：委员会授权、规则执行 =====
+# agent 模式的盘中执行不是"规则偷偷跑"，而是"在委员会上次开会划定的边界内跑"。
+# 两个新原因让这条路的每一次"不动"都有名有姓：
+# 还没有任何一次委员会授权（策略刚开、或从未开过会）。
+# 为什么必须独立：它回答的是"agent 模式为什么盘中没动静"这个用户最先问的问题，
+# 混进 agent_no_new_information（当日没开会）会把"从未授权"与"今天没开会"混为一谈。
+SKIP_AWAITING_AUTHORIZATION = "awaiting_authorization"
+# 规则给了信号，但信号在授权边界之外（如 allow_open=false 时的买入信号）。
+# 为什么必须独立：它是"被授权挡下"，不是"规则没成立"——前者是风控决定，后者是市场没给机会。
+# 两者的区分正是授权模式存在的意义：委员会要能看到自己的边界挡了多少单。
+SKIP_OUTSIDE_AUTHORIZATION = "outside_authorization"
+# **委员会开会后明确关闭了盘中执行**（authorization.intraday_execution=false）。
+# 为什么必须独立：它与 agent_no_new_information（没开会所以没看）方向正好相反 ——
+# 这里委员会恰恰开过会并**主动决定**收盘前不动。混在一起，"委员会为什么关掉盘中"
+# 就永远统计不出来，而那正是它下次开会该重新评估的边界。
+# 由 Java 结算侧在盘中授权检查处判定与落痕迹（Python 侧只负责声明常量集合一致）。
+SKIP_AGENT_INTRADAY_DISABLED = "agent_intraday_disabled"
+# ===== 盘中盯盘 agent（事件驱动，2026-10-09）：规则信号/量化事件触发轻量盯盘交易员 =====
+# 盯盘交易员被问过、但决定不动（含否决规则信号）。为什么必须独立：
+# "规则说买、盯盘 agent 说不动"是 agent 模式盘中最常见也最需要审计的分歧 ——
+# 写成 rule_not_met（规则自己的结论）或 agent_no_new_information（没看）都是假话。
+SKIP_WATCH_HOLD = "watch_hold"
+# 盯盘 agent 的当日调用预算（默认 20 次/策略）用完：事件还在发生，但当天不再问模型，
+# 盘中回落到"规则 + 授权边界"的执行路径。预算是成本止损线，必须与"模型说不动"分开统计。
+SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED = "intraday_watch_budget_exceeded"
+# 组合级熔断：该用户全部模拟盘总净值相对上一收盘快照的回撤超阈值，新的开仓被暂停
+#（平仓不受影响——熔断是把风险降下来，不是把出口锁死）。
+# 与单策略的风控不同：这条管的是"整个组合今天亏了多少"，由 Java 结算侧判定与落痕迹。
+SKIP_PORTFOLIO_HALTED = "portfolio_halted"
 
 SKIP_REASONS = (
     SKIP_MARKET_CLOSED,
@@ -131,6 +160,12 @@ SKIP_REASONS = (
     SKIP_AGENT_LLM_UNAVAILABLE,
     SKIP_AGENT_NO_NEW_INFORMATION,
     SKIP_ALREADY_TRADED_TODAY,
+    SKIP_AWAITING_AUTHORIZATION,
+    SKIP_OUTSIDE_AUTHORIZATION,
+    SKIP_AGENT_INTRADAY_DISABLED,
+    SKIP_WATCH_HOLD,
+    SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED,
+    SKIP_PORTFOLIO_HALTED,
 )
 
 UNKNOWN_PREFIX = "unknown_"

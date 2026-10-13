@@ -139,6 +139,17 @@ public class NewsClient {
     }
 
     /**
+     * 市场级综合（资讯雷达的"今日信息面"）：把全市场快讯按主题关联起来。
+     * 与 {@link #synthesize} 的分工：那是"这只票的信息面"，这是"这屏快讯合起来在说什么"。
+     */
+    public JsonNode synthesizeMarket(List<JsonNode> items) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("mode", "market");
+        body.put("items", items == null ? List.of() : items);
+        return post("/api/v1/news/synthesize", body);
+    }
+
+    /**
      * 抓取资讯原文正文（article_fetcher 白名单管线）。
      *
      * <p>失败时 Python 返回 {@code ok=false} + 人话原因（不在白名单/JS 渲染页/
@@ -149,6 +160,43 @@ public class NewsClient {
         Map<String, Object> body = new HashMap<>();
         body.put("url", url == null ? "" : url);
         return post("/api/v1/news/body", body);
+    }
+
+    /**
+     * 事件线聚类（N4，纯代码，无 LLM）。
+     *
+     * <p>输入是库里的资讯行（含 id），Python 把 id 随成员原样透传回来 ——
+     * Java 侧靠它把聚类成员映射回 news_events 主键。
+     */
+    public JsonNode cluster(List<JsonNode> items) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("items", items == null ? List.of() : items);
+        return post("/api/v1/news/cluster", body);
+    }
+
+    /** LLM 类调用（总编/撰稿）的超时：一次调用 3~15s，留足余量但不无限等。 */
+    private static final Duration LLM_REQUEST_TIMEOUT = Duration.ofSeconds(90);
+
+    /**
+     * 总编（N5）：一次 LLM 调用通览全部事件线 —— 命名 + 圈出值得撰稿的。
+     * clusters 直接转发 /cluster 的输出（Python 只读其中的紧凑字段）。
+     */
+    public JsonNode topicEditor(List<JsonNode> clusters) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("mode", "editor");
+        body.put("clusters", clusters == null ? List.of() : clusters);
+        return post("/api/v1/news/topic-synthesize", body, LLM_REQUEST_TIMEOUT);
+    }
+
+    /** 撰稿（N5）：把一条事件线写成"来龙去脉"（一次 LLM 调用）。 */
+    public JsonNode topicWriter(String title, List<JsonNode> memberItems) {
+        Map<String, Object> topic = new HashMap<>();
+        topic.put("title", title == null ? "" : title);
+        topic.put("items", memberItems == null ? List.of() : memberItems);
+        Map<String, Object> body = new HashMap<>();
+        body.put("mode", "writer");
+        body.put("topic", topic);
+        return post("/api/v1/news/topic-synthesize", body, LLM_REQUEST_TIMEOUT);
     }
 
     /** 响应里是否 {@code ok=true}；降级节点、null 都是 false。 */
@@ -165,10 +213,14 @@ public class NewsClient {
     }
 
     private JsonNode post(String uri, Object body) {
+        return post(uri, body, REQUEST_TIMEOUT);
+    }
+
+    private JsonNode post(String uri, Object body, Duration timeout) {
         try {
             JsonNode node = webClient.post().uri(uri).bodyValue(body)
                     .retrieve().bodyToMono(JsonNode.class)
-                    .timeout(REQUEST_TIMEOUT)
+                    .timeout(timeout)
                     .block();
             return node == null ? degraded(SERVICE_UNAVAILABLE) : node;
         } catch (WebClientResponseException e) {

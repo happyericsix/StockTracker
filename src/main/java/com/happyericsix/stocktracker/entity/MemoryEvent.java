@@ -7,6 +7,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 
 /**
  * 记忆账本（L0）—— agent 视角的原始事件流。
@@ -48,6 +49,9 @@ import java.time.LocalDateTime;
 @NoArgsConstructor
 @Builder
 public class MemoryEvent {
+
+    /** 记忆表统一业务时区（与 MemoryService.ZONE 一致；prePersist 兜底用） */
+    private static final ZoneId ZONE_CN = ZoneId.of("Asia/Shanghai");
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -113,7 +117,7 @@ public class MemoryEvent {
 
     @PrePersist
     void prePersist() {
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = LocalDateTime.now(ZONE_CN);
         if (createdAt == null) {
             createdAt = now;
         }

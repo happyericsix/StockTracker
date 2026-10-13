@@ -329,16 +329,30 @@ def _index_prompt(items: list[tuple[int, dict]]) -> str:
     带 index 是为了**防乱序**：模型返回的 results 顺序不保证与输入一致，
     靠它对回去。用 index 而不是标题/URL 对回去，是因为标题可能重复（同一份公告
     被多家媒体转述），而 index 在这一次调用内唯一。
+
+    `body`（抓回的原文正文）是 2026-10-05 加的：此前只喂标题+摘要，模型自然
+    大批量回「信息不足」——不是模型不行，是没给它读的东西。截断 3000 字：
+    够覆盖公告要点段/研报摘要页，又不至于把批量调用撑爆。
     """
     blocks = []
     for position, (_, item) in enumerate(items):
+        body = str(item.get("body") or "").strip()
+        if body:
+            body = body[:3000]
+        # 跨源归并留下的证据（2026-10-09 多源化）：给模型看的不是结论而是事实——
+        # "另有 N 家信源报道同一件事"本身影响这条资讯的可信度权重。
+        reporters = [str(s or "").strip() for s in (item.get("also_reported_by") or [])
+                     if str(s or "").strip()]
+        extra = (f"\n同事件另见：{'、'.join(reporters[:3])}" +
+                 (f" 等{len(reporters)}家" if len(reporters) > 3 else "")) if reporters else ""
         blocks.append(
             f"[{position + 1}] 来源级别={item.get('source_level')} "
             f"来源={item.get('source_name') or '未知'} "
             f"源站分类={item.get('event_type_raw') or '无'} "
             f"时间={item.get('published_at') or '未知'}\n"
             f"标题：{item.get('title') or '（无标题）'}\n"
-            f"内容：{item.get('content') or '（无正文）'}"
+            f"摘要：{item.get('content') or '（无）'}\n"
+            f"原文正文：{body or '（未取到，请基于标题与摘要解读）'}" + extra
         )
     return "\n\n".join(blocks)
 
@@ -591,5 +605,89 @@ def synthesize_read(items: list[dict], symbol: str = "", name: str = "",
     result["read"] = sanitize(read)
     result["highlights"] = _string_list(parsed.get("highlights"))
     result["skepticism"] = sanitize(str(parsed.get("skepticism") or "").strip())
+    result["ok"] = True
+    return result
+
+
+# ==================== 市场级综合（资讯雷达的"今日信息面"） ====================
+
+MARKET_SYNTHESIS_MAX_ITEMS = 60
+MARKET_SYNTHESIS_MAX_TOKENS = 1600
+
+
+def _market_synthesis_input(items: list[dict]) -> str:
+    """把全市场快讯编成紧凑输入：时间/来源级别/来源/标题 + 摘要或已解读的转述。"""
+    level_label = {1: "公告", 2: "媒体", 3: "研报", 4: "舆情"}
+    blocks = []
+    for item in items[:MARKET_SYNTHESIS_MAX_ITEMS]:
+        level = level_label.get(item.get("source_level"), "媒体")
+        summary = str(item.get("summary") or item.get("content") or "").strip()
+        if len(summary) > 160:
+            summary = summary[:160] + "…"
+        blocks.append(
+            f"[{item.get('published_at') or '时间未知'} {level} {item.get('source_name') or '未知'}] "
+            f"{item.get('title') or '（无标题）'}\n{summary or '（无摘要）'}"
+        )
+    return "\n\n".join(blocks)
+
+
+def _market_topic(raw: str) -> str:
+    """主题名是"标签"不是"正文"：sanitize 会给正文追加免责短句，而标签一旦拖上
+    12 字括号、在手机端又不收缩，正文就被挤成每行两三字的竖条（2026-10 线上
+    真实事故：四条主线全部中招）。所以主题名：不追加（走 _rewrite）、剥掉模型
+    自己拼进来的免责后缀、限长兜底。"""
+    text = _rewrite(raw)
+    marks = ("AI 生成内容", "AI生成内容", "仅供参考", "不构成投资建议")
+    cut = min((i for i in (text.find(m) for m in marks) if i > 0), default=-1)
+    if cut > 0:
+        text = text[:cut]
+    return text.strip().rstrip("，,。；;、（( ")[:16]
+
+
+def synthesize_market(items: list[dict]) -> dict:
+    """把一批全市场快讯**按主题关联**起来（资讯雷达顶部的"今日信息面"）。
+
+    与 {@code synthesize_read} 的分工：那个回答"这只票的信息面"（个股页），
+    这个回答"这屏快讯合起来在说什么"——用户明确反馈过新闻之间没有关联，
+    逐条标签回答不了"合起来呢"。失败一律 ok=false（前端隐藏整块）。
+    """
+    result = {"read": "", "themes": [], "conflicts": "", "notice": AI_NOTICE, "ok": False}
+    selected = [item for item in (items or []) if (item.get("title") or "").strip()]
+    if not selected:
+        return result
+    if not llm_service._is_available():
+        logger.info("市场综合跳过：AI 服务未配置")
+        return result
+    try:
+        parsed, text = _chat_json(llm_service._load_prompt("news_market_synthesis"),
+                                  _market_synthesis_input(selected),
+                                  MARKET_SYNTHESIS_MAX_TOKENS)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("市场综合失败: %s", exc)
+        return result
+    if not isinstance(parsed, dict):
+        logger.warning("市场综合输出无法解析: %.120s", text)
+        return result
+    read = str(parsed.get("read") or "").strip()
+    if not read:
+        return result
+    themes = []
+    raw_themes = parsed.get("themes")
+    if isinstance(raw_themes, list):
+        for theme in raw_themes[:4]:
+            if not isinstance(theme, dict):
+                continue
+            topic = _market_topic(str(theme.get("topic") or "").strip())
+            line = sanitize(str(theme.get("line") or "").strip())
+            if not topic or not line:
+                continue
+            try:
+                count = int(theme.get("count") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            themes.append({"topic": topic, "count": count, "line": line})
+    result["read"] = sanitize(read)
+    result["themes"] = themes
+    result["conflicts"] = sanitize(str(parsed.get("conflicts") or "").strip())
     result["ok"] = True
     return result

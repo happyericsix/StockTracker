@@ -10,6 +10,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @Service
@@ -35,8 +36,17 @@ public class UserService {
         profile.put("username", user.getUsername());
         profile.put("email", user.getEmail());
         profile.put("phone", user.getPhone());
+        profile.put("pushChannel", pushChannelOrEmpty(user));
         return profile;
     }
+
+    /** pushChannel 对外只回显通道名；pushTarget 是密钥级的东西，不随 profile 下发。 */
+    private static String pushChannelOrEmpty(User user) {
+        String c = user.getPushChannel();
+        return c == null ? "" : c;
+    }
+
+    private static final List<String> PUSH_CHANNELS = List.of("", "bark", "serverchan");
 
     @Transactional
     public Map<String, Object> updateProfile(String username, Map<String, Object> updates) {
@@ -53,10 +63,29 @@ public class UserService {
             String phone = (String) updates.get("phone");
             user.setPhone(phone);
         }
+        if (updates.containsKey("pushChannel") || updates.containsKey("pushTarget")) {
+            String channel = strOr(updates.get("pushChannel"), "");
+            String target = strOr(updates.get("pushTarget"), "");
+            if (!PUSH_CHANNELS.contains(channel)) {
+                throw new BusinessException(400, "不支持的推送通道：" + channel);
+            }
+            // 换通道时旧目标一并清空：半套配置（新通道+旧 key）推出去只会是一堆失败请求。
+            if (!channel.equals(pushChannelOrEmpty(user))) {
+                user.setPushTarget("");
+            }
+            user.setPushChannel(channel);
+            if (updates.containsKey("pushTarget")) {
+                user.setPushTarget(target == null ? "" : target.trim());
+            }
+        }
 
         userRepository.save(user);
         log.info("用户 {} 更新了个人信息", username);
         return getProfile(username);
+    }
+
+    private static String strOr(Object v, String fallback) {
+        return v instanceof String s ? s : fallback;
     }
 
     @Transactional

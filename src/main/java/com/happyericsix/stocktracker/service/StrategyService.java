@@ -7,10 +7,12 @@ import com.happyericsix.stocktracker.dto.StrategyRequest;
 import com.happyericsix.stocktracker.dto.StrategyResponse;
 import com.happyericsix.stocktracker.entity.Strategy;
 import com.happyericsix.stocktracker.entity.User;
+import com.happyericsix.stocktracker.event.DecisionModeSwitchedEvent;
 import com.happyericsix.stocktracker.repository.StrategyRepository;
 import com.happyericsix.stocktracker.repository.UserRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.JsonNode;
@@ -34,17 +36,21 @@ public class StrategyService {
      *  而"记忆写不进去"绝不能让一条本来成功的回测失败（见 recordBacktestFacts）。 */
     private final MemoryFactService memoryFactService;
     private final MemoryService memoryService;
+    /** 决策来源切换的广播（模拟盘侧监听后立刻开第一次委员会）。 */
+    private final ApplicationEventPublisher eventPublisher;
 
     public StrategyService(StrategyRepository strategyRepository,
                            StrategyClient strategyClient,
                            UserRepository userRepository,
                            MemoryFactService memoryFactService,
-                           MemoryService memoryService) {
+                           MemoryService memoryService,
+                           ApplicationEventPublisher eventPublisher) {
         this.strategyRepository = strategyRepository;
         this.strategyClient = strategyClient;
         this.userRepository = userRepository;
         this.memoryFactService = memoryFactService;
         this.memoryService = memoryService;
+        this.eventPublisher = eventPublisher;
     }
 
     @Transactional
@@ -71,24 +77,62 @@ public class StrategyService {
     }
 
     @Transactional
+    public StrategyResponse get(String username, Long id) {
+        User user = getUser(username);
+        Strategy strategy = strategyRepository.findByIdAndUserId(id, user.getId())
+                .orElseThrow(() -> new IllegalArgumentException("策略不存在"));
+        return StrategyResponse.from(strategy);
+    }
+
     public StrategyResponse updateStrategy(String username, Long id, StrategyRequest request) {
         User user = getUser(username);
         Strategy strategy = strategyRepository.findByIdAndUserId(id, user.getId())
                 .orElseThrow(() -> new IllegalArgumentException("策略不存在"));
 
+        // 换标的 = 换了一条策略：模拟账户、成交历史、验证结论全部挂在原标的上，
+        // 就地改 symbol 会把这些数据变成"不是同一只票跑出来的"。换票请新建。
+        if (request.getSymbol() != null && !request.getSymbol().isBlank()
+                && !request.getSymbol().equalsIgnoreCase(strategy.getSymbol())) {
+            throw new IllegalArgumentException(
+                    "暂不支持更换标的：账户与历史表现都挂在原标的上，换票请新建一条策略");
+        }
         if (request.getName() != null && !request.getName().isBlank()) {
             strategy.setName(request.getName());
         }
-        if (request.getSymbol() != null && !request.getSymbol().isBlank()) {
-            strategy.setSymbol(request.getSymbol());
-        }
         if (request.getConfigJson() != null && !request.getConfigJson().isBlank()) {
+            String error = validateConfigOrReject(request.getConfigJson());
+            if (error != null) {
+                throw new IllegalArgumentException("规则校验未通过：" + error);
+            }
             strategy.setConfigJson(request.getConfigJson());
+            // 口径分界（与 decisionModeSince 同一条纪律）：改过规则之后的净值
+            // 与之前不可比，报告与页面据此画线。只打规则变更，改名不动它。
+            strategy.setConfigUpdatedAt(java.time.LocalDateTime.now());
         }
 
         strategy = strategyRepository.save(strategy);
-        log.info("User {} updated strategy id={}", username, id);
+        log.info("User {} updated strategy id={} (configChanged={})",
+                username, id, strategy.getConfigUpdatedAt() != null);
         return StrategyResponse.from(strategy);
+    }
+
+    /**
+     * 规则 DSL 校验（编辑保存的守门员）。返回 null = 通过；非空 = 给用户看的错误。
+     * 校验服务不可用时**fail-closed**：宁可不保存，也不把改坏的规则放进
+     * 下一次结算 —— 那会在痕迹里炸出一串 unknown，而用户以为已经改好了。
+     */
+    private String validateConfigOrReject(String configJson) {
+        try {
+            tools.jackson.databind.JsonNode result = strategyClient.validateConfig(configJson);
+            if (result != null && result.path("valid").asBoolean(false)) {
+                return null;
+            }
+            String error = result == null ? null : result.path("error").asText("");
+            return error == null || error.isBlank() ? "规则结构无法识别" : error;
+        } catch (Exception e) {
+            log.warn("规则校验服务不可用，编辑被拒绝: {}", e.getMessage());
+            return "校验服务暂不可用，请稍后再试";
+        }
     }
 
     @Transactional
@@ -98,6 +142,33 @@ public class StrategyService {
                 .orElseThrow(() -> new IllegalArgumentException("策略不存在"));
         strategyRepository.delete(strategy);
         log.info("User {} deleted strategy id={}", username, id);
+    }
+
+    /**
+     * 开启只读分享：生成新 token（旧 token 随之失效——重新生成就是"撤回旧链接"）。
+     * 公开视图只含策略本身与模拟盘表现，**绝不含**用户名/邮箱等身份信息。
+     */
+    @Transactional
+    public String enableShare(String username, Long id) {
+        User user = getUser(username);
+        Strategy strategy = strategyRepository.findByIdAndUserId(id, user.getId())
+                .orElseThrow(() -> new IllegalArgumentException("策略不存在"));
+        String token = java.util.UUID.randomUUID().toString().replace("-", "");
+        strategy.setShareToken(token);
+        strategyRepository.save(strategy);
+        log.info("User {} enabled share link for strategy id={}", username, id);
+        return token;
+    }
+
+    /** 关闭分享（token 置空，旧链接立刻失效）。 */
+    @Transactional
+    public void disableShare(String username, Long id) {
+        User user = getUser(username);
+        Strategy strategy = strategyRepository.findByIdAndUserId(id, user.getId())
+                .orElseThrow(() -> new IllegalArgumentException("策略不存在"));
+        strategy.setShareToken(null);
+        strategyRepository.save(strategy);
+        log.info("User {} disabled share link for strategy id={}", username, id);
     }
 
     /**
@@ -173,6 +244,13 @@ public class StrategyService {
             if (ranAtFact != null) {
                 facts.add(ranAtFact);
             }
+            // 双层记忆（2026-10-09）：上面那些谓词是给取代链与 recall 的；
+            // 用户看到的是这一句人话结论（userVisible=true）
+            String story = backtestStory(metrics);
+            MemoryFactRequest storyFact = ObjectiveFactKeys.observationStory(subject, story, ranAt);
+            if (storyFact != null) {
+                facts.add(storyFact);
+            }
             if (facts.isEmpty()) {
                 return;
             }
@@ -212,6 +290,11 @@ public class StrategyService {
             strategyRepository.save(strategy);
             log.info("User {} switched strategy id={} decision mode {} -> {}",
                     username, id, current, normalized);
+            // 广播"换了决策者"：模拟盘侧（监听器）决定要不要立刻开第一次委员会。
+            // 只在真正切换时广播 —— 这里不判断"切到 agent 且在跑"之类的业务条件，
+            // 那是模拟盘的知识，写在这里两边迟早对不上。
+            eventPublisher.publishEvent(new DecisionModeSwitchedEvent(
+                    strategy.getId(), normalized, Boolean.TRUE.equals(strategy.getPaperEnabled())));
         }
         return StrategyResponse.from(strategy);
     }
@@ -342,11 +425,65 @@ public class StrategyService {
                     addFact(facts, subject, ObjectiveFactKeys.VERIFY_ENGINE_VERSION, engineVersion, ranAt);
                 }
             }
+            // 双层记忆：验证的人话结论（validCells=0 也要说清"这次没验证成"）
+            MemoryFactRequest storyFact = ObjectiveFactKeys.observationStory(
+                    subject, verificationStory(validCells, summary), ranAt);
+            if (storyFact != null) {
+                facts.add(storyFact);
+            }
             memoryFactService.recordObjective(user.getId(),
                     memoryService.currentSessionKey(user.getId()), facts);
         } catch (Exception e) {
             log.warn("验证客观事实入账失败 strategyId={}: {}",
                     strategy == null ? null : strategy.getId(), e.getMessage());
+        }
+    }
+
+    /** 回测指标 → 一句话结论。字段缺失时退化为短句，绝不抛（记忆是旁路）。 */
+    static String backtestStory(JsonNode metrics) {
+        try {
+            StringBuilder story = new StringBuilder("回测结论：");
+            if (metrics.hasNonNull("total_return_pct")) {
+                story.append("总收益 ").append(metrics.get("total_return_pct").asDouble()).append("%");
+            }
+            if (metrics.hasNonNull("buy_and_hold_return_pct")) {
+                story.append("（同期买入持有 ").append(metrics.get("buy_and_hold_return_pct").asDouble())
+                        .append("%）");
+            }
+            if (metrics.hasNonNull("max_drawdown_pct")) {
+                story.append("，最大回撤 ").append(metrics.get("max_drawdown_pct").asDouble()).append("%");
+            }
+            if (metrics.hasNonNull("trade_count")) {
+                story.append("，").append(metrics.get("trade_count").asInt()).append(" 笔交易");
+            }
+            if (metrics.hasNonNull("win_rate")) {
+                story.append("，胜率 ").append(metrics.get("win_rate").asDouble()).append("%");
+            }
+            return story.length() > "回测结论：".length() ? story.toString() : "";
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** 验证指标 → 一句话结论；0 样本明确说"这次没验证成"（与"表现平平"分开）。 */
+    static String verificationStory(int validCells, JsonNode summary) {
+        try {
+            if (validCells <= 0 || summary == null || !summary.isObject()) {
+                return "样本外验证：本次没有可用样本（数据不足），此前的验证结论未被取代";
+            }
+            StringBuilder story = new StringBuilder("样本外验证结论：").append(validCells).append(" 个有效样本");
+            if (summary.hasNonNull("beat_buy_and_hold")) {
+                story.append("，其中 ").append(summary.get("beat_buy_and_hold").asInt()).append(" 个跑赢买入持有");
+            }
+            if (summary.hasNonNull("avg_excess_pct")) {
+                story.append("，平均超额 ").append(summary.get("avg_excess_pct").asDouble()).append("%");
+            }
+            if (summary.hasNonNull("avg_cost_pct_of_capital")) {
+                story.append("（摩擦损耗约 ").append(summary.get("avg_cost_pct_of_capital").asDouble()).append("%）");
+            }
+            return story.toString();
+        } catch (Exception e) {
+            return "";
         }
     }
 

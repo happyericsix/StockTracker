@@ -137,9 +137,21 @@ public class PaperTradeTraceResponse {
         map.put(ExecutionContract.SKIP_AGENT_BUDGET_EXCEEDED, "agent 这一轮的调用/token 预算用完了，没做出决策");
         map.put(ExecutionContract.SKIP_AGENT_LLM_UNAVAILABLE, "agent 依赖的模型服务不可用，本轮没做出决策");
         map.put(ExecutionContract.SKIP_AGENT_NO_NEW_INFORMATION,
-                "没有值得开会的触发理由（事件驱动门控），本轮**没有召集委员会** —— 这不是模型决定不动");
+                "没有值得开会的触发理由（事件驱动门控），本轮没有召集委员会 —— 这不是模型决定不动");
         map.put(ExecutionContract.SKIP_ALREADY_TRADED_TODAY,
                 "今天已经成交过（盘中那条路成交的），本次只按收盘重估账户，不再下单");
+        map.put(ExecutionContract.SKIP_AWAITING_AUTHORIZATION,
+                "agent 模式盘中执行需要委员会先开一次会划定边界（授权），还没有任何一次授权 —— 等下一次日线结算开会");
+        map.put(ExecutionContract.SKIP_OUTSIDE_AUTHORIZATION,
+                "规则给了信号，但信号在委员会划定的授权边界之外（如未授权开仓时的买入信号），被风控挡下");
+        map.put(ExecutionContract.SKIP_AGENT_INTRADAY_DISABLED,
+                "委员会此前开会决定关闭盘中执行（只等日线结算决策）—— 这是委员会的主动决定，不是没看行情");
+        map.put(ExecutionContract.SKIP_WATCH_HOLD,
+                "盯盘 agent 被事件叫起来看过，但决定不动（含否决规则信号）—— 模型看过了，这是它的判断");
+        map.put(ExecutionContract.SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED,
+                "盯盘 agent 的当日调用预算用完，盘中回落到规则+授权执行 —— 预算是成本止损线，不是模型的结论");
+        map.put(ExecutionContract.SKIP_PORTFOLIO_HALTED,
+                "组合熔断：全部模拟盘当日的总回撤超过阈值，新的开仓被暂停（平仓不受影响）");
         return map;
     }
 
@@ -162,7 +174,17 @@ public class PaperTradeTraceResponse {
         StringBuilder text = new StringBuilder();
         text.append(entity.getTradeDate() == null ? "" : entity.getTradeDate().toString());
         if (entity.getBarTime() != null && !entity.getBarTime().isBlank()) {
-            text.append(' ').append(entity.getBarTime());
+            // 盘中痕迹的 barTime 是完整时间戳（"2026-10-09 14:57:00"），前面已经写过
+            // tradeDate —— 再拼一遍日期就是"2026-10-09 2026-10-09 14:57:00"（线上实发）。
+            // 前缀重复时只保留时刻；日线痕迹 barTime 为空/仅日期时维持原样。
+            String barTime = entity.getBarTime().trim();
+            String datePrefix = (entity.getTradeDate() == null ? "" : entity.getTradeDate().toString()) + " ";
+            if (barTime.startsWith(datePrefix)) {
+                barTime = barTime.substring(datePrefix.length());
+            }
+            if (!barTime.isBlank()) {
+                text.append(' ').append(barTime);
+            }
         }
         text.append("（").append(entity.getSymbol() == null ? "" : entity.getSymbol()).append("）");
 

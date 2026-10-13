@@ -11,7 +11,12 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 @Entity
-@Table(name = "paper_trades")
+@Table(name = "paper_trades", indexes = {
+        // existsByStrategyIdAndTradeDate（每日幂等守卫，盘中结算高频调用）与
+        // findByStrategyIdOrderByTradeDateDescCreatedAtDesc 此前都是全表扫描 ——
+        // trace/snapshot 表都有 (strategy_id, trade_date) 索引，唯独成交表没有。
+        @Index(name = "idx_paper_trades_strategy_date", columnList = "strategy_id, trade_date")
+})
 @Data
 @AllArgsConstructor
 @NoArgsConstructor

@@ -36,4 +36,16 @@ public class User {
     @Enumerated(EnumType.STRING)
     private Role role;
 
+    /**
+     * 消息推送通道：'' / 'bark' / 'serverchan'。
+     *
+     * <p>推送是**旁路增强**：配置错、网络失败、没配置，都只记日志，绝不影响
+     * 站内消息的落库（站内消息永远是主通道，推送只是"手机上能第一时间知道"）。
+     */
+    private String pushChannel;
+
+    /** 推送目标：bark 填完整服务器地址（如 https://api.day.app/xxxx），serverchan 填 SendKey。 */
+    @JsonIgnore
+    private String pushTarget;
+
 }

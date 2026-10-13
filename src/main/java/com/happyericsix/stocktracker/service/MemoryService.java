@@ -54,8 +54,14 @@ public class MemoryService {
     static final int MAX_CONTENT_CHARS = 4000;
     /** 注入给模型的"前情提要"条数上限 */
     static final int RECAP_LIMIT = 3;
-    /** 一次检查多少个历史会话是否需要总结 */
-    static final int PENDING_SCAN = 3;
+    /**
+     * 一次检查多少个历史会话是否需要总结。
+     * 原来是 3：用户隔 5 天回来，只有最近 3 天能补上摘要，更早的会话**永远**
+     * 轮不到（pendingSessions 只往前看这么多），那些天的对话从此只剩 raw 账本。
+     * 提到 7：一次跨天触发最多补 7 段（异步、失败无害、只发生一次），
+     * buildContext 里多查的十来个小 SQL 对单用户规模无感。
+     */
+    static final int PENDING_SCAN = 7;
     /** 少于这个事件数的会话不值得总结（比如用户只发了一句就再没回来） */
     static final int MIN_EVENTS_FOR_RECAP = 2;
     /** 兜底摘录：单条内容的字符上限 / 最多带几条 */
@@ -74,6 +80,8 @@ public class MemoryService {
     /** 预热阶段的前两个触发点：第一轮问答结束就有记忆，之后逐步放缓 */
     static final int FIRST_CONSOLIDATE_AT = 2;
     static final int SECOND_CONSOLIDATE_AT = 4;
+    /** 一次返回给内部接口的账本事件上限（见 listEvents） */
+    static final int MAX_EVENTS_RETURNED = 200;
     /** 两次巩固之间的冷却，防止异步还没写完就被重复触发 */
     static final long CONSOLIDATE_COOLDOWN_MS = 60_000L;
     static final int MAX_COOLDOWN_ENTRIES = 512;
@@ -165,10 +173,25 @@ public class MemoryService {
     }
 
     public List<MemoryEvent> listEvents(Long userId, String sessionKey) {
+        return listEvents(userId, sessionKey, MAX_EVENTS_RETURNED);
+    }
+
+    /**
+     * 一个会话的账本事件（最近若干条）。限长的原因：consolidate 只消费最近
+     * {@code MAX_EVENTS}（60）条，digest 只看尾部 6 条——把一整天的几百条
+     * （含 tool_result/usage）全量序列化成 JSON 传给 Python 纯属浪费带宽。
+     */
+    public List<MemoryEvent> listEvents(Long userId, String sessionKey, int limit) {
         if (userId == null || sessionKey == null || sessionKey.isBlank()) {
             return List.of();
         }
-        return eventRepo.findByUserIdAndSessionKeyOrderByIdAsc(userId, sessionKey);
+        int max = limit <= 0 ? MAX_EVENTS_RETURNED : Math.min(limit, MAX_EVENTS_RETURNED);
+        List<MemoryEvent> events =
+                eventRepo.findByUserIdAndSessionKeyOrderByIdAsc(userId, sessionKey);
+        if (events.size() <= max) {
+            return events;
+        }
+        return events.subList(events.size() - max, events.size());
     }
 
     // ==================== 读取：组装上下文 ====================
@@ -285,7 +308,9 @@ public class MemoryService {
         }
         overview.put("facts", factService.stats(userId));
         overview.put("lessons", lessonService.statusCounts(userId));
-        overview.put("episodes", episodeRepo.countByUserId(userId));
+        // "段"按 sessionKey 去重：同一会话重生成摘要是版本追加，
+        // 按行数算会把"3 段对话、每段重总结 2 次"显示成 6 段。
+        overview.put("episodes", episodeRepo.countDistinctSessionKeyByUserId(userId));
         overview.put("lastConsolidatedAt", episodeRepo
                 .findByUserIdOrderByCreatedAtDesc(userId, PageRequest.of(0, 1)).stream()
                 .findFirst()

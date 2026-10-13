@@ -38,6 +38,15 @@ def test_trusted_source_named_boost():
     assert trusted["credibility"] > unknown["credibility"]
 
 
+@pytest.mark.parametrize("name", ["央视·新闻联播", "新浪财经", "同花顺", "富途"])
+def test_new_multi_sources_are_trusted(name):
+    """2026-10-09 多源化接入的源必须命中可信名单 —— 漏配会让新源条目
+    整体比同级别的东财条目低一档，表现成"换了个源可信度就变低"。"""
+    trusted = assess_items([item(source_name=name)], now=NOW)[0]
+    unknown = assess_items([item(source_name="某unknown媒体")], now=NOW)[0]
+    assert trusted["credibility"] > unknown["credibility"]
+
+
 def test_rumor_wording_flags_and_penalizes():
     clean = assess_items([item(title="甲公司中标5亿元项目")], now=NOW)[0]
     rumor = assess_items([item(title="据传甲公司或将获得大单")], now=NOW)[0]
@@ -135,6 +144,29 @@ def test_peers_enable_single_item_corroboration():
     with_peers = assess_items([single], now=NOW, peers=peers + [single])[0]
     assert with_peers["corroborated"] is True
     assert without["corroborated"] is False
+
+
+def test_also_reported_by_counts_as_corroboration():
+    """跨源归并证据（2026-10-09 多源化）：宏观快讯没有 symbol，批内印证对它们
+    永远不生效 —— also_reported_by 是唯一能让它们拿到印证分的路径。"""
+    macro = {"symbol": "", "source_level": 2, "source_name": "东方财富·全球快讯",
+             "title": "央行开展3000亿元MLF操作", "content": "中标利率维持不变",
+             "published_at": "2026-09-18 08:30:00"}
+    corroborated = assess_items(
+        [dict(macro, also_reported_by=["新浪财经", "同花顺"])], now=NOW)[0]
+    alone = assess_items([macro], now=NOW)[0]
+    assert corroborated["corroborated"] is True
+    assert corroborated["credibility"] > alone["credibility"]
+    assert any("报道同一事件" in r and "新浪财经" in r
+               for r in corroborated["credibility_reasons"])
+    assert alone["corroborated"] is False
+
+
+def test_also_reported_by_excludes_own_source():
+    """归并组里同名的转载不算"另一家"（与批内印证的同一语义）。"""
+    result = assess_items(
+        [item(also_reported_by=["新浪财经"])], now=NOW)[0]   # 本身就是新浪财经
+    assert result["corroborated"] is False
 
 
 @pytest.mark.parametrize("grade_floor", [("高", 80), ("较高", 65), ("中", 50), ("较低", 35)])

@@ -40,8 +40,11 @@ def compute_indicators(records):
     closes = np.array([float(r["close"]) for r in records], dtype=float)
     highs = np.array([float(r["high"]) for r in records], dtype=float)
     lows = np.array([float(r["low"]) for r in records], dtype=float)
+    # 量比条件（2026-10-13）需要成交量序列；缺 volume 的记录按 0 计（脏行不挡指标）
+    volumes = np.array([float(r.get("volume") or 0.0) for r in records], dtype=float)
     dates = [r.get("date", str(i)) for i, r in enumerate(records)]
-    ind = {"closes": closes, "highs": highs, "lows": lows, "dates": dates}
+    ind = {"closes": closes, "highs": highs, "lows": lows,
+           "volumes": volumes, "dates": dates}
     for w in (5, 10, 20, 60):
         ind[f"ma_{w}"] = _sma(closes, w)
     ind["rsi"] = _rsi(closes, 14)
@@ -129,6 +132,24 @@ def _cond_met(c, ind, i, position):
         # 不依赖持仓，所以在 position 检查之前返回
         return _price_vs_ma(t, ind, i, getattr(c, "window", None),
                             getattr(c, "direction", None))
+    if t == "bias_pct":
+        # 乖离率过滤（防追高）：(现价-均线)/均线×100 ≤ 阈值。
+        # 常与 price_cross_ma(above) 组成"上穿且没追高"的入场；均线未成形时恒不成立
+        ma = _ma_for(ind, c.window)
+        if np.isnan(ma[i]) or ma[i] <= 0:
+            return False
+        return (ind["closes"][i] - ma[i]) / ma[i] * 100.0 <= c.value
+    if t == "volume_ratio":
+        # 量比：当日量 / 过去 window 日均量（基期不含当日），above=放量 / below=缩量。
+        # 基期不足或均量为 0（长期停牌/脏数据）时恒不成立——没有基数的比较是伪信号
+        vols = ind.get("volumes")
+        if vols is None or i < c.window or i == 0:
+            return False
+        base = float(np.mean(vols[max(0, i - c.window):i]))
+        if base <= 0:
+            return False
+        ratio = float(vols[i]) / base
+        return ratio >= c.value if c.direction == "above" else ratio <= c.value
     if position is None:
         return False
     entry = position.get("entry_price")
@@ -181,7 +202,10 @@ def run_backtest(config: dict, records: list[dict]) -> dict:
             ok, reasons = evaluate_rule(cfg.entry, ind, i, None)
             if ok:
                 fill = price * (1 + slip)
-                budget = cash if cfg.position.type == "full" else cash * (cfg.position.size_pct or 100) / 100.0
+                # size_pct=None 才取缺省 100：0 是一个**显式的配置值**（预算为零 → 买不进），
+                # `or 100` 会把它悄悄放大成全仓 —— 与结算侧（Java）的行为正好相反。
+                size_pct = cfg.position.size_pct if cfg.position.size_pct is not None else 100
+                budget = cash if cfg.position.type == "full" else cash * size_pct / 100.0
                 shares = budget * (1 - comm) / fill
                 buy_cost = shares * fill * (1 + comm)
                 cash -= buy_cost
@@ -379,12 +403,18 @@ def _warmup_pending(cfg_dict: dict, ind: dict, idx: int) -> bool:
 
     只看这条策略真正用到的指标（`indicator_keys_for`），不是"全部指标都算好了"：
     一个只用 RSI 的策略不该因为 MA60 还没算出来就被判成预热中。
+    自定义窗口的均线（`ma_120` 这类不在预计算集里的键）按需现算 ——
+    条件评估（`_ma_for`）就是这么做的，warmup 判定必须与它同一口径，
+    否则"窗口不够"会被误记成 `rule_not_met`（有样本且规则没动）。
     """
     for key in ec.indicator_keys_for(cfg_dict):
         values = ind.get(key)
         if values is None:
-            continue                      # 引擎没有这个键（如自定义窗口的均线）→ 不猜
-        value = values[idx]
+            if key.startswith("ma_") and key[3:].isdigit():
+                values = _ma_for(ind, int(key[3:]))   # 自定义窗口：与条件评估同一算法
+            else:
+                continue                              # 引擎没有这个键 → 不猜
+        value = values[idx] if idx < len(values) else None
         if value is None or np.isnan(value):
             return True
     return False
@@ -557,7 +587,9 @@ def run_backtest_realistic(
                 if not limit_blocked(f, "buy"):
                     o = fill_open(f, "buy")
                     if o > 0:
-                        budget = cash if cfg.position.type == "full" else cash * (cfg.position.size_pct or 100) / 100.0
+                        # 与理想引擎同一口径：0 是显式配置（预算为零），不是"没填"。
+                        size_pct = cfg.position.size_pct if cfg.position.size_pct is not None else 100
+                        budget = cash if cfg.position.type == "full" else cash * size_pct / 100.0
                         lots = int(budget / (o * (1.0 + comm) * lot)) if o > 0 else 0
                         sh = float(lots * lot)
                         if lots == 0 and funding_note is None:

@@ -75,7 +75,7 @@ class MemoryFactServiceTest {
 
     @Test
     void firstFactIsCreatedWithoutSupersedingAnything() {
-        when(factRepo.findActiveByKey(1L, "user", "stop_loss_pct")).thenReturn(List.of());
+        when(factRepo.findActiveByKeyForUpdate(1L, "user", "stop_loss_pct")).thenReturn(List.of());
         when(factRepo.save(any(MemoryFact.class))).thenAnswer(inv -> inv.getArgument(0));
 
         List<MemoryFactService.FactWriteResult> results =
@@ -95,7 +95,7 @@ class MemoryFactServiceTest {
     /** 核心用例：止损从 -8 改成 5 —— 新事实指向旧的，旧事实就此失效。 */
     @Test
     void changedValueSupersedesThePreviousFact() {
-        when(factRepo.findActiveByKey(1L, "user", "stop_loss_pct"))
+        when(factRepo.findActiveByKeyForUpdate(1L, "user", "stop_loss_pct"))
                 .thenReturn(List.of(existing(41L, "-8")));
         when(factRepo.save(any(MemoryFact.class))).thenAnswer(inv -> inv.getArgument(0));
 
@@ -113,7 +113,7 @@ class MemoryFactServiceTest {
     /** 同键同值：什么都不做。否则每天巩固一次就会把同一句话堆成一串重复事实。 */
     @Test
     void identicalValueIsNotWrittenAgain() {
-        when(factRepo.findActiveByKey(1L, "user", "stop_loss_pct"))
+        when(factRepo.findActiveByKeyForUpdate(1L, "user", "stop_loss_pct"))
                 .thenReturn(List.of(existing(41L, "5")));
 
         List<MemoryFactService.FactWriteResult> results =
@@ -138,7 +138,7 @@ class MemoryFactServiceTest {
 
     @Test
     void unknownFactTypeFallsBackToObservation() {
-        when(factRepo.findActiveByKey(anyLong(), anyString(), anyString())).thenReturn(List.of());
+        when(factRepo.findActiveByKeyForUpdate(anyLong(), anyString(), anyString())).thenReturn(List.of());
         when(factRepo.save(any(MemoryFact.class))).thenAnswer(inv -> inv.getArgument(0));
 
         MemoryFactRequest weird = fact("user", "risk_preference", "稳健");
@@ -152,7 +152,7 @@ class MemoryFactServiceTest {
 
     @Test
     void batchIsCappedToProtectAgainstRunawayExtraction() {
-        when(factRepo.findActiveByKey(anyLong(), anyString(), anyString())).thenReturn(List.of());
+        when(factRepo.findActiveByKeyForUpdate(anyLong(), anyString(), anyString())).thenReturn(List.of());
         when(factRepo.save(any(MemoryFact.class))).thenAnswer(inv -> inv.getArgument(0));
 
         List<MemoryFactRequest> many = new ArrayList<>();
@@ -219,6 +219,26 @@ class MemoryFactServiceTest {
         assertEquals("5", found.get(0).get("object"));
         assertEquals("-8", found.get(0).get("previousValue"));
         assertEquals("2026-09-01T10:00", found.get(0).get("previousRecordedAt"));
+    }
+
+    /**
+     * 读侧自愈：同键多条 active（历史脏数据/曾经的并发写）时只注入最新一条。
+     * 两个矛盾的止损值同时进上下文，是记忆系统最伤信任的故障。
+     */
+    @Test
+    void searchFactsKeepsOnlyTheLatestRowPerKeyWhenMultipleAreActive() {
+        MemoryFact stale = existing(41L, "-8");
+        MemoryFact latest = MemoryFact.builder()
+                .id(57L).userId(1L).subject("user").predicate("stop_loss_pct").factValue("5")
+                .factType("constraint").confidence(0.9)
+                .recordedAt(LocalDateTime.of(2026, 9, 16, 10, 0)).confirmed(true).trust("high")
+                .build();
+        when(factRepo.findActiveByUserId(1L)).thenReturn(List.of(stale, latest));
+
+        List<Map<String, Object>> found = service.searchFacts(1L, "止损", null, null, 5);
+
+        assertEquals(1, found.size());
+        assertEquals("5", found.get(0).get("object"));
     }
 
     @Test
@@ -325,5 +345,28 @@ class MemoryFactServiceTest {
         assertEquals(MemoryFactService.PERSONA_LIMIT, persona.size());
         // 偏好排在持仓之前
         assertEquals("preference", persona.get(0).get("factType"));
+    }
+
+    /**
+     * 双层记忆（2026-10-09）：用户门面（visibleOnly=true）只回可见层；
+     * 内部消费（memory_search 工具 / recall 注入）走默认重载读全量。
+     * 两个口径共用同一查询逻辑，只差一个开关 —— 这里把开关钉住。
+     */
+    @Test
+    void searchFactsRespectsVisibilityOnlyForUserFacade() {
+        MemoryFact visible = MemoryFact.builder().id(1L).userId(1L)
+                .subject("user").predicate("risk_preference").factValue("稳健")
+                .factType("preference").userVisible(true).build();
+        MemoryFact telemetry = MemoryFact.builder().id(2L).userId(1L)
+                .subject("strategy:1").predicate("paper_equity").factValue("100000")
+                .factType("observation").userVisible(false).build();
+        when(factRepo.findActiveByUserId(1L)).thenReturn(List.of(visible, telemetry));
+
+        List<Map<String, Object>> facade = service.searchFacts(1L, null, null, null, 10, true);
+        assertEquals(1, facade.size(), "用户门面不该被遥测占据");
+        assertEquals("risk_preference", facade.get(0).get("predicate"));
+
+        List<Map<String, Object>> internal = service.searchFacts(1L, null, null, null, 10);
+        assertEquals(2, internal.size(), "内部消费（recall/记忆搜索）读全量");
     }
 }

@@ -68,6 +68,21 @@ public class Strategy {
     @Column(name = "decision_mode_since")
     private LocalDate decisionModeSince;
 
+    /**
+     * 规则最近一次被用户修改的时间（策略编辑面板写入）。与 decisionModeSince
+     * 同一条纪律：改过规则之后的净值与之前**口径不同、不可比**，报告与页面
+     * 据此画出分界线。null = 从未改过（初始 AI 生成的不算）。
+     */
+    private java.time.LocalDateTime configUpdatedAt;
+
+    /**
+     * 只读分享令牌：null = 未分享；非 null 时 {@code /share/{token}} 可匿名查看
+     * 这条策略的公开视图（名称/标的/DSL/模拟盘曲线——**不含**任何用户身份信息）。
+     * 重新生成即旧链接失效；置回 null 即"下线"。
+     */
+    @Column(name = "share_token", length = 64, unique = true)
+    private String shareToken;
+
     @PrePersist
     protected void onCreate() {
         createdAt = LocalDateTime.now();

@@ -246,3 +246,52 @@ if __name__ == "__main__":
         if fn.__code__.co_argcount == 0:
             fn()
             print("PASS", fn.__name__)
+
+
+# ==================== 盘中授权（authorization 模式，2026-10-06） ====================
+
+def test_authorization_passes_through_with_conservative_defaults():
+    """完整授权透传；缺省语义：allow_open 跟随总开关、allow_close 宽松、上限 1.0。"""
+    d = parse_trade_decision(_text(
+        "FINAL TRANSACTION PROPOSAL: **HOLD**",
+        '{"signal":"HOLD","size_fraction":0,'
+        '"authorization":{"intraday_execution":true,"notes":"趋势未破坏，放行规则执行"}}'))
+    assert d.authorization == {
+        "intraday_execution": True,
+        "allow_open": True,       # 缺省跟随 intraday_execution
+        "allow_close": True,      # 缺省宽松：允许退出风控
+        "max_position_pct": 1.0,  # 缺省不额外限制（结算侧还有两层夹取）
+        "notes": "趋势未破坏，放行规则执行",
+    }
+
+
+def test_missing_authorization_is_none_not_a_permissive_default():
+    """没给授权就是 None（未授权），绝不默认放行——授权必须显式给出。"""
+    d = parse_trade_decision(_text(
+        "FINAL TRANSACTION PROPOSAL: **BUY**",
+        '{"signal":"BUY","size_fraction":0.3}'))
+    assert d.decision == ec.DECISION_BUY
+    assert d.authorization is None
+
+
+def test_out_of_range_position_cap_is_clamped_and_warned():
+    d = parse_trade_decision(_text(
+        "FINAL TRANSACTION PROPOSAL: **BUY**",
+        '{"signal":"BUY","size_fraction":0.3,'
+        '"authorization":{"intraday_execution":true,"max_position_pct":1.7}}'))
+    assert d.authorization["max_position_pct"] == 1.0
+    assert any("max_position_pct" in w for w in d.warnings)
+
+
+def test_unparsable_output_grants_no_authorization():
+    """连结论都写不清楚的输出，不该拥有写授权的权力。"""
+    d = parse_trade_decision("今天天气不错，适合散步。")
+    assert d.decision == ec.DECISION_SKIP
+    assert d.authorization is None
+
+
+def test_prompt_contract_mentions_authorization():
+    """输出契约必须教模型给授权，否则这条路永远走不起来。"""
+    contract = decision_prompt_contract()
+    assert "authorization" in contract
+    assert "intraday_execution" in contract

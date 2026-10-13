@@ -25,8 +25,8 @@ public final class PaperSchedule {
     /** 日线结算时间（与 {@code PaperTradingJob} 的 cron 一致：交易日 15:30，Asia/Shanghai）。 */
     public static final LocalTime DAILY_SETTLEMENT_TIME = LocalTime.of(15, 30);
 
-    /** 盘中评估的节奏（与 {@code StockPriceRefreshJob} 的 fixedRate 一致）。 */
-    public static final int REALTIME_INTERVAL_MINUTES = 5;
+    /** 盘中结算的节奏说明（快车道 2026-10-08：价格刷新 15s，结算 45s 节流 + 1 分钟 K 线）。 */
+    public static final String REALTIME_NOTE = "盘中随行情刷新评估（1 分钟 K 线，约每分钟一次）";
 
     private static final ZoneId ZONE = ZoneId.of("Asia/Shanghai");
 
@@ -75,11 +75,11 @@ public final class PaperSchedule {
                 ExecutionContract.normalizeDecisionMode(decisionMode));
         if (agent) {
             return new NextEvaluation("daily", daily,
-                    "多角色委员会只在日线结算时决策（盘中不做规则检查）");
+                    "委员会在日线结算时决策并划定授权边界；盘中由盯盘 agent 事件驱动执行"
+                    + "（急涨急跌/量能异动/逼近止损线等，授权边界内直接下单；止损硬风控永远即时）");
         }
         return new NextEvaluation("realtime", daily,
-                "盘中随行情刷新评估（约每 " + REALTIME_INTERVAL_MINUTES + " 分钟一次），日线结算在 "
-                        + format(daily));
+                REALTIME_NOTE + "，日线结算在 " + format(daily));
     }
 
     /**

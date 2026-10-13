@@ -63,9 +63,9 @@ class MessageReportIdempotencyTest {
     void theSameReportKeyIsDeliveredExactlyOnce() {
         User user = user();
 
-        Message first = messageService.saveReport(user, PaperReviewReportService.TYPE_PAPER_REPORT,
+        Message first = messageService.saveReport(user, "PAPER_REPORT",
                 KEY, "600519", "【模拟盘复盘】第一次");
-        Message second = messageService.saveReport(user, PaperReviewReportService.TYPE_PAPER_REPORT,
+        Message second = messageService.saveReport(user, "PAPER_REPORT",
                 KEY, "600519", "【模拟盘复盘】第二次（重跑）");
 
         assertNotNull(first);

@@ -168,6 +168,20 @@ Write-Step '4/5 启动 Java 后端 (8080)'
 if (Test-Port 8080) {
     Write-Ok '8080 已在线，跳过'
 } else {
+    # 内部令牌/密钥不再有仓库内默认值（安全检查 P1-2 删除），开发环境从根目录 .env 读取注入。
+    # 根 .env 同时也是 docker compose 的插值来源，一份文件两处共用；没有它时
+    # Java 仍能启动，但内部接口（记忆/复盘导出）会 fail-closed 拒绝。
+    $rootEnv = Join-Path $Root '.env'
+    if (Test-Path $rootEnv) {
+        Get-Content $rootEnv | ForEach-Object {
+            if ($_ -match '^\s*([A-Z_]+)\s*=\s*(.*)\s*$' -and $_ -notmatch '^\s*#') {
+                Set-Item -Path ('Env:' + $Matches[1]) -Value $Matches[2]
+            }
+        }
+        Write-Ok '已从根目录 .env 注入环境变量（INTERNAL_API_TOKEN 等）'
+    } else {
+        Write-Warn '根目录 .env 不存在 → 内部接口将以 fail-closed 运行（复盘工具不可用）。cp .env.example .env 并填写 INTERNAL_API_TOKEN'
+    }
     Start-Process -FilePath (Join-Path $Root 'mvnw.cmd') -ArgumentList 'spring-boot:run' `
         -WorkingDirectory $Root -WindowStyle Hidden `
         -RedirectStandardOutput (Join-Path $LogDir 'java.out.log') `

@@ -17,6 +17,7 @@ import logging
 import re
 import socket
 import struct
+import sys
 import time
 import urllib.parse
 from datetime import datetime
@@ -111,29 +112,54 @@ def _get_adapters_info():
     return ctypes.cast(buf, ctypes.POINTER(IP_ADAPTER_INFO)), IP_ADAPTER_INFO
 
 
-def generate_mac64() -> str:
-    """用 GetAdaptersInfo 取前 4 个网卡 MAC，构造 login 帧的 Mac64 字段。
+def _collect_mac_addresses() -> list[bytes]:
+    """收集本机网卡的 MAC（每项 6 字节，物理/虚拟网卡都算，与逆向时同一口径）。
 
-    返回 base64 字符串（与 hexin.exe 生成的一致）。
-    仅 Windows 可用（依赖 iphlpapi.dll）。
+    Windows 走 iphlpapi（保持与抓包逆向的数据源一致）；Linux 读 sysfs。
+    跨平台是服务器部署的硬需求：Docker 容器里没有 windll，原实现直接崩
+    （2026-10-05 云端实测：ths selfstocks 500 ← generate_imei ← _get_adapters_info）。
     """
+    if sys.platform == "win32":
+        ptr, _ = _get_adapters_info()
+        macs: list[bytes] = []
+        while ptr:
+            info = ptr.contents
+            if info.AddressLength == 6:
+                macs.append(bytes(info.Address[:6]))
+            ptr = info.Next
+        return macs
+
+    import glob
+    collected: list[bytes] = []
+    for addr_path in sorted(glob.glob("/sys/class/net/*/address")):
+        try:
+            with open(addr_path, encoding="ascii") as fh:
+                raw = fh.read().strip().lower()
+        except OSError:
+            continue
+        parts = raw.split(":")
+        if len(parts) != 6 or raw == "00:00:00:00:00:00":
+            continue  # 跳过 lo / 未启用的虚接口
+        try:
+            collected.append(bytes(int(p, 16) for p in parts))
+        except ValueError:
+            continue
+    return collected
+
+
+def generate_mac64() -> str:
+    """用网卡 MAC 构造 login 帧的 Mac64 字段，返回 base64（与 hexin.exe 生成的一致）。"""
     import base64
 
-    ptr, _ = _get_adapters_info()
-    macs: list[bytes] = []
-    while ptr and len(macs) < 4:
-        info = ptr.contents
-        if info.AddressLength == 6:
-            macs.append(bytes(info.Address[:6]))
-        ptr = info.Next
+    macs = _collect_mac_addresses()
+    if not macs:
+        raise RuntimeError("找不到可用 MAC 地址（无 AddressLength==6 的网卡）")
+    # 云服务器容器通常只有 1 个 eth0：用第 1 个 MAC 补齐到 4 个。
+    # Mac64 是固定 25 字节的设备信息上报，服务端不校验"必须来自不同网卡"。
+    while len(macs) < 4:
+        macs.append(macs[0])
 
-    if len(macs) < 4:
-        raise RuntimeError(
-            f"网卡数不足 4 个（GetAdaptersInfo 只返回 {len(macs)} 个 MAC），"
-            "无法生成 Mac64"
-        )
-
-    raw = bytes([MAC64_HEADER]) + b"".join(macs)
+    raw = bytes([MAC64_HEADER]) + b"".join(macs[:4])
     return base64.b64encode(raw).decode()
 
 
@@ -162,21 +188,13 @@ def generate_imei() -> str:
     """生成同花顺 PC 版 mainverify 用的 imei 设备指纹（32 字符大写 hex）。
 
     算法：MD5( 第1个网卡MAC大写带连字符 + "0"*30 )，返回大写 hex。
-    仅 Windows 可用（依赖 iphlpapi.dll）。
     """
     import hashlib
 
-    ptr, _ = _get_adapters_info()
-    mac_str: str | None = None
-    while ptr:
-        info = ptr.contents
-        if info.AddressLength == 6:
-            mac_bytes = bytes(info.Address[:6])
-            mac_str = "-".join(f"{b:02X}" for b in mac_bytes)
-            break
-        ptr = info.Next
-    if mac_str is None:
-        raise RuntimeError("找不到 MAC 地址（无 AddressLength==6 的网卡）")
+    macs = _collect_mac_addresses()
+    if not macs:
+        raise RuntimeError("找不到可用 MAC 地址（无 AddressLength==6 的网卡）")
+    mac_str = "-".join(f"{b:02X}" for b in macs[0])
 
     payload = (mac_str + IMEI_BIOS_FALLBACK).encode("ascii")
     return hashlib.md5(payload).hexdigest().upper()

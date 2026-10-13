@@ -50,6 +50,13 @@ public class StrategyController {
         return Result.success(strategyService.createStrategy(authentication.getName(), request));
     }
 
+    /** 单条策略（编辑面板打开时取最新 config，不依赖列表页恰好带着它）。 */
+    @GetMapping("/{id}")
+    public Result<StrategyResponse> getStrategy(@PathVariable Long id,
+                                                Authentication authentication) {
+        return Result.success(strategyService.get(authentication.getName(), id));
+    }
+
     @PutMapping("/{id}")
     public Result<StrategyResponse> updateStrategy(
             @PathVariable Long id,
@@ -64,6 +71,27 @@ public class StrategyController {
             Authentication authentication) {
         strategyService.deleteStrategy(authentication.getName(), id);
         return Result.success("删除成功");
+    }
+
+    /**
+     * 开启只读分享，返回 token（前端拼成 /share/{token}）。
+     * 重新调用会换 token —— 旧链接随即失效，这就是"撤回"的实现。
+     */
+    @PostMapping("/{id}/share")
+    public Result<java.util.Map<String, String>> enableShare(
+            @PathVariable Long id,
+            Authentication authentication) {
+        String token = strategyService.enableShare(authentication.getName(), id);
+        return Result.success(java.util.Map.of("token", token));
+    }
+
+    /** 关闭分享：token 置空，链接立刻失效。 */
+    @DeleteMapping("/{id}/share")
+    public Result<String> disableShare(
+            @PathVariable Long id,
+            Authentication authentication) {
+        strategyService.disableShare(authentication.getName(), id);
+        return Result.success("已停止分享");
     }
 
     @PostMapping("/{id}/backtest")

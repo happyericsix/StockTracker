@@ -32,16 +32,20 @@ public class MessageService {
     private final ChatService chatService;
     private final StockService stockService;
     private final MemoryService memoryService;
+    /** 预警推送旁路。允许为 null（单测）：推送失败不影响站内消息。 */
+    private final PushService pushService;
 
     public MessageService(MessageRepository messageRepo, UserRepository userRepository,
                           SseEmitterService sseService, ChatService chatService,
-                          StockService stockService, MemoryService memoryService) {
+                          StockService stockService, MemoryService memoryService,
+                          PushService pushService) {
         this.messageRepo = messageRepo;
         this.userRepository = userRepository;
         this.sseService = sseService;
         this.chatService = chatService;
         this.stockService = stockService;
         this.memoryService = memoryService;
+        this.pushService = pushService;
     }
 
     /** 给消息响应补股票名称（解析失败回退为代码） */
@@ -54,27 +58,36 @@ public class MessageService {
     }
 
     /**
+     * 消息中心的类型口径（2026-10-10 收窄）：**只收预警与系统级告警**。
+     *
+     * <p>为什么收窄：聊天回复用户在聊天界面当场看过了、模拟盘日报/哨兵观察
+     * 活在模拟盘页面（配合策略调整）—— 它们再进消息中心就是同一件事说第二遍，
+     * 而重复通知是用户关掉通知的第一原因。聊天/日报数据本身仍照常落库
+     * （聊天历史、审计与回放都靠它），只是不再出现在消息中心与未读角标里。
+     */
+    private static final List<String> CENTER_TYPES = List.of("ALERT", "STRATEGY_SENTINEL");
+
+    /**
      * 分页查询（消息中心主用）
      * @param page   页码（0-based）
      * @param size   每页条数
-     * @param type   可选过滤：ALERT/CHAT_USER/CHAT_BOT/SYSTEM；null=全部
+     * @param type   可选过滤，必须落在消息中心口径内（通常就是 ALERT）
      * @param since  可选时间范围：只返回 createdAt >= since 的消息；null=不限
      */
     public PagedResponse<MessageResponse> getMessagesPaged(String username, int page, int size, String type, java.time.LocalDateTime since) {
         User user = getUser(username);
         Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
-        boolean hasType = type != null && !type.isBlank();
+        List<String> types = centerTypes(type);
         boolean hasSince = since != null;
 
         Page<Message> result;
-        if (hasType && hasSince) {
-            result = messageRepo.findByUserIdAndTypeAndCreatedAtGreaterThanEqual(user.getId(), type, since, pageable);
-        } else if (hasType) {
-            result = messageRepo.findByUserIdAndType(user.getId(), type, pageable);
+        if (types.isEmpty()) {
+            result = Page.empty(pageable);
         } else if (hasSince) {
-            result = messageRepo.findByUserIdAndCreatedAtGreaterThanEqual(user.getId(), since, pageable);
+            result = messageRepo.findByUserIdAndTypeInAndCreatedAtGreaterThanEqual(
+                    user.getId(), types, since, pageable);
         } else {
-            result = messageRepo.findByUserId(user.getId(), pageable);
+            result = messageRepo.findByUserIdAndTypeIn(user.getId(), types, pageable);
         }
 
         List<MessageResponse> content = result.getContent().stream()
@@ -89,9 +102,18 @@ public class MessageService {
         );
     }
 
+    /** 口径与请求 type 的交集：type 不在口径内 → 空列表（返回空页而不是破例放行）。 */
+    private static List<String> centerTypes(String type) {
+        if (type == null || type.isBlank()) {
+            return CENTER_TYPES;
+        }
+        return CENTER_TYPES.contains(type) ? List.of(type) : List.of();
+    }
+
+    /** 未读角标同样只算口径内的：聊天与日报不再制造红点。 */
     public long getUnreadCount(String username) {
         User user = getUser(username);
-        return messageRepo.countByUserIdAndReadFalse(user.getId());
+        return messageRepo.countByUserIdAndReadFalseAndTypeIn(user.getId(), CENTER_TYPES);
     }
 
     @Transactional
@@ -148,12 +170,13 @@ public class MessageService {
                             new org.springframework.transaction.support.TransactionSynchronization() {
                                 @Override
                                 public void afterCommit() {
-                                    chatService.processAsync(user.getId(), username, request.getMessage());
+                                    chatService.processAsync(user.getId(), username, request.getMessage(),
+                                            request.getFocus());
                                 }
                             });
         } else {
             // 无事务上下文（单测直调）时保持原行为
-            chatService.processAsync(user.getId(), username, request.getMessage());
+            chatService.processAsync(user.getId(), username, request.getMessage(), request.getFocus());
         }
     }
 
@@ -242,6 +265,14 @@ public class MessageService {
         sseService.push(user.getId(), withSymbolName(message));
         log.info("Alert triggered: user={}, symbol={}, type={}, message={}",
                 user.getUsername(), alert.getStockSymbol(), alert.getConditionType(), messageText);
+        // 手机推送旁路：人不在页面时预警也要能到手机。失败只记日志（PushService 内部已兜）。
+        if (pushService != null) {
+            try {
+                pushService.push(user.getUsername(), "预警触发：" + alert.getStockSymbol(), messageText);
+            } catch (Exception e) {
+                log.debug("alert push failed: {}", e.getMessage());
+            }
+        }
     }
 
     /**

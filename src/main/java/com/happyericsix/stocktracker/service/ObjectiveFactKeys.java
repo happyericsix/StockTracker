@@ -110,6 +110,35 @@ public final class ObjectiveFactKeys {
     // <<< OBJECTIVE_PREDICATES
 
     /**
+     * 聚合叙事谓词（2026-10-09 双层记忆）：一次回测/验证/里程碑的**一句话人话结论**。
+     * 刻意放在 OBJECTIVE_PREDICATES 标记区**外** —— 它是给用户看的叙事（decision 类），
+     * 不是供取代链比对的数值键，不进 Python objective.PREDICATES 契约。
+     */
+    public static final String RUN_SUMMARY = "run_summary";
+    /** 聚合叙事的 factType：它是对观测的结论性叙述，展示在"策略结论"区 */
+    public static final String FACT_TYPE_DECISION = "decision";
+
+    /**
+     * 系统遥测谓词全集（标记区内除叙事外的所有键）。
+     *
+     * <p>用途（2026-10-09 双层记忆）：这些键的客观事实一律 {@code userVisible=false} ——
+     * 照常写入（recall/activeFactValues 消费取代链上的最新值）、照常注入对话，
+     * 但不进用户"记忆"页的门面。用户看到的替代品是 {@link #observationStory}
+     * 聚合出的一句话结论 —— ChatGPT 的分层共识：自动层不冒充用户层。
+     */
+    public static final java.util.Set<String> TELEMETRY_PREDICATES = java.util.Set.of(
+            BACKTEST_TOTAL_RETURN_PCT, BACKTEST_BUY_AND_HOLD_RETURN_PCT,
+            BACKTEST_EXCESS_RETURN_PCT, BACKTEST_MAX_DRAWDOWN_PCT, BACKTEST_SHARPE,
+            BACKTEST_WIN_RATE_PCT, BACKTEST_TRADE_COUNT, BACKTEST_AT,
+            PAPER_EQUITY, PAPER_CASH, PAPER_SHARES, PAPER_RETURN_PCT,
+            PAPER_LAST_EVAL_AT, PAPER_MAX_DRAWDOWN_PCT, PAPER_FLAT_DAYS,
+            VERIFY_AT, VERIFY_VALID_CELLS_COUNT, VERIFY_BEAT_BUY_AND_HOLD_COUNT,
+            VERIFY_AVG_EXCESS_PCT, VERIFY_FEE_DRAG_PCT, VERIFY_ENGINE_VERSION,
+            EXPECTATION_AT, EXPECTATION_METRIC, EXPECTATION_THRESHOLD,
+            EXPECTATION_DEADLINE, EXPECTATION_STATUS, EXPECTATION_OUTCOME,
+            EXPECTATION_EVALUATED_AT);
+
+    /**
      * 策略事实的 subject。
      *
      * <p>{@code strategyId} 为空时返回空串，调用方据此跳过 ——
@@ -146,6 +175,33 @@ public final class ObjectiveFactKeys {
         fact.setProvenance(PROVENANCE_SYSTEM);
         fact.setTrust(TRUST_HIGH);
         fact.setConfirmed(true);
+        // 双层记忆（2026-10-09）：客观遥测默认不进用户门面 —— 它是机器观测，
+        // 不是"助手记住的我"。数据照常落库与注入（recall 不看这个标记）。
+        fact.setUserVisible(false);
+        return fact;
+    }
+
+    /**
+     * 构造一条**可见的**聚合叙事（一句话人话结论）：回测/验证跑完、里程碑发生时，
+     * 用它替代十来行裸谓词出现在用户的"策略结论"区。factType=decision ——
+     * 它是对观测的结论性叙述；provenance 仍是 system（不是用户说的）。
+     */
+    public static MemoryFactRequest observationStory(String subject, String text,
+                                                     LocalDateTime dataAsOf) {
+        if (subject == null || subject.isBlank() || text == null || text.isBlank()) {
+            return null;
+        }
+        MemoryFactRequest fact = new MemoryFactRequest();
+        fact.setSubject(subject);
+        fact.setPredicate(RUN_SUMMARY);
+        fact.setObject(text.strip());
+        fact.setFactType(FACT_TYPE_DECISION);
+        fact.setConfidence(CONFIDENCE_CERTAIN);
+        fact.setDataAsOf(dataAsOf);
+        fact.setProvenance(PROVENANCE_SYSTEM);
+        fact.setTrust(TRUST_HIGH);
+        fact.setConfirmed(true);
+        fact.setUserVisible(true);
         return fact;
     }
 

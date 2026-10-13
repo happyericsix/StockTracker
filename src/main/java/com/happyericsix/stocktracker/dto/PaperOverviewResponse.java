@@ -54,6 +54,7 @@ public class PaperOverviewResponse {
     /** rule / agent（存量策略的 null 已归一成 rule）。 */
     private String decisionMode;
     private LocalDate decisionModeSince;
+    private java.time.LocalDateTime configUpdatedAt;
     private BigDecimal initialCapital;
     /** 账户是否被评估过至少一次；false 时下面那些数字都还没有意义。 */
     private boolean evaluated;
@@ -87,6 +88,10 @@ public class PaperOverviewResponse {
     public void setDecisionMode(String decisionMode) { this.decisionMode = decisionMode; }
     public LocalDate getDecisionModeSince() { return decisionModeSince; }
     public void setDecisionModeSince(LocalDate decisionModeSince) { this.decisionModeSince = decisionModeSince; }
+
+    /** 规则最近一次被用户修改（null=从未）：页面据此提示"前后口径不可比"。 */
+    public java.time.LocalDateTime getConfigUpdatedAt() { return configUpdatedAt; }
+    public void setConfigUpdatedAt(java.time.LocalDateTime configUpdatedAt) { this.configUpdatedAt = configUpdatedAt; }
     public BigDecimal getInitialCapital() { return initialCapital; }
     public void setInitialCapital(BigDecimal initialCapital) { this.initialCapital = initialCapital; }
     public boolean isEvaluated() { return evaluated; }

@@ -122,6 +122,25 @@ class MemoryLessonServiceTest {
         assertEquals("created", results.get(0).action());
     }
 
+    /**
+     * symptom 由 LLM 生成，同一现象每次的标点/空白几乎必然不同；不收敛的话
+     * "复发 N 次"的精确匹配计数永远数不起来。写入必须以规范化键落库。
+     */
+    @Test
+    void symptomPunctuationAndSpacingAreNormalizedOnWrite() {
+        when(lessonRepo.save(any(MemoryLesson.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(lessonRepo.countByUserIdAndTaskTypeAndSymptom(any(), anyString(), anyString()))
+                .thenReturn(1L);
+
+        service.saveLessons(batch(lesson("backtest", "回测，数据不足。", "换标的")));
+
+        ArgumentCaptor<MemoryLesson> captor = ArgumentCaptor.forClass(MemoryLesson.class);
+        verify(lessonRepo).save(captor.capture());
+        assertEquals("回测数据不足", captor.getValue().getSymptom());
+        // 计数也必须用同一个规范化键查，写入与查询两侧口径一致
+        verify(lessonRepo).countByUserIdAndTaskTypeAndSymptom(1L, "backtest", "回测数据不足");
+    }
+
     @Test
     void batchIsCapped() {
         when(lessonRepo.save(any(MemoryLesson.class))).thenAnswer(inv -> inv.getArgument(0));

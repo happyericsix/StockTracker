@@ -71,6 +71,14 @@ class AgentDecisionPersistenceTest {
     @MockitoBean
     private StrategyClient strategyClient;
 
+    /**
+     * 经验回流（P4）引入的可选依赖：这里换成替身（未打桩 → strategyExperience 返回 null），
+     * 本用例聚焦"决策落账"，不掺成绩单。agentDecide 桩统一走 8 参全量签名
+     * （结算侧不再按证据包有无分支）。
+     */
+    @MockitoBean
+    private DecisionQualityService decisionQualityService;
+
     private final ObjectMapper mapper = new ObjectMapper();
 
     private Strategy agentStrategy() {
@@ -117,7 +125,8 @@ class AgentDecisionPersistenceTest {
         String committee = "{\"llm_calls\":8,\"total_tokens\":33449,\"as_of\":\"" + today + "\","
                 + "\"roles\":[{\"role\":\"bull\",\"label\":\"bull-researcher\","
                 + "\"sha256\":\"deadbeef0001\",\"excerpt\":\"均线多头排列\"}]}";
-        when(strategyClient.agentDecide(anyString(), eq("600519"), anyString(), isNull(), any()))
+        when(strategyClient.agentDecide(anyString(), eq("600519"), anyString(), isNull(), any(),
+                any(), any(), any()))
                 .thenReturn(mapper.readTree(
                         "{\"valid\":true,\"decision\":\"buy\",\"signal\":\"buy\",\"size_fraction\":0.5,"
                                 + "\"price\":10.0,\"matched_conditions\":[],\"fill_basis\":\"close\","
@@ -252,7 +261,8 @@ class AgentDecisionPersistenceTest {
         Strategy strategy = agentStrategy();
         String today = LocalDate.now().toString();
 
-        when(strategyClient.agentDecide(anyString(), eq("600519"), anyString(), isNull(), any()))
+        when(strategyClient.agentDecide(anyString(), eq("600519"), anyString(), isNull(), any(),
+                any(), any(), any()))
                 .thenReturn(mapper.readTree(
                         "{\"valid\":true,\"decision\":\"skip\",\"signal\":\"hold\","
                                 + "\"size_fraction\":0.0,\"skip_reason\":\"rule_not_met\","

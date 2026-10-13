@@ -1,8 +1,7 @@
 package com.happyericsix.stocktracker.job;
 
+import com.happyericsix.stocktracker.service.JobRunService;
 import com.happyericsix.stocktracker.service.MarketSentimentService;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -17,21 +16,20 @@ import org.springframework.stereotype.Component;
 @Component
 public class SentimentSnapshotJob {
 
-    private static final Logger log = LoggerFactory.getLogger(SentimentSnapshotJob.class);
-
     private final MarketSentimentService marketSentimentService;
+    private final JobRunService jobRunService;
 
-    public SentimentSnapshotJob(MarketSentimentService marketSentimentService) {
+    public SentimentSnapshotJob(MarketSentimentService marketSentimentService,
+                                JobRunService jobRunService) {
         this.marketSentimentService = marketSentimentService;
+        this.jobRunService = jobRunService;
     }
 
     @Scheduled(cron = "0 10 16 * * MON-FRI", zone = "Asia/Shanghai")
     public void snapshotDaily() {
-        try {
+        jobRunService.runWithHeartbeat(JobRunService.JOB_SENTIMENT, () -> {
             int saved = marketSentimentService.snapshotAll();
-            log.info("SentimentSnapshotJob done: {} snapshots", saved);
-        } catch (Exception e) {
-            log.error("SentimentSnapshotJob failed", e);
-        }
+            return "落了 " + saved + " 个快照";
+        });
     }
 }

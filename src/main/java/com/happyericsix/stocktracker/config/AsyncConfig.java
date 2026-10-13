@@ -8,6 +8,7 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -106,5 +107,27 @@ public class AsyncConfig {
                     return t;
                 },
                 new ThreadPoolExecutor.CallerRunsPolicy());
+    }
+
+    /**
+     * 资讯正文预抓的专用单线程池（2026-10-13）：预抓此前跑在**单线程调度器**上，
+     * 委员会一次几分钟的日线结算会把它饿到 0.6 条/分钟（实测）。挪到自己的线程后，
+     * 长任务再怎么占调度器，30 秒一班的预抓照常发车。
+     *
+     * <p>单线程 + 丢任务策略（不是排队）：预抓是幂等追赶（12h 冷却 + 候选窗口），
+     * 上一班没跑完时丢掉这一班比排队堆着更符合"节流对信源友好"的初衷
+     * —— NewsBodyPrefetchJob 侧另有 AtomicBoolean 重入保护，双保险。
+     */
+    @Bean(name = "newsPrefetchExecutor", destroyMethod = "shutdown")
+    public ExecutorService newsPrefetchExecutor() {
+        return new ThreadPoolExecutor(
+                1, 1, 60L, TimeUnit.SECONDS,
+                new SynchronousQueue<>(),
+                r -> {
+                    Thread t = new Thread(r, "news-prefetch");
+                    t.setDaemon(true);
+                    return t;
+                },
+                new ThreadPoolExecutor.DiscardPolicy());
     }
 }

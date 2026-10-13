@@ -2,6 +2,8 @@ package com.happyericsix.stocktracker.controller;
 
 import com.happyericsix.stocktracker.entity.NewsEvent;
 import com.happyericsix.stocktracker.repository.NewsEventRepository;
+import com.happyericsix.stocktracker.service.NewsBriefingService;
+import com.happyericsix.stocktracker.service.NewsTopicService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -9,6 +11,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -26,26 +30,48 @@ import static org.mockito.Mockito.when;
  *
  * <p>这个接口能导出全局资讯事实表，鉴权语义必须与 InternalMemoryController
  * 完全一致——内部接口的口子松一处，"内部"就名存实亡。
+ * 2026-10-09 加的 agent 知识端点（events/briefing/topics）走同一把锁，
+ * 鉴权用例覆盖到它们（P1）。
  */
 @ExtendWith(MockitoExtension.class)
 class InternalNewsControllerTest {
 
     @Mock
     private NewsEventRepository newsEventRepository;
+    @Mock
+    private NewsBriefingService newsBriefingService;
+    @Mock
+    private NewsTopicService newsTopicService;
+
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    private InternalNewsController controller(String token) {
+        return new InternalNewsController(newsEventRepository, newsBriefingService,
+                newsTopicService, mapper, token);
+    }
 
     @Test
     void rejectsWhenTokenIsNotConfigured() {
-        InternalNewsController bare = new InternalNewsController(newsEventRepository, "");
+        InternalNewsController bare = controller("");
 
         assertEquals(HttpStatus.UNAUTHORIZED, bare.trainingExport(30, 100, "anything").getStatusCode());
+        // agent 知识端点（P1）同一把锁：fail-closed
+        assertEquals(HttpStatus.UNAUTHORIZED,
+                bare.eventById(1L, "anything").getStatusCode());
+        assertEquals(HttpStatus.UNAUTHORIZED,
+                bare.briefing("600519", 7, 12, "anything").getStatusCode());
+        assertEquals(HttpStatus.UNAUTHORIZED,
+                bare.topics("600519", 7, "anything").getStatusCode());
     }
 
     @Test
     void rejectsWrongTokenEvenWhenOneIsConfigured() {
-        InternalNewsController secured = new InternalNewsController(newsEventRepository, "right-token");
+        InternalNewsController secured = controller("right-token");
 
         assertEquals(HttpStatus.UNAUTHORIZED, secured.trainingExport(30, 100, "wrong-token").getStatusCode());
         assertEquals(HttpStatus.UNAUTHORIZED, secured.trainingExport(30, 100, null).getStatusCode());
+        assertEquals(HttpStatus.UNAUTHORIZED, secured.eventById(1L, "wrong-token").getStatusCode());
+        assertEquals(HttpStatus.UNAUTHORIZED, secured.briefing("600519", 7, 12, null).getStatusCode());
     }
 
     @Test
@@ -53,7 +79,7 @@ class InternalNewsControllerTest {
     void exportsOnlyAnalyzedRowsWithClippedContent() {
         // @InjectMocks 不会处理 @Value（令牌为空 → fail-closed），
         // 走授权路径的用例必须显式带令牌构造
-        InternalNewsController secured = new InternalNewsController(newsEventRepository, "right-token");
+        InternalNewsController secured = controller("right-token");
         NewsEvent analyzed = NewsEvent.builder()
                 .id(1L).symbol("SH600519").title("回购公告")
                 .content("x".repeat(2000))

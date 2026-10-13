@@ -61,6 +61,9 @@ public class SecurityConfig {
                         // （见 InternalMemoryController#authorized，未配置密钥时一律拒绝）。
                         // ⚠️ 这些接口能读到用户全部对话记忆，新增路径前先想清楚。
                         .requestMatchers("/api/v1/internal/**").permitAll()
+                        // 策略只读分享视图：token 即凭证（32 位随机串），
+                        // 控制器只暴露脱敏字段（无用户身份、无写操作）。
+                        .requestMatchers("/api/v1/public/**").permitAll()
                         .requestMatchers("/api/v1/stocks/**").authenticated()
                         .anyRequest().authenticated()
                 )
@@ -80,10 +83,15 @@ public class SecurityConfig {
         return http.build();
     }
 
+    @org.springframework.beans.factory.annotation.Value("${cors.allowed-origins:http://localhost:5173}")
+    private List<String> corsAllowedOrigins;
+
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
-        config.setAllowedOrigins(List.of("*"));
+        // 白名单来自配置（默认只放开发地址）。前端与 /api 本就同源（Vite 代理 / nginx 反代），
+        // 通配 * 曾经让任何网站都能拿受害者 token 调 API——已收紧（2026-10-05 安全检查 P2 项）。
+        config.setAllowedOrigins(corsAllowedOrigins);
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
         config.setAllowedHeaders(List.of("*"));
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
@@ -169,7 +177,9 @@ public class SecurityConfig {
             "/api/v1/ths/qr/create",
             "/api/v1/ths/qr/poll",
             // 记忆内部接口：同样需要在"带无效 token"时放行，否则前端误带过期 JWT 反而会 401
-            "/api/v1/internal"
+            "/api/v1/internal",
+            // 策略分享视图：同上，分享页要在未登录/带旧 token 的情况下都能打开
+            "/api/v1/public"
     );
 
     private static boolean isPublicPath(String uri) {

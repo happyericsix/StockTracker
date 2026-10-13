@@ -198,3 +198,63 @@ if __name__ == "__main__":
     for fn in fns:
         fn()
         print("PASS", fn.__name__)
+
+
+def test_render_keeps_digest_and_recaps_when_budget_is_tight():
+    """预算感知组装：digest/recaps 是跨会话记忆的生命线，超预算时它们必须活下来。
+
+    改造前是"按固定顺序拼接、超了尾部一刀切"，digest/recaps 排在最后，
+    第一个被砍掉的就是它们——而那正是"隔天回来问上次那件事"的全部上下文。
+    """
+    context = {
+        "today": "2026-09-16",
+        # 一大坨事实：足以把预算吃光
+        "facts": [
+            {"id": i, "subject": "600519", "predicate": "watch_reason",
+             "object": "理由" * 60, "factType": "observation",
+             "recordedAt": "2026-09-01T10:00:00"}
+            for i in range(8)
+        ],
+        "pendingDigest": [
+            {"role": "user", "content": "把止损改成5%", "occurredAt": "2026-09-15T22:00:00"},
+        ],
+        "recaps": [{"sessionKey": "1:2026-09-14", "version": 1,
+                    "summary": "用户讨论了茅台的建仓计划"}],
+    }
+    block = recall.render(context)
+
+    assert len(block) <= recall.MEMORY_MAX_CHARS + len("\n…\n</memory>")
+    assert block.endswith("</memory>")
+    # 兜底摘录与前情提要在，事实组可以被截断
+    assert "把止损改成5%" in block
+    assert "用户讨论了茅台的建仓计划" in block
+
+
+def test_semantic_episodes_exclude_current_session(monkeypatch):
+    """会话中段巩固刚生成的**当前会话**摘要，不能被当成"更早的相关对话"再注入。
+
+    当前对话的原文已经通过 history 进了上下文，重复注入等于同一内容出现两遍。
+    """
+    captured = {}
+
+    def fake_load_context(*args, **kwargs):
+        captured["args"] = args
+        return {"today": "2026-09-16", "recaps": [], "facts": [], "lessons": []}
+
+    def fake_semantic_search(user_id, query, kinds=None, top_k=10):
+        return [
+            ({"kind": "episode", "id": 101, "payload": {
+                "sessionKey": "1:2026-09-16", "summary": "当前会话的摘要"}},
+             0.9),
+            ({"kind": "episode", "id": 102, "payload": {
+                "sessionKey": "1:2026-09-01", "summary": "更早会话的摘要"}},
+             0.8),
+        ]
+
+    monkeypatch.setattr(memory_store, "load_context", fake_load_context)
+    monkeypatch.setattr(recall.vector_index, "semantic_search", fake_semantic_search)
+
+    context = recall.load_context(1, "1:2026-09-16", query="茅台怎么样")
+    episodes = context.get("semanticEpisodes") or []
+
+    assert [item["sessionKey"] for item in episodes] == ["1:2026-09-01"]
