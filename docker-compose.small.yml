@@ -1,0 +1,22 @@
+# 2G 内存机器（如阿里云 ¥68 轻量 2核2G）的覆盖配置。
+# 用法（在服务器上，DEPLOY.md §4 的启动命令换成这一条）：
+#   docker compose -f docker-compose.yml -f docker-compose.small.yml up -d --no-build
+#
+# 只覆盖需要省内存的三处，其余沿用主配置：
+#   ① Java 堆限 512M（默认不设上限，会按机器内存自适应吃掉 ~1/4 物理内存，
+#      2G 机器上再叠加 Python/MySQL 必然 OOM）
+#   ② MySQL 缓冲池降 128M（默认 128M~，8.0 在小实例上自适应不够狠，钉死；
+#      顺便关 performance_schema，纯开销）
+#   ③ Python 不设硬限制：回测时 numpy 会冲高，硬限会被 OOM-kill，
+#      让它借宿主机的 swap（配合 DEPLOY.md §1 的 2G swap）
+#
+# 代价写在明处：回测变慢（swap 换页）、首次加载略卡。单人使用可接受；
+# 哪天升配 2C4G，删掉这个文件用主配置即可，无迁移成本。
+
+services:
+  app:
+    environment:
+      - JAVA_TOOL_OPTIONS=-Xmx512m -Xms256m
+
+  mysql:
+    command: --innodb-buffer-pool-size=128M --max-connections=30 --performance-schema=OFF

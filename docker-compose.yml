@@ -1,3 +1,11 @@
+# 日志轮转（2026-10-09 加）：默认 json-file 无上限，长跑会慢慢吃满磁盘
+#（40G 盘、1.8G 内存的小机器）。单容器 50MB × 3 份，五个容器合计上限 750MB。
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 services:
   redis:
     image: redis:7-alpine
@@ -9,6 +17,7 @@ services:
       timeout: 3s
       retries: 3
     restart: unless-stopped
+    logging: *default-logging
 
   mysql:
     image: mysql:8.0
@@ -27,10 +36,13 @@ services:
       timeout: 3s
       retries: 10
     restart: unless-stopped
+    logging: *default-logging
 
   python-data:
     # 上下文必须是仓库根：镜像里要带上 vendor/（THS 扫码登录的逆向协议库），
     # 只以 python-data-service/ 为上下文时 vendor 不在其中，容器内 THS 必断链
+    # image 名钉死：docker save/load 搬运镜像时，服务器上 --no-build 起的就是同一份
+    image: stock-tracker-python-data:latest
     build:
       context: .
       dockerfile: python-data-service/Dockerfile
@@ -38,10 +50,21 @@ services:
     # 不发布宿主端口：只允许 Java 后端经内部网络调用；
     # 服务间鉴权由 INTERNAL_API_TOKEN 保证
     environment:
-      - INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN:-stock-tracker-internal-2026}
+      # :? 强制必填——忘配 .env 时 compose 直接拒绝启动并说明原因，
+      # 而不是带着某个写死的默认值跑起来（该默认值曾在仓库里公开可见，已删）
+      - INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN:?请在 .env 配置 INTERNAL_API_TOKEN（cp .env.example .env）}
+      # 不传 key 时助手降级为模板回复（llm_available=false），服务本身不挂
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      # Java 知识端点（新闻聚焦与资讯工具读库分析的通道）。2026-10-10 线上事故：
+      # 没配时 news_knowledge 回退 localhost:8080 —— 在 python 容器里那是它自己，
+      # 聚焦新闻与资讯工具在生产上全部静默失效（fail-open 不报错），
+      # 用户"问 AI"得到的是"你贴的新闻我这边没收到"。
+      - JAVA_BASE_URL=http://app:8080
     restart: unless-stopped
+    logging: *default-logging
 
   app:
+    image: stock-tracker-app:latest
     build: .
     container_name: stock-tracker
     # 不发布宿主端口：由 frontend(nginx) 在内部网络反代 /api
@@ -50,12 +73,18 @@ services:
       - SPRING_DATA_REDIS_PORT=6379
       - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/stockdb?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai
       - SPRING_DATASOURCE_USERNAME=root
-      - SPRING_DATASOURCE_PASSWORD=${MYSQL_PASSWORD:-123456}
+      - SPRING_DATASOURCE_PASSWORD=${MYSQL_ROOT_PASSWORD:-123456}
       - AKSHARE_API_BASE_URL=http://python-data:8000
-      - INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN:-stock-tracker-internal-2026}
+      - INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN:?请在 .env 配置 INTERNAL_API_TOKEN（cp .env.example .env）}
+      # 公网部署：自己注册完设为 false（开放注册 = 陌生人烧你的 LLM 额度）
+      - AUTH_REGISTRATION_ENABLED=${AUTH_REGISTRATION_ENABLED:-true}
+      # 同花顺凭证加密密钥：不配则 THS 绑定功能不可用（fail-closed），其余功能不受影响
+      - THS_AES_KEY=${THS_AES_KEY:-}
       # RSA 签名密钥走运行时挂载（镜像内不含密钥）
-      - RSA_PRIVATE_KEY_PATH=/run/secrets/app.key
-      - RSA_PUBLIC_KEY_PATH=/run/secrets/app.pub
+      # 必须带 file: 前缀：Spring 按 Resource 解析，裸路径会被当成类路径资源
+      # （本地冒烟实测踩过：FileNotFoundException class path resource [run/secrets/app.pub]）
+      - RSA_PRIVATE_KEY_PATH=file:/run/secrets/app.key
+      - RSA_PUBLIC_KEY_PATH=file:/run/secrets/app.pub
     volumes:
       - ./secrets/app.key:/run/secrets/app.key:ro
       - ./secrets/app.pub:/run/secrets/app.pub:ro
@@ -67,17 +96,27 @@ services:
       python-data:
         condition: service_started
     restart: unless-stopped
+    logging: *default-logging
 
   frontend:
+    image: stock-tracker-frontend:latest
     build:
       context: .
       dockerfile: frontend/Dockerfile
     container_name: stock-tracker-nginx
     ports:
       - "80:80"
+      # HTTPS 预留（DEPLOY.md §9）：映射先开着无副作用——当前镜像里的 nginx.conf
+      # 只监听 80；换成 nginx-https.conf.example 重打镜像后这个端口才有业务
+      - "443:443"
+    volumes:
+      # 证书挂载（只读）：acme.sh 装到宿主机 ./secrets/certs/，不进镜像不进 git
+      #（secrets/ 已被 .gitignore 覆盖）。目录不存在时 Docker 会建空目录，无害
+      - ./secrets/certs:/etc/nginx/certs:ro
     depends_on:
       - app
     restart: unless-stopped
+    logging: *default-logging
 
 volumes:
   redis-data:

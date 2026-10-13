@@ -3,12 +3,14 @@ FROM maven:3.9.9-eclipse-temurin-21 AS build
 WORKDIR /app
 
 # 第一步：只复制 pom.xml，下载依赖（依赖变化少，可以缓存）
+# 走阿里云 Maven 镜像（maven-settings.xml）：容器内直连中央仓库会 PKIX 失败（见该文件注释）
+COPY maven-settings.xml /root/.m2/settings.xml
 COPY pom.xml ./
-RUN mvn dependency:go-offline -B
+RUN mvn -s /root/.m2/settings.xml dependency:go-offline -B
 
 # 第二步：复制源码并打包（源码变了才重跑）
 COPY src ./src
-RUN mvn clean package -DskipTests -o   # -o 表示离线模式
+RUN mvn -s /root/.m2/settings.xml clean package -DskipTests -o   # -o 表示离线模式
 
 # Run stage
 FROM eclipse-temurin:21-jre-alpine

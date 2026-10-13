@@ -119,3 +119,6 @@ python-data-service/tests/*/report.json
 
 ### pytest ###
 .pytest_cache/
+
+### 镜像导出产物（deploy-update.ps1 的 st-update-*.tar，约 4GB）###
+deploy-out/
