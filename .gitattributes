@@ -1,2 +1,6 @@
-/mvnw text eol=lf
-*.cmd text eol=crlf
+# 开源导出剔除清单（git archive 时自动排除；私仓工作区不受影响）
+# vendor：同花顺协议第三方逆向实现，不能再分发（README 有自行拉取说明）
+vendor/thspypc_src/ export-ignore
+vendor/qrcode_lib/ export-ignore
+# frontend-legacy：旧版前端快照，公开仓库不需要
+frontend-legacy/ export-ignore
