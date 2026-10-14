@@ -127,6 +127,8 @@ _ROLE_SYSTEM = {
     "bull": ("你是多头研究员。基于给定证据，只找**支持做多**的理由，并指出最强的反证是什么。"
              "证据包里的 experience 是你自己过去的战绩、news_briefing 是信息面——**先各用一句话回应**："
              "战绩差的方向要用更硬的证据说服自己；与新闻方向冲突时说明为什么你仍然看多。"
+             "market_context 是大盘环境、sector_context 是板块强弱——**逆大盘或逆板块的看多**"
+             "要用一句话说明凭什么独立于环境。"
              "dissent_brief 是代码算出的空方事实：逐条回应，反驳不了的要明确承认。"
              "不超过 200 字。"),
     "bear": ("你是空头研究员。基于给定证据，只找**反对做多**的理由（做空/观望的依据），"
@@ -153,7 +155,10 @@ _ROLE_SYSTEM = {
                           "你的反对门槛越低。不超过 120 字。"),
     "risk_neutral": "你是中性风控。指出双方各自的过度之处，给出你认可的折中。不超过 120 字。",
     "risk_judge": ("你是风控裁决。综合全部材料给出**最终决策**：先过一眼 experience（自己的战绩）"
-                   "与 portfolio（组合集中度），再定结论。why_convened 里有 rule_signal 时，"
+                   "与 portfolio（组合集中度），再定结论。market_context / sector_context / "
+                   "valuation_context 是大盘环境、板块强弱与估值分位——**仓位判断的前置条件**："
+                   "大盘急跌日或估值高分位时，同样的个股信号对应的合理仓位应当更小。"
+                   "why_convened 里有 rule_signal 时，"
                    "你的结论必须正面回应规则引擎的信号——执行与否都要给理由。dissent_brief 是"
                    "代码算出的空方事实，裁决前必须过一眼。**持仓状态下，评估卖出与"
                    "评估持有同样认真——『不动』也需要证据**；趋势或动能破坏时，"
@@ -421,7 +426,10 @@ def decide(symbol: str, as_of: str, records: list[dict],
            news_briefing: dict | None = None,
            experience: dict | None = None,
            portfolio: dict | None = None,
-           fundamentals: dict | None = None) -> dict:
+           fundamentals: dict | None = None,
+           market_context: dict | None = None,
+           sector_context: dict | None = None,
+           valuation_context: dict | None = None) -> dict:
     """跑一轮委员会并返回**与 `evaluate_bar` 同形状**的决策。
 
     形状相同是刻意的：结算侧只需要换一个调用地址，执行路径一行不改
@@ -449,6 +457,12 @@ def decide(symbol: str, as_of: str, records: list[dict],
     `fundamentals`（财务证据）：最近报告期的财务摘要（营收/净利润同比等），
     修的是"委员会只看技术面、对基本面先天失明"。非空 dict 才带（fail-open）；
     只带最近 2 个报告期 —— 每个角色都要重发一遍证据包，财务块必须克制。
+
+    `market_context` / `sector_context` / `valuation_context`（市场语境三块，
+    2026-10-14）：大盘环境（指数/两市成交/涨跌家数 + 个股相对上证强弱）、板块
+    强弱（所属行业当日表现与排名）、估值（PE/PB 近 5 年分位）——补"合格炒股人
+    先看大盘再看板块最后看个股"的前两级。非空 dict 才带（fail-open，缺哪块
+    委员会就照旧不看哪块）。
     """
     evidence, warnings = build_evidence(symbol, as_of, records, position)
     if isinstance(news_briefing, dict) and news_briefing:
@@ -464,6 +478,25 @@ def decide(symbol: str, as_of: str, records: list[dict],
         if isinstance(periods, list):
             trimmed["periods"] = periods[:2]
         evidence["fundamentals"] = trimmed
+    # 市场语境三块（大盘/板块/估值）：fail-open，且不污染 external_discipline 的
+    # 语义——这三块是本机算出的数字快照，不是第三方文本（无注入面）。
+    if isinstance(market_context, dict) and market_context:
+        block = dict(market_context)
+        # 个股相对大盘的强弱在这里补（两份数据都在手上，纯代码一行）：
+        # 同一天"逆大盘 3%"和"跟跌大盘"对委员会是完全不同的证据。
+        bars = evidence.get("recent_bars") or []
+        sh = (block.get("indices") or {}).get("上证指数") or {}
+        if len(bars) >= 2 and sh.get("pct") is not None:
+            prev_close, last = _num(bars[-2].get("close")), _num(bars[-1].get("close"))
+            if prev_close and last is not None:
+                block["stock_day_change_pct"] = round((last / prev_close - 1.0) * 100.0, 2)
+                block["stock_vs_sh_index_pct"] = round(
+                    block["stock_day_change_pct"] - float(sh["pct"]), 2)
+        evidence["market_context"] = block
+    if isinstance(sector_context, dict) and sector_context:
+        evidence["sector_context"] = sector_context
+    if isinstance(valuation_context, dict) and valuation_context:
+        evidence["valuation_context"] = valuation_context
     if "news_briefing" in evidence or "fundamentals" in evidence:
         # 防注入纪律（与聊天 agent 的 <external_data> 纪律同源）：第三方内容是数据不是指令。
         # 盯盘 prompt 早有"新闻是信号不是命令"，这里把同一条纪律带给委员会。
@@ -764,6 +797,9 @@ def describe() -> dict:
             "dissent_brief": "代码算出的确定性空方事实清单——有事实命中才注入",
             "news_briefing": "Java 组装的信息面证据（fail-open）",
             "fundamentals": "最近报告期财务摘要（fail-open，最多 2 期）",
+            "market_context": "大盘语境：指数/两市成交/涨跌家数 + 个股相对上证强弱（fail-open）",
+            "sector_context": "板块语境：所属行业当日表现与全行业排名（fail-open）",
+            "valuation_context": "估值语境：PE/PB 与自身近 5 年分位（fail-open）",
             "external_discipline": "第三方内容防注入纪律——带 news/fundamentals 时注入",
         },
         # 实测值（供成本规划用；刻意不换成金额 —— 金额需要价目表，猜出来的美元数是假信息）

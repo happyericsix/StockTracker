@@ -1015,9 +1015,20 @@ async def agent_decide_endpoint(req: Request):
         return data
 
     from agent import execution_contract as ec
+    from agent import market_context as mc
     from agent import trading_committee
     from agent.strategy_schema import validate_strategy_config
     from akshare_client import ADJUST_MODE, get_history
+
+    async def _market_context_args(symbol: str) -> dict:
+        """市场语境三块的取数（fail-open：坏一块少一块，全坏则三块都不带）。"""
+        if os.getenv("AGENT_MARKET_CONTEXT", "1").strip().lower() in ("0", "off", "false"):
+            return {}
+        market = await asyncio.to_thread(mc.get_market_context)
+        sector = await asyncio.to_thread(mc.get_sector_context, symbol)
+        valuation = await asyncio.to_thread(mc.get_valuation_context, symbol)
+        return {"market_context": market, "sector_context": sector,
+                "valuation_context": valuation}
 
     settlement_kind = None
     try:
@@ -1057,6 +1068,9 @@ async def agent_decide_endpoint(req: Request):
             portfolio=data.get("portfolio") if isinstance(data.get("portfolio"), dict) else None,
             # 财务证据：本端点自取（TTL 缓存），失败/关闭为 None（fail-open）
             fundamentals=await asyncio.to_thread(_fundamentals_quietly, symbol),
+            # 市场语境三块（大盘/板块/估值）：agent/market_context.py 自取，
+            # AGENT_MARKET_CONTEXT=0 可整体关闭；任一块失败缺席不挡决策
+            **(await _market_context_args(symbol)),
         )
         result["valid"] = True
         return result

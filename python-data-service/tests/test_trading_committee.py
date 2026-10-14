@@ -755,3 +755,53 @@ def test_a_subset_without_the_judge_gets_one_appended():
 
     assert [entry["role"] for entry in result.transcript] == ["bull", "bear", "risk_judge"]
     assert any("自动补上" in warning for warning in result.warnings)
+
+
+# ==================== 市场语境三块（大盘/板块/估值，2026-10-14） ====================
+
+
+def test_market_context_enters_the_evidence_with_relative_strength():
+    """大盘块进证据包时，必须补上个股当日涨跌与相对上证的强弱——
+    同一天"逆大盘 3%"和"跟跌大盘"对委员会是完全不同的证据（纯代码计算）。"""
+    llm = FakeLLM()
+    bars = make_bars(90)                     # 每根 +0.5：当日涨幅恒为正
+    market = {"note": "大盘环境",
+              "indices": {"上证指数": {"level": 3801.1, "pct": -1.2, "turnover_yi": 3945.9}}}
+
+    tc.decide("600519", bars[-1]["date"], bars, completion=llm, market_context=market)
+
+    import json as _json
+    payload = _json.loads(llm.calls[0]["user"])
+    block = payload["evidence"]["market_context"]
+    prev, last = bars[-2]["close"], bars[-1]["close"]
+    expected_stock = round((last / prev - 1.0) * 100, 2)
+    assert block["stock_day_change_pct"] == expected_stock
+    assert block["stock_vs_sh_index_pct"] == round(expected_stock - (-1.2), 2)
+
+
+def test_sector_and_valuation_blocks_enter_the_evidence():
+    llm = FakeLLM()
+
+    tc.decide("600519", AS_OF, make_bars(90), completion=llm,
+              sector_context={"industry": "白酒", "today_pct": -1.2, "rank": 80},
+              valuation_context={"pe_ttm": 19.5, "pe_percentile_5y": 88.0})
+
+    for call in llm.calls:
+        assert '"sector_context"' in call["user"] and '"valuation_context"' in call["user"]
+        assert "白酒" in call["user"] and "88.0" in call["user"]
+
+    llm2 = FakeLLM()
+    tc.decide("600519", AS_OF, make_bars(90), completion=llm2,
+              market_context={}, sector_context=None, valuation_context=None)
+    for call in llm2.calls:
+        for key in ("market_context", "sector_context", "valuation_context"):
+            assert f'"{key}"' not in call["user"], f"{key} 缺席时不应带空块"
+
+
+def test_judge_card_mentions_market_and_valuation():
+    """仓位的前置条件写进裁决卡：大盘急跌日/估值高分位 → 同样的个股信号对应更小仓位。"""
+    llm = FakeLLM()
+    tc.decide("600519", AS_OF, make_bars(90), completion=llm)
+    judge_system = llm.calls[-1]["system"]
+    assert "market_context" in judge_system and "valuation_context" in judge_system
+    assert "仓位判断的前置条件" in judge_system
