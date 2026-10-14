@@ -275,7 +275,9 @@ def get_valuation_context(symbol: str) -> Optional[dict]:
             return None
         return {
             "note": ("估值语境：PE/PB 与自身近 5 年历史分位（0=历史最便宜，100=历史最贵）。"
-                     "高分位不是卖出指令，但加仓的证据门槛应当更高。"),
+                     "高分位不是卖出指令，但加仓的证据门槛应当更高；"
+                     "低分位也不是买入理由——下跌趋势里的便宜是结果而非安全垫，"
+                     "警惕\"好公司变便宜了\"式的左侧接飞刀。"),
             **shaped,
         }
     except Exception as exc:  # noqa: BLE001

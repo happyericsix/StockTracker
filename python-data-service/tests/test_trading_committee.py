@@ -799,9 +799,12 @@ def test_sector_and_valuation_blocks_enter_the_evidence():
 
 
 def test_judge_card_mentions_market_and_valuation():
-    """仓位的前置条件写进裁决卡：大盘急跌日/估值高分位 → 同样的个股信号对应更小仓位。"""
+    """仓位的前置条件写进裁决卡：大盘急跌日/估值高分位 → 同样的个股信号对应更小仓位；
+    低分位纪律也要在——持续下跌中估值越来越便宜，委员会最容易被"好公司变便宜了"
+    诱导左侧进场（价值陷阱：便宜可以一直更便宜）。"""
     llm = FakeLLM()
     tc.decide("600519", AS_OF, make_bars(90), completion=llm)
     judge_system = llm.calls[-1]["system"]
     assert "market_context" in judge_system and "valuation_context" in judge_system
     assert "仓位判断的前置条件" in judge_system
+    assert "低估值分位不是买入理由" in judge_system
