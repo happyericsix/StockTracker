@@ -421,4 +421,50 @@ class PaperTradingServiceWatchTest {
         verify(strategyClient, times(1))
                 .intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), any(), any(), any());
     }
+
+    /**
+     * 当日往返护栏（2026-10-14，默认开可配置）：agent 模式当天已有成交后，
+     * 盘中授权通道的**新买入**被拦截（skip=already_traded_today）且推拦截通知——
+     * 防的是"参数互搏型"当日来回打脸（10:08 卖 → 10:12 买回 → 10:20 想卖被 T+1 锁死）。
+     */
+    @Test
+    void roundtripGuardBlocksIntradayBuyAfterAnEarlierFillToday() throws Exception {
+        ReflectionTestUtils.setField(paperTradingService, "roundtripGuardEnabled", true);
+        ReflectionTestUtils.setField(paperTradingService, "intradayWatchEnabled", false);
+        Strategy strategy = agentStrategy();
+        PaperAccount account = flatAccount(strategy);
+        stubCommon(strategy, account);
+        when(strategyClient.evaluateBarRealtime(eq(CONFIG), eq("601988"), isNull()))
+                .thenReturn(ruleResultWithBuyEvent("2026-10-09 10:30:00"));
+        when(paperTradeRepository.existsByStrategyIdAndTradeDate(eq(strategy.getId()), any()))
+                .thenReturn(true);   // 今天已经动过手
+
+        paperTradingService.evaluateRealtime();
+
+        verify(paperTradeRepository, never()).save(any(PaperTrade.class));
+        ArgumentCaptor<PaperTradeTrace> captor = ArgumentCaptor.forClass(PaperTradeTrace.class);
+        verify(paperTraceService).record(captor.capture());
+        assertEquals(ExecutionContract.SKIP_ALREADY_TRADED_TODAY, captor.getValue().getSkipReason(),
+                "拦截原因与日线结算共用 already_traded_today 语义");
+    }
+
+    /** 护栏关闭（日内多笔/做T 的合法部署）：同一场景下买入正常执行。 */
+    @Test
+    void roundtripGuardDisabledAllowsTheSecondIntradayBuy() throws Exception {
+        ReflectionTestUtils.setField(paperTradingService, "roundtripGuardEnabled", false);
+        ReflectionTestUtils.setField(paperTradingService, "intradayWatchEnabled", false);
+        Strategy strategy = agentStrategy();
+        PaperAccount account = flatAccount(strategy);
+        stubCommon(strategy, account);
+        when(strategyClient.evaluateBarRealtime(eq(CONFIG), eq("601988"), isNull()))
+                .thenReturn(ruleResultWithBuyEvent("2026-10-09 10:31:00"));
+        lenient().when(paperTradeRepository.existsByStrategyIdAndTradeDate(eq(strategy.getId()), any()))
+                .thenReturn(true);
+
+        paperTradingService.evaluateRealtime();
+
+        ArgumentCaptor<PaperTrade> tradeCaptor = ArgumentCaptor.forClass(PaperTrade.class);
+        verify(paperTradeRepository, times(1)).save(tradeCaptor.capture());
+        assertEquals("BUY", tradeCaptor.getValue().getSide(), "护栏关闭时日内第二笔买入放行");
+    }
 }

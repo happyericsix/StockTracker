@@ -121,6 +121,14 @@ public class PaperTradingService {
     /** 总开关：关掉后 agent 模式盘中回到"规则+授权"的旧行为。 */
     @Value("${paper.intraday-watch.enabled:true}")
     private boolean intradayWatchEnabled;
+    /**
+     * 当日往返护栏（默认开，可按部署关闭）：agent 模式盘中授权通道当天已有成交后
+     * 不再执行新买入。它防的是"参数互搏型"当日来回打脸（2026-10-14 实测）；
+     * 但日内多笔（做T/分批）是合法策略形态——这类部署把它关掉即可。
+     * 只作用于 agent 模式盘中买入；规则模式多笔交易、止损卖出均不受影响。
+     */
+    @Value("${paper.intraday.roundtrip-guard-enabled:true}")
+    private boolean roundtripGuardEnabled;
     /** 每策略每日盯盘 LLM 调用预算（成本止损线，2026-10-09 产品决策：平衡档 20 次）。 */
     @Value("${paper.intraday-watch.daily-budget:20}")
     private int intradayWatchDailyBudget;
@@ -1256,12 +1264,12 @@ public class PaperTradingService {
                         CnTime.today(), barTime, result, ExecutionContract.SKIP_OUTSIDE_AUTHORIZATION);
             }
         }
-        // 当日往返护栏（2026-10-14 复盘补）：盘中授权通道一天只许动一次手。
+        // 当日往返护栏（可配置，默认开）：盘中授权通道一天只许动一次手。
         // 实测踩过：10:08 规则卖出 → 10:12 规则买回（2/10 日线在分钟级震荡里互搏）→
         // 10:20 再触发卖出被 T+1 锁死，全天两笔双边费用、被动持有到收盘。
-        // 复用 already_traded_today 语义（"今天已经动过了"），与日线结算口径一致；
-        // 止损卖出不在其列（生存线永远放行），"先卖后买的再进场"顺延到次日。
-        if (isAgentMode(strategy) && "buy".equals(pendingSignal)
+        // 它只拦 agent 模式的盘中**买入**；规则模式多笔、止损卖出不受影响。
+        // 日内多笔（做T/分批）的合法部署用 paper.intraday.roundtrip-guard-enabled=false 关掉。
+        if (roundtripGuardEnabled && isAgentMode(strategy) && "buy".equals(pendingSignal)
                 && paperTradeRepository.existsByStrategyIdAndTradeDate(strategy.getId(), CnTime.today())) {
             markToMarket(strategy, account, result);
             markFingerprintDecisionMode(result);

@@ -379,8 +379,11 @@ def test_today_and_market_context_enter_the_watch_prompt():
 
 def test_system_prompt_has_lock_discipline_and_layered_framework():
     system = iw._watch_system_prompt()
-    # T+1 锁仓纪律：今天动过手再买 = 当日出不去
-    assert "T+1 锁仓" in system and "今天已经动过手" in system
+    # today_context 定位为执行状态（非行情信号）：只讲事实（今天成交过 + T+1 后果），
+    # 不夹带"再进场几乎总是情绪化"这类观点——日内多笔（做T）是合法策略形态。
+    assert "执行状态而非行情信号" in system
+    assert "当日将" in system and "无法离场" in system, "T+1 后果必须告知"
+    assert "情绪化" not in system, "观点不该写成纪律"
     # 三层框架：环境 → 价格结构 → 事件本身
     assert "先环境" in system and "再价格结构" in system and "最后才是事件本身" in system
     # 委员会联动：冲突动作选 flag
