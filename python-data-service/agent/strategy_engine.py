@@ -537,7 +537,23 @@ def run_backtest_realistic(
 
     lot = int(lot_size or 100)
     limit = float(limit_up_pct if limit_up_pct is not None else _default_limit_pct(cfg.symbol))
-    stamp = float(stamp_tax_pct if stamp_tax_pct is not None else 0.05)  # 卖出印花税 %
+    # 费率出处（与模拟盘同一套口径，2026-10-14）：印花税/过户费按**成交日的官方生效
+    # 日期表**查（历史回放自动落在当时的公告费率上），不再是一个扁平常量；
+    # 过户费双边补收。佣金仍来自策略配置（Python 回测没有用户档案上下文，
+    # 用户级佣金由 Java 结算路径负责）。
+    from agent import market_rules as mr
+
+    def stamp_on(d: str) -> float:
+        if stamp_tax_pct is not None:
+            return float(stamp_tax_pct)
+        try:
+            return mr.rate_pct(mr.STAMP_TAX_SELL, d[:10])
+        except Exception:
+            return 0.05
+
+    def transfer_on(d: str) -> float:
+        return mr.rate_pct(mr.TRANSFER_FEE, d[:10] if d else None)
+
     comm = cfg.risk.commission_pct / 100.0
     slip = cfg.risk.slippage_pct / 100.0
 
@@ -560,8 +576,9 @@ def run_backtest_realistic(
     benchmark_shares = float(cfg.initial_capital) / start_price
 
     def fill_open(idx: int, side: str) -> float:
-        """第 idx 根 bar 开盘价 + 滑点（买加、卖减）。"""
-        return float(opens[idx]) * (1.0 + slip if side == "buy" else 1.0 - slip)
+        """第 idx 根 bar 开盘价 + 滑点（买加、卖减），取整到 0.01 价位网格（保守侧）。"""
+        raw = float(opens[idx]) * (1.0 + slip if side == "buy" else 1.0 - slip)
+        return mr.tick_round(raw, round_up=(side == "buy"))
 
     def limit_blocked(idx: int, side: str) -> bool:
         """用开盘价相对昨收判断涨跌停挡单。"""
@@ -598,12 +615,12 @@ def run_backtest_realistic(
                                 f"初始资金 {cfg.initial_capital:.0f} 元买不起一手：{dates[f]} 的"
                                 f"{lot} 股约需 {one_lot_cost:.0f} 元")
                         while sh > 0:
-                            fee = _comm_fee(sh * o, comm)
+                            fee = _comm_fee(sh * o, comm) + sh * o * transfer_on(dates[f]) / 100.0
                             if sh * o + fee <= cash:
                                 break
                             sh -= lot
                         if sh > 0:
-                            fee = _comm_fee(sh * o, comm)
+                            fee = _comm_fee(sh * o, comm) + sh * o * transfer_on(dates[f]) / 100.0
                             cash -= sh * o + fee
                             buy_cost = sh * o + fee
                             shares = sh
@@ -624,8 +641,8 @@ def run_backtest_realistic(
                 if not limit_blocked(f, "sell"):
                     o = fill_open(f, "sell")
                     if o > 0:
-                        fee = _comm_fee(shares * o, comm)
-                        stamp_amt = shares * o * stamp / 100.0
+                        fee = _comm_fee(shares * o, comm) + shares * o * transfer_on(dates[f]) / 100.0
+                        stamp_amt = shares * o * stamp_on(dates[f]) / 100.0
                         proceeds = shares * o - fee - stamp_amt
                         cash += proceeds
                         round_trip_pnls.append(proceeds - buy_cost)
@@ -675,8 +692,11 @@ def run_backtest_realistic(
         "exposure_pct": round(holding_days / len(equity_curve) * 100, 2) if equity_curve else 0.0,
         "rules": {
             "lot_size": lot, "limit_pct": limit,
-            "stamp_tax_pct": stamp, "commission_pct": cfg.risk.commission_pct,
+            "stamp_tax_pct": stamp_on(ind["dates"][-1]) if ind["dates"] else 0.05,
+            "transfer_fee_pct": transfer_on(ind["dates"][-1]) if ind["dates"] else 0.001,
+            "commission_pct": cfg.risk.commission_pct,
             "min_commission_yuan": 5.0, "fill": "next_open",
+            "fee_source": "官方生效日期表（agent/market_rules.py）",
         },
         "data_points": len(records),
         # 一手都买不起时说明原因（否则用户看到的只是"0 笔交易"，分不清是没钱还是没信号）

@@ -149,7 +149,8 @@ public final class ExecutionContract {
     // ---------- 归一与版本 ----------
     public static final String UNKNOWN_PREFIX = "unknown_";
     public static final int SNAPSHOT_SCHEMA_VERSION = 1;
-    public static final int MONEY_POLICY_VERSION = 1;
+    /** 与 {@link Money#POLICY_VERSION} 同源（v2：价位网格取整/过户费/官方费率表）。 */
+    public static final int MONEY_POLICY_VERSION = 2;
     // <<< EXECUTION_CONTRACT
 
     /** 枚举值的长度上限（与 Python 侧一致）。 */
@@ -166,9 +167,12 @@ public final class ExecutionContract {
     public static final String TRIGGER_MANUAL = "manual";
     /** 盘中盯盘 agent（量化事件触发的轻量判断，见 `intraday_watch.py`）。 */
     public static final String TRIGGER_WATCH = "watch";
+    /** 公司行动（分红除权调整）：不是一次"决策"，但同样改变账户数字，必须留痕。 */
+    public static final String TRIGGER_CORPORATE_ACTION = "corporate_action";
 
     public static final List<String> TRACE_TRIGGERS =
-            List.of(TRIGGER_CRON, TRIGGER_EVENT, TRIGGER_MANUAL, TRIGGER_WATCH);
+            List.of(TRIGGER_CRON, TRIGGER_EVENT, TRIGGER_MANUAL, TRIGGER_WATCH,
+                    TRIGGER_CORPORATE_ACTION);
 
     /** 请求体里声明结算类型的字段名（Python 侧 `app.py` 读同名键）。 */
     public static final String SETTLEMENT_KIND_FIELD = "settlement_kind";

@@ -34,7 +34,7 @@ def test_scales_are_the_documented_ones():
     assert ec.MONEY.equity_scale == 2
     assert ec.MONEY.return_scale == 4
     assert ec.MONEY.rounding == "HALF_UP"
-    assert ec.MONEY.version == 1, "口径变更必须递增版本号（它写进执行指纹）"
+    assert ec.MONEY.version == 2, "口径变更必须递增版本号（它写进执行指纹）——v2：价位网格取整/过户费/官方费率表"
 
 
 def test_quantize_respects_each_scale():

@@ -37,6 +37,7 @@ public class UserService {
         profile.put("email", user.getEmail());
         profile.put("phone", user.getPhone());
         profile.put("pushChannel", pushChannelOrEmpty(user));
+        profile.put("commissionPct", user.getCommissionPct());
         return profile;
     }
 
@@ -62,6 +63,23 @@ public class UserService {
         if (updates.containsKey("phone")) {
             String phone = (String) updates.get("phone");
             user.setPhone(phone);
+        }
+        if (updates.containsKey("commissionPct")) {
+            Object raw = updates.get("commissionPct");
+            if (raw == null || (raw instanceof String s && s.isBlank())) {
+                user.setCommissionPct(null);   // 清空 = 回到系统默认
+            } else {
+                try {
+                    double v = Double.parseDouble(String.valueOf(raw));
+                    if (v <= 0 || v > 0.3) {
+                        throw new NumberFormatException("out of range");
+                    }
+                    user.setCommissionPct(java.math.BigDecimal.valueOf(v));
+                } catch (NumberFormatException e) {
+                    throw new BusinessException(400,
+                            "佣金率必须是 (0, 0.3] 的百分数，如 0.025 表示万 2.5");
+                }
+            }
         }
         if (updates.containsKey("pushChannel") || updates.containsKey("pushTarget")) {
             String channel = strOr(updates.get("pushChannel"), "");

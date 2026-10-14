@@ -2023,4 +2023,110 @@ class PaperTradingServiceTest {
         assertFalse(PaperTradingService.shouldRetireLesson(6, 31.0));
         assertFalse(PaperTradingService.shouldRetireLesson(10, 50.0));
     }
+
+    // ==================== 分红除权（公司行动） ====================
+
+    /**
+     * 除权日到达时：现金红利入账、送转摊薄成本、HWM 按除权公式下调、痕迹落库。
+     * 用 10000 股 @ 成本 6.0、每股派 0.12 元、10 送 2（每股 0.2）钉住整套数学。
+     */
+    @Test
+    void exDividendDayCreditsCashDilutesCostAndAdjustsWatermark() throws Exception {
+        String configJson = "{\"initial_capital\":100000.0,"
+                + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0},"
+                + "\"position\":{\"type\":\"full\",\"size_pct\":100.0}}";
+        User user = User.builder().id(1L).username("alice").password("x").email("a@b.c").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("分红测试").symbol("601988")
+                .configJson(configJson).user(user).paperEnabled(true)
+                .build();
+        PaperAccount account = new PaperAccount();
+        account.setUser(user);
+        account.setStrategy(strategy);
+        account.setInitialCapital(new java.math.BigDecimal("100000.00"));
+        account.setCash(new java.math.BigDecimal("5000.00"));
+        account.setShares(new java.math.BigDecimal("10000.0000"));
+        account.setAvgCost(new java.math.BigDecimal("6.0000"));
+        account.setEquity(new java.math.BigDecimal("65000.00"));
+        account.setHighWatermark(new java.math.BigDecimal("7.0000"));
+        account.setLastBuyBar(LocalDate.now().minusDays(10).toString());   // 持仓起点在除权日之前
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.of(account));
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
+        // 日线结算返回 hold（本用例只验证公司行动，不掺交易）。
+        // 价格用除权后的现实值 ≈ (6.0−0.12)/1.2 = 4.9——除权日市价本就该跳到这个档位，
+        // 用除权前的 6.0 会把 HWM 重估回去，测的就不是除权调整了。
+        when(strategyClient.evaluateBar(eq(configJson), eq("601988"), anyString(), any()))
+                .thenReturn(mapper.readTree(
+                        "{\"signal\":\"hold\",\"price\":4.9,\"matched_conditions\":[]}"));
+        // 分红：昨天除权，每股派 0.12、10 送 2
+        String exDate = LocalDate.now().minusDays(1).toString();
+        when(strategyClient.getDividends(eq("601988"))).thenReturn(mapper.readTree(String.format(
+                "{\"symbol\":\"601988\",\"dividends\":[{\"ex_date\":\"%s\","
+                        + "\"cash_per_share\":0.12,\"stock_per_share\":0.2,\"plan\":\"实施分配\"}]}",
+                exDate)));
+        // 痕迹首次写入成功（幂等键不存在）
+        when(paperTraceService.recordOnceWithKey(any(PaperTradeTrace.class), anyString()))
+                .thenReturn(true);
+
+        paperTradingService.evaluateDaily();
+
+        // 现金红利 = 10000 × 0.12 = 1200
+        assertMoney("6200.00", account.getCash());
+        // 送股 10000 × 0.2 = 2000 → 12000 股
+        assertMoney("12000", account.getShares());
+        // 成本摊薄 = 10000×6.0 / 12000 = 5.0000
+        assertMoney("5.0000", account.getAvgCost());
+        // HWM = (7.0 − 0.12) / 1.2 = 5.7333（除权参考价公式，防跟踪止损误触发）
+        assertMoney("5.7333", account.getHighWatermark());
+
+        // 痕迹：ex_dividend_day + 专用幂等键
+        ArgumentCaptor<String> keyCaptor = ArgumentCaptor.forClass(String.class);
+        verify(paperTraceService).recordOnceWithKey(any(PaperTradeTrace.class), keyCaptor.capture());
+        assertEquals("corporate_action:10:" + exDate, keyCaptor.getValue());
+    }
+
+    /** 除权日早于持仓起点（买入之前发生的分红）与本账户无关，不入账。 */
+    @Test
+    void dividendsBeforeThePositionOpenedAreIgnored() throws Exception {
+        String configJson = "{\"initial_capital\":100000.0,"
+                + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0}}";
+        User user = User.builder().id(1L).username("alice").password("x").email("a@b.c").build();
+        Strategy strategy = Strategy.builder()
+                .id(11L).name("早期分红").symbol("601988")
+                .configJson(configJson).user(user).paperEnabled(true)
+                .build();
+        PaperAccount account = new PaperAccount();
+        account.setUser(user);
+        account.setStrategy(strategy);
+        account.setInitialCapital(new java.math.BigDecimal("100000.00"));
+        account.setCash(new java.math.BigDecimal("100000.00"));
+        account.setShares(new java.math.BigDecimal("10000.0000"));
+        account.setAvgCost(new java.math.BigDecimal("6.0000"));
+        account.setEquity(new java.math.BigDecimal("100000.00"));
+        account.setHighWatermark(new java.math.BigDecimal("7.0000"));
+        account.setLastBuyBar(LocalDate.now().toString());   // 今天才买：之前的除权都无关
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(11L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(11L)).thenReturn(Optional.of(account));
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
+        when(strategyClient.evaluateBar(eq(configJson), eq("601988"), anyString(), any()))
+                .thenReturn(mapper.readTree(
+                        "{\"signal\":\"hold\",\"price\":6.0,\"matched_conditions\":[]}"));
+        when(strategyClient.getDividends(eq("601988"))).thenReturn(mapper.readTree(String.format(
+                "{\"symbol\":\"601988\",\"dividends\":[{\"ex_date\":\"%s\","
+                        + "\"cash_per_share\":0.12,\"stock_per_share\":0.0,\"plan\":\"实施分配\"}]}",
+                LocalDate.now().minusDays(5).toString())));
+
+        paperTradingService.evaluateDaily();
+
+        assertMoney("100000.00", account.getCash(), "买入前的分红不该入账");
+        assertMoney("10000", account.getShares());
+        verify(paperTraceService, never()).recordOnceWithKey(any(), anyString());
+    }
 }

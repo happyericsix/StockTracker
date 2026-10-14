@@ -300,6 +300,31 @@ public class PaperTraceService {
         return repository.countByStrategyId(strategyId);
     }
 
+    // ==================== 公司行动（分红除权）专用 ====================
+
+    /**
+     * 按自定义去重键"首次写入"一条痕迹：与常规结算痕迹的键规则（{@link #dedupeKey}）
+     * 互不覆盖。**返回是否真的写入了**——已存在（这件事处理过了）或写失败都返回 false，
+     * 调用方据此跳过账户调整，账户数学与痕迹证据保持同一幂等边界。
+     */
+    public boolean recordOnceWithKey(PaperTradeTrace trace, String dedupeKey) {
+        try {
+            if (repository.findByDedupeKey(dedupeKey).isPresent()) {
+                return false;
+            }
+            trace.setDedupeKey(dedupeKey);
+            trace.setTraceHash(traceHash(trace));
+            if (trace.getRepeatCount() == null) {
+                trace.setRepeatCount(1);
+            }
+            repository.save(trace);
+            return true;
+        } catch (Exception e) {
+            log.warn("Corporate-action trace write failed (key={}): {}", dedupeKey, e.getMessage());
+            return false;
+        }
+    }
+
     /**
      * 最近一次**真的召集了委员会**的日子（agent 调用次数 > 0），没有则 null。
      *

@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -163,6 +164,28 @@ class PaperTradingServiceWatchTest {
     }
 
     /**
+     * 未完结的 bar（标注时刻在未来）不结算。守的是 2026-10-12 的真事故：
+     * 数据源在盘前预创建含竞价数据的首根 bar，结算循环 09:27:04 就"成交"了——
+     * 真实市场那个时刻不可能成交。同一规则也挡住"走了一半的分钟 bar"上的信号重绘。
+     */
+    @Test
+    void anUnfinishedBarIsNotSettled() throws Exception {
+        Strategy strategy = agentStrategy();
+        PaperAccount account = flatAccount(strategy);
+        stubCommon(strategy, account);
+        String futureBar = java.time.LocalDateTime.now().plusMinutes(3)
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+        when(strategyClient.evaluateBarRealtime(eq(CONFIG), eq("601988"), isNull()))
+                .thenReturn(ruleResultWithBuyEvent(futureBar));
+
+        paperTradingService.evaluateRealtime();
+
+        verify(paperTradeRepository, never()).save(any(PaperTrade.class));
+        verify(paperTraceService, never()).record(any(PaperTradeTrace.class));
+        assertNull(account.getLastBarTime(), "未完结 bar 不得占用 lastBarTime——否则 bar 走完后反而不结算");
+    }
+
+    /**
      * 盯盘说不动 → 规则信号被否决：不成交，留 watch_hold 痕迹（trigger=watch）。
      * 这是"agent 盘中到底工没工作"最直接的审计证据。
      */
@@ -173,7 +196,7 @@ class PaperTradingServiceWatchTest {
         stubCommon(strategy, account);
         when(strategyClient.evaluateBarRealtime(eq(CONFIG), eq("601988"), isNull()))
                 .thenReturn(ruleResultWithBuyEvent("2026-10-09 10:00:00"));
-        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any()))
+        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), isNull(), isNull(), any()))
                 .thenReturn(watchResponse("hold", 0.0));
 
         paperTradingService.evaluateRealtime();
@@ -196,7 +219,7 @@ class PaperTradingServiceWatchTest {
         stubCommon(strategy, account);
         when(strategyClient.evaluateBarRealtime(eq(CONFIG), eq("601988"), isNull()))
                 .thenReturn(ruleResultWithBuyEvent("2026-10-09 10:01:00"));
-        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any()))
+        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), isNull(), isNull(), any()))
                 .thenReturn(watchResponse("buy", 0.4));
 
         paperTradingService.evaluateRealtime();
@@ -224,7 +247,7 @@ class PaperTradingServiceWatchTest {
         when(paperAuthorizationRepository.findLatest(10L)).thenReturn(Optional.of(noOpen));
         when(strategyClient.evaluateBarRealtime(eq(CONFIG), eq("601988"), isNull()))
                 .thenReturn(ruleResultWithBuyEvent("2026-10-09 10:02:00"));
-        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any()))
+        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), isNull(), isNull(), any()))
                 .thenReturn(watchResponse("buy", 0.5));
 
         paperTradingService.evaluateRealtime();
@@ -244,7 +267,7 @@ class PaperTradingServiceWatchTest {
         stubCommon(strategy, account);
         when(strategyClient.evaluateBarRealtime(eq(CONFIG), eq("601988"), isNull()))
                 .thenReturn(ruleResultWithBuyEvent("2026-10-09 10:03:00"));
-        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any()))
+        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), isNull(), isNull(), any()))
                 .thenReturn(mapper.readTree(
                         "{\"valid\":true,\"action\":\"hold\",\"degraded\":true,\"watch_tokens\":0}"));
 
@@ -267,7 +290,7 @@ class PaperTradingServiceWatchTest {
         paperTradingService.evaluateRealtime();
 
         // 预算 0：一次都不问模型
-        verify(strategyClient, never()).intradayWatch(anyString(), anyString(), any(), any(), any());
+        verify(strategyClient, never()).intradayWatch(anyString(), anyString(), any(), any(), any(), any(), any(), any());
         ArgumentCaptor<PaperTradeTrace> traceCaptor = ArgumentCaptor.forClass(PaperTradeTrace.class);
         verify(paperTraceService, atLeastOnce()).record(traceCaptor.capture());
         assertTrue(traceCaptor.getAllValues().stream()
@@ -300,7 +323,7 @@ class PaperTradingServiceWatchTest {
 
         paperTradingService.evaluateRealtime();
 
-        verify(strategyClient, never()).intradayWatch(anyString(), anyString(), any(), any(), any());
+        verify(strategyClient, never()).intradayWatch(anyString(), anyString(), any(), any(), any(), any(), any(), any());
         verify(paperTradeRepository, times(1)).save(any(PaperTrade.class));
     }
 
@@ -317,7 +340,7 @@ class PaperTradingServiceWatchTest {
 
         paperTradingService.evaluateRealtime();
 
-        verify(strategyClient, never()).intradayWatch(anyString(), anyString(), any(), any(), any());
+        verify(strategyClient, never()).intradayWatch(anyString(), anyString(), any(), any(), any(), any(), any(), any());
     }
 
     /** 同一事件类型在冷却窗口内不重复叫醒模型（第二次 evaluateRealtime 不再调盯盘）。 */
@@ -329,13 +352,13 @@ class PaperTradingServiceWatchTest {
         when(strategyClient.evaluateBarRealtime(eq(CONFIG), eq("601988"), isNull()))
                 .thenReturn(ruleResultWithBuyEvent("2026-10-09 10:07:00"))
                 .thenReturn(ruleResultWithBuyEvent("2026-10-09 10:08:00"));
-        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any()))
+        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), isNull(), isNull(), any()))
                 .thenReturn(watchResponse("hold", 0.0));
 
         paperTradingService.evaluateRealtime();
         paperTradingService.evaluateRealtime();   // 同类事件 15 分钟内第二次
 
-        verify(strategyClient, times(1)).intradayWatch(anyString(), anyString(), any(), any(), any());
+        verify(strategyClient, times(1)).intradayWatch(anyString(), anyString(), any(), any(), any(), any(), any(), any());
     }
 
     // ==================== news_shock（agent 互通 P3，2026-10-09） ====================
@@ -367,7 +390,7 @@ class PaperTradingServiceWatchTest {
         ArgumentCaptor<JsonNode> eventsCaptor = ArgumentCaptor.forClass(JsonNode.class);
         ArgumentCaptor<JsonNode> alertCaptor = ArgumentCaptor.forClass(JsonNode.class);
         verify(strategyClient).intradayWatch(eq(CONFIG), eq("601988"), eventsCaptor.capture(),
-                isNull(), any(), alertCaptor.capture());
+                isNull(), any(), alertCaptor.capture(), any(), any());
         assertEquals("news_shock", eventsCaptor.getValue().get(0).path("type").asText());
         assertEquals("利空", alertCaptor.getValue().path("direction").asText());
         verify(paperTraceService).record(any(PaperTradeTrace.class));
@@ -396,6 +419,6 @@ class PaperTradingServiceWatchTest {
         paperTradingService.evaluateRealtime();
 
         verify(strategyClient, times(1))
-                .intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), any());
+                .intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), any(), any(), any());
     }
 }

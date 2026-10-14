@@ -419,6 +419,22 @@ def _quote_num(raw):
     return s if s not in ("", "-", "--") else None
 
 
+@app.get("/api/v1/dividends/{symbol}")
+def dividends(symbol: str):
+    """分红送配（内部接口）：模拟盘的除权除息调整数据源。
+
+    每股口径（cash_per_share / stock_per_share），只含已定除权除息日的行；
+    拉取失败返回空列表（结算侧 fail-open：拿不到就不调整，下次再试）。
+    """
+    from akshare_client import get_dividends
+    try:
+        rows = get_dividends(symbol)
+    except Exception as e:
+        logger.error(f"dividends query failed for {symbol}: {e}")
+        rows = None
+    return {"symbol": symbol, "dividends": rows or []}
+
+
 @app.get("/api/v1/quote/{symbol}", response_model=StockQuoteResponse)
 def stock_quote(symbol: str):
     data = get_quote(symbol)
@@ -1124,10 +1140,22 @@ async def intraday_decide_endpoint(req: Request):
         news_alert = data.get("news_alert") if isinstance(data.get("news_alert"), dict) else None
         # 经验回流（P4）：这条策略自己的成交成绩单（轻量版），None = 不带
         experience = data.get("experience") if isinstance(data.get("experience"), dict) else None
+        # 盘中语境（2026-10-14）：当日已成交 + 上次全委会结论（Java 组装，fail-open）
+        today_context = data.get("today_context") if isinstance(data.get("today_context"), dict) else None
+        # 大盘语境（2026-10-14）：与委员会共用 market_context 的 TTL 缓存（全市场一份，
+        # 近零成本）；AGENT_MARKET_CONTEXT=0 时与委员会一起关闭，fail-open 不挡盯盘
+        market_context = None
+        if os.getenv("AGENT_MARKET_CONTEXT", "1").strip().lower() not in ("0", "off", "false"):
+            try:
+                from agent import market_context as _mc
+                market_context = await asyncio.to_thread(_mc.get_market_context)
+            except Exception as e:  # noqa: BLE001 —— 大盘语境取不到不该挡盯盘
+                logger.info("盯盘大盘语境取数失败（不带该块）：%s", type(e).__name__)
         result = await asyncio.to_thread(
             intraday_watch.intraday_decide, symbol, events, position,
             data.get("authorization"), config, minute_bars or [], day_records or [],
-            news_alert=news_alert, experience=experience)
+            news_alert=news_alert, experience=experience,
+            today_context=today_context, market_context=market_context)
         result["valid"] = True
         return result
     except Exception as e:

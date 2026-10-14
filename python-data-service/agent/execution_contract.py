@@ -235,7 +235,8 @@ class MoneyPolicy:
     而"两处各自 round"必然在某个角落对不上账。
     """
 
-    version: int = 1
+    # v2（2026-10-14）：与 Java Money.POLICY_VERSION 同步——成交价 0.01 网格取整、过户费、官方费率表
+    version: int = 2
     price_scale: int = 4
     amount_scale: int = 2
     equity_scale: int = 2

@@ -330,3 +330,74 @@ def test_experience_enters_prompt_only_when_present():
     iw.intraday_decide("sh601988", EVENTS, None, None, BASE_CONFIG,
                        make_minute_bars(), make_day_records(), completion=llm2)
     assert '"experience"' not in llm2.calls[0][1]["content"], "无成绩单时不应带空键"
+
+
+# ==================== 盘中语境与三层框架（2026-10-14 复盘补） ====================
+
+
+def test_panel_carries_rsi_and_ma60_structure():
+    """技术面快照：RSI 与现价对 MA60 的位置必须进面板——盯盘不该只看
+    分钟级量价抖动，日线结构是事件解读的坐标系。"""
+    from datetime import date, timedelta
+    day_records = []
+    price = 10.0
+    d = date(2026, 1, 1)
+    for i in range(80):
+        day_records.append({"date": d.isoformat(), "open": price, "close": price,
+                            "high": price + 0.1, "low": price - 0.1, "volume": 1000})
+        price += 0.05 if i % 3 else -0.02   # 缓慢上行，RSI 有值且非极端
+        d += timedelta(days=1)
+    minute_bars = [{"date": "2026-03-25 14:30", "open": 12.0, "close": 12.1,
+                    "high": 12.2, "low": 11.9, "volume": 2000}]
+    panel = iw.build_panel(minute_bars, day_records, None, None)
+    assert panel.get("rsi") is not None, "RSI 应进面板"
+    assert panel.get("price_vs_ma60_pct") is not None, "现价对 MA60 位置应进面板"
+
+
+def test_today_and_market_context_enter_the_watch_prompt():
+    """当日已成交 + 上次委员会结论 + 大盘语境必须进盯盘提示词：
+    缺了'今天动过手'，盯盘会在不知道刚卖过的情况下把仓位买回来（实测踩过）。"""
+    events = [{"type": "sharp_move", "detail": "1 分钟拉升 2%"}]
+    llm_calls = []
+
+    def fake_completion(messages, temperature=0.1, max_tokens=300):
+        llm_calls.append(messages)
+        return {"message": {"role": "assistant", "content": '{"action":"hold","size_fraction":0}'},
+                "usage": {"total_tokens": 100}}
+
+    iw.intraday_decide("600519", events, None, {"allow_open": True}, None,
+                       [], [], completion=fake_completion,
+                       today_context={"trades": [{"side": "sell", "price": "7.11",
+                                                  "shares": "14500", "time": "10:08"}],
+                                      "last_committee": "10-13 委员会：HOLD，未给盘中授权"},
+                       market_context={"indices": {"上证指数": {"pct": -1.2}}})
+    user_prompt = llm_calls[0][1]["content"]
+    assert '"today_context"' in user_prompt and "10:08" in user_prompt
+    assert "last_committee" in user_prompt and "委员会" in user_prompt
+    assert '"market_context"' in user_prompt and "上证指数" in user_prompt
+
+
+def test_system_prompt_has_lock_discipline_and_layered_framework():
+    system = iw._watch_system_prompt()
+    # T+1 锁仓纪律：今天动过手再买 = 当日出不去
+    assert "T+1 锁仓" in system and "今天已经动过手" in system
+    # 三层框架：环境 → 价格结构 → 事件本身
+    assert "先环境" in system and "再价格结构" in system and "最后才是事件本身" in system
+    # 委员会联动：冲突动作选 flag
+    assert "flag" in system and "委员会" in system
+
+
+def test_context_blocks_are_absent_when_not_provided():
+    events = [{"type": "sharp_move", "detail": "x"}]
+    llm_calls = []
+
+    def fake_completion(messages, temperature=0.1, max_tokens=300):
+        llm_calls.append(messages)
+        return {"message": {"role": "assistant", "content": '{"action":"hold","size_fraction":0}'},
+                "usage": {"total_tokens": 100}}
+
+    iw.intraday_decide("600519", events, None, None, None, [], [],
+                       completion=fake_completion)
+    user_prompt = llm_calls[0][1]["content"]
+    assert '"today_context"' not in user_prompt
+    assert '"market_context"' not in user_prompt

@@ -26,8 +26,12 @@ public final class Money {
     private Money() {
     }
 
-    /** 与 Python 侧 {@code MoneyPolicy.version} 一致：改动口径必须同时改这个数。 */
-    public static final int POLICY_VERSION = 1;
+    /**
+     * 与 Python 侧 {@code MoneyPolicy.version} 一致：改动口径必须同时改这个数。
+     * v2（2026-10-14）：成交价取整到 0.01 价位网格（买向上/卖向下）；补收过户费（双边）；
+     * 费率出处改为官方生效日期表 + 用户档案佣金。v1 痕迹按旧口径解读。
+     */
+    public static final int POLICY_VERSION = 2;
     public static final int PRICE_SCALE = 4;
     public static final int AMOUNT_SCALE = 2;
     public static final int EQUITY_SCALE = 2;

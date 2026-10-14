@@ -185,6 +185,48 @@ const handleDisablePush = async () => {
   }
 }
 
+// ---- 交易费用口径：佣金是用户与券商的约定，档案里一份、全局生效 ----
+const commissionInput = ref('')
+const commissionMsg = ref('')
+const commissionBusy = ref(false)
+
+const handleSaveCommission = async () => {
+  commissionMsg.value = ''
+  const v = commissionInput.value.trim()
+  if (v === '') return handleClearCommission()
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0 || n > 0.3) {
+    commissionMsg.value = '佣金率需在 (0, 0.3] 之间，如 0.025 表示万 2.5'
+    return
+  }
+  commissionBusy.value = true
+  try {
+    const res = await updateProfile({ commissionPct: n })
+    profile.value = res.data || profile.value
+    commissionInput.value = ''
+    commissionMsg.value = '已保存，之后所有模拟盘结算按这个费率收佣金'
+  } catch (e) {
+    commissionMsg.value = e.response?.data?.message || '保存失败，请稍后重试'
+  } finally {
+    commissionBusy.value = false
+  }
+}
+
+const handleClearCommission = async () => {
+  commissionMsg.value = ''
+  commissionBusy.value = true
+  try {
+    const res = await updateProfile({ commissionPct: null })
+    profile.value = res.data || profile.value
+    commissionInput.value = ''
+    commissionMsg.value = '已恢复默认（万 2.5）'
+  } catch (e) {
+    commissionMsg.value = e.response?.data?.message || '操作失败'
+  } finally {
+    commissionBusy.value = false
+  }
+}
+
 // ---- LLM 用量（整站成本口径）----
 const llmUsage = ref(null)
 const loadLlmUsage = async () => {
@@ -258,6 +300,32 @@ onMounted(() => {
           当前已启用：{{ profile.pushChannel === 'bark' ? 'Bark' : 'Server酱' }}（Key 已保存，不在页面回显）
         </p>
         <p v-if="pushMsg" class="text-[12.5px] text-accent" role="status">{{ pushMsg }}</p>
+      </div>
+    </section>
+
+    <!-- 交易费用口径 -->
+    <section class="mb-4 rounded-xl border border-border bg-surface p-5">
+      <h2 class="text-[15px] font-semibold text-ink">交易费用口径（模拟盘）</h2>
+      <p class="mb-3.5 mt-1 text-[12.5px] leading-relaxed text-ink-3">
+        印花税、过户费按官方公告的生效日期自动取值（无需设置）；佣金是你和券商的约定——
+        填你的真实费率，模拟盘的费用就与实盘一致。留空用默认万 2.5。
+      </p>
+      <div class="flex flex-col gap-3">
+        <label class="flex flex-col gap-1">
+          <span class="text-[12px] text-ink-2">我的佣金率（百分数，0.025 = 万 2.5）</span>
+          <input
+            v-model.trim="commissionInput"
+            type="text" inputmode="decimal" autocomplete="off"
+            :placeholder="profile.commissionPct != null ? String(profile.commissionPct) : '0.025（默认万 2.5）'"
+            class="num h-[34px] w-full rounded-lg border border-border bg-bg px-3 font-mono text-[12.5px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none focus:ring-2 focus:ring-[color:var(--ring)]"
+          >
+        </label>
+        <div class="flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="primary" :loading="commissionBusy" @click="handleSaveCommission">保存</Button>
+          <Button v-if="profile.commissionPct != null" size="sm" variant="ghost" :disabled="commissionBusy" @click="handleClearCommission">恢复默认</Button>
+          <span v-if="profile.commissionPct != null" class="text-[12.5px] text-ink-2">当前：{{ profile.commissionPct }}%（万 {{ Math.round(profile.commissionPct * 1000) / 10 }}）</span>
+        </div>
+        <p v-if="commissionMsg" class="text-[12.5px] text-accent" role="status">{{ commissionMsg }}</p>
       </div>
     </section>
 

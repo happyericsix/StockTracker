@@ -997,3 +997,69 @@ def _stock_name(code: str) -> str:
         if item.get("code") == code:
             return str(item.get("name") or "")
     return ""
+
+
+# ==================== 分红送配（除权除息，2026-10-14） ====================
+# 模拟盘的"分红除权处理"数据源：现金红利与送转比例按官方公告口径（东财数据）。
+# 缓存 12 小时：除权日是提前公告的，盘前刷新一次足够；方案进度变化当天可见。
+DIVIDEND_CACHE_TTL = 12 * 3600
+_dividend_cache: dict[str, tuple[float, list[dict]]] = {}
+
+
+def get_dividends(symbol: str) -> Optional[list[dict]]:
+    """某只 A 股的分红送配历史（已定除权除息日的行）。
+
+    返回字段（**每股**口径，已是"每 10 股派 X"除以 10 后的值）：
+      ex_date          除权除息日（YYYY-MM-DD）
+      cash_per_share   每股现金红利（含税，元）
+      stock_per_share  每股送转比例（10 送 2 → 0.2；无送转为 0）
+      plan             方案进度（如"实施分配"）
+    """
+    resolved = resolve_symbol(symbol)
+    if not resolved:
+        return None
+    code = normalize_symbol(resolved).lower()
+    if not (code.startswith(("sh", "sz", "bj")) and code[2:].isdigit()):
+        return None
+    pure = code[2:]
+
+    now = time.time()
+    with _history_cache_lock:
+        cached = _dividend_cache.get(pure)
+        if cached and now - cached[0] < DIVIDEND_CACHE_TTL:
+            return cached[1]
+
+    try:
+        df = akshare.stock_fhps_detail_em(symbol=pure)
+    except Exception as e:
+        logger.warning("分红送配查询失败 %s: %s", pure, e)
+        return cached[1] if cached else None   # 拉挂了给旧缓存，别让结算拿不到
+
+    rows = []
+    if df is not None and not df.empty:
+        for _, r in df.iterrows():
+            ex = r.get("除权除息日")
+            if ex is None or str(ex) in ("NaT", "nan", ""):
+                continue   # 还没定除权日（董事会预案阶段）——没有可执行的调整
+            try:
+                ex_date = str(ex)[:10]
+            except Exception:
+                continue
+
+            def per10(v) -> float:
+                try:
+                    f = float(v)
+                    return 0.0 if f != f else f / 10.0   # NaN → 0
+                except (TypeError, ValueError):
+                    return 0.0
+
+            rows.append({
+                "ex_date": ex_date,
+                "cash_per_share": per10(r.get("现金分红-现金分红比例")),
+                "stock_per_share": per10(r.get("送转股份-送转总比例")),
+                "plan": str(r.get("方案进度") or ""),
+            })
+    rows.sort(key=lambda x: x["ex_date"])
+    with _history_cache_lock:
+        _dividend_cache[pure] = (now, rows)
+    return rows

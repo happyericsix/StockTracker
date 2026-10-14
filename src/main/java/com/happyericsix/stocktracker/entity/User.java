@@ -48,4 +48,13 @@ public class User {
     @JsonIgnore
     private String pushTarget;
 
+    /**
+     * 我的券商佣金率（百分数，0.025 = 万 2.5）。**模拟盘结算的费用口径**：
+     * 佣金是"你和券商的约定"，没有官方统一值，所以放在用户档案里，
+     * 而不是写死在代码或策略配置里。null = 用系统默认（万 2.5）。
+     * scale=5：万 0.5（0.005%）也要存得下，两位小数会把 0.025 圆成 0.03。
+     */
+    @jakarta.persistence.Column(precision = 8, scale = 5)
+    private java.math.BigDecimal commissionPct;
+
 }

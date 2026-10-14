@@ -9,6 +9,7 @@ import com.happyericsix.stocktracker.dto.PaperEquityResponse;
 import com.happyericsix.stocktracker.dto.PaperOverviewResponse;
 import com.happyericsix.stocktracker.dto.PaperTradeResponse;
 import com.happyericsix.stocktracker.dto.PaperTradeTraceResponse;
+import com.happyericsix.stocktracker.dto.StockHistoryResponse;
 import com.happyericsix.stocktracker.entity.PaperAccount;
 import com.happyericsix.stocktracker.entity.PaperAuthorization;
 import com.happyericsix.stocktracker.entity.PaperEquitySnapshot;
@@ -54,10 +55,17 @@ public class PaperTradingService {
     private static final Logger log = LoggerFactory.getLogger(PaperTradingService.class);
 
     private static final double DEFAULT_INITIAL_CAPITAL = 100000.0;
-    private static final double DEFAULT_COMMISSION_PCT = 0.1;
+    /**
+     * 佣金兜底默认：万 2.5（2026 年散户常见档）。**它只是"档案和策略都没说"时的兜底**——
+     * 正常路径是用户档案 commissionPct（与券商的真实约定），其次才是旧策略配置里的
+     * risk.commission_pct（兼容历史）。佣金没有官方统一值，所以永远允许被覆盖。
+     */
+    private static final double DEFAULT_COMMISSION_PCT = 0.025;
     private static final double DEFAULT_SLIPPAGE_PCT = 0.1;
-    /** 卖出印花税（A 股，单边卖出；以最新法规为准） */
+    /** 卖出印花税兜底（查表失败时用；正常路径走 MarketRulesService 官方生效日期表） */
     private static final double DEFAULT_STAMP_TAX_PCT = 0.05;
+    /** 过户费兜底（双边，查表失败时用） */
+    private static final double DEFAULT_TRANSFER_FEE_PCT = 0.001;
     private static final double DEFAULT_MIN_COMMISSION_YUAN = 5.0;
     private static final String DEFAULT_POSITION_TYPE = "full";
     private static final double DEFAULT_SIZE_PCT = 100.0;
@@ -96,6 +104,16 @@ public class PaperTradingService {
     /** 成交推送旁路。允许为 null（单测）：推送失败绝不影响结算。 */
     private final PushService pushService;
     private final MessageService messageService;
+    /**
+     * 官方费率与板块规则（按生效日期查表）。允许为 null（单测）：null 时退回
+     * 本类顶部的兜底常量——单测的确定性优先，生产行为以注册表为准。
+     */
+    private final MarketRulesService marketRulesService;
+    /**
+     * 涨跌停挡单要用的日线昨收与股票名称（ST 识别）。允许为 null（单测）：
+     * 拿不到昨收就不挡（fail-open），挡单是真实性增强，不是结算的生存线。
+     */
+    private final StockDataGateway stockDataGateway;
     private final ObjectMapper mapper = new ObjectMapper();
     private final TransactionTemplate transactionTemplate;
 
@@ -112,6 +130,18 @@ public class PaperTradingService {
     private final Map<String, Long> watchEventLastFired = new ConcurrentHashMap<>();
     /** 盯盘调用计数：strategyId:tradeDate → 次数。重启归零无害（预算是止损线不是账单）。 */
     private final Map<String, Integer> watchCallCount = new ConcurrentHashMap<>();
+
+    // ===== 分红除权（公司行动，2026-10-14）=====
+    /** 分红数据缓存：除权日提前公告，1 小时新鲜度足够（Python 侧还有 12h 源缓存）。 */
+    private final com.github.benmanes.caffeine.cache.Cache<String, List<DividendInfo>> dividendCache =
+            com.github.benmanes.caffeine.cache.Caffeine.newBuilder()
+                    .expireAfterWrite(java.time.Duration.ofHours(1))
+                    .maximumSize(64)
+                    .build();
+
+    /** 一条分红送配记录（每股口径）。 */
+    private record DividendInfo(LocalDate exDate, BigDecimal cashPerShare,
+                                BigDecimal stockPerShare, String plan) {}
 
     /**
      * 单一构造函数：**不要为了"测试方便"再加几个重载**。
@@ -138,7 +168,9 @@ public class PaperTradingService {
                                NewsBriefingService newsBriefingService,
                                DecisionQualityService decisionQualityService,
                                MemoryLessonService memoryLessonService,
-                               MessageService messageService) {
+                               MessageService messageService,
+                               MarketRulesService marketRulesService,
+                               StockDataGateway stockDataGateway) {
         this.strategyRepository = strategyRepository;
         this.paperAccountRepository = paperAccountRepository;
         this.paperTradeRepository = paperTradeRepository;
@@ -158,6 +190,8 @@ public class PaperTradingService {
         this.decisionQualityService = decisionQualityService;
         this.memoryLessonService = memoryLessonService;
         this.messageService = messageService;
+        this.marketRulesService = marketRulesService;
+        this.stockDataGateway = stockDataGateway;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
@@ -845,6 +879,8 @@ public class PaperTradingService {
         if (isNewAccount) {
             account = paperAccountRepository.save(account);
         }
+        // 公司行动先于一切评估：除权日的 HWM/成本不先调整，本节的止损与信号全在错基准上
+        account = applyCorporateActionsIfDue(strategy, account);
 
         JsonNode position = buildPosition(account);
         // 决策源在这里分岔，**执行路径一行不改**（下面还是同一个 applyBarResult）：
@@ -1097,6 +1133,8 @@ public class PaperTradingService {
         if (isNewAccount) {
             account = paperAccountRepository.save(account);
         }
+        // 公司行动先于一切评估：除权日的 HWM/成本不先调整，本节的止损与信号全在错基准上
+        account = applyCorporateActionsIfDue(strategy, account);
 
         // ===== 盘中授权（authorization 模式，2026-10-06；2026-10-08 加止损硬通道）=====
         // 改造前 agent 模式盘中直接短路（2026-09-18 方案 A：一天只剩 15:30 一决），
@@ -1131,6 +1169,24 @@ public class PaperTradingService {
         String barTime = textOr(result.get("bar_time"), "");
         if (barTime.isBlank()) {
             log.debug("Realtime evaluateBar missing bar_time for strategy id={}", strategy.getId());
+            return account;
+        }
+        // ===== 已完结 bar 门控（2026-10-14）：只对走完的分钟 bar 结算 =====
+        // 数据源的分钟 bar 按【结束时刻】标注，且会在盘前预创建当天首根 bar（含 9:25
+        // 集合竞价数据）。在 bar 结束时刻之前评估它 = 在不可能成交的时刻、用半程数据
+        // 出信号——2026-10-12 09:27:04 的"盘前买入"就是这么发生的（成交价是竞价价
+        // 6.79，而 9:30 实际开盘 6.84）；盘中同理，10:42:51 评估"10:43"这根走了一半
+        // 的 bar，交叉信号可能在 bar 收尾时消失（重绘）。规则一条：墙钟必须走到
+        // bar 标注时刻之后，这根 bar 才算"已完结、可结算"。盘前/午休/收盘后被它
+        // 天然挡住，不需要另维护一张时段表；未完结前不占 lastBarTime（不吞掉完结后的结算）。
+        LocalDateTime barEnd = parseBarTime(barTime);
+        if (barEnd == null) {
+            log.warn("Realtime bar_time unparsable ({}), skip settlement for strategy id={}",
+                    barTime, strategy.getId());
+            return account;
+        }
+        if (LocalDateTime.now().isBefore(barEnd)) {
+            log.debug("Realtime bar {} not finished yet for strategy id={}", barTime, strategy.getId());
             return account;
         }
         if (barTime.equals(account.getLastBarTime())) {
@@ -1200,6 +1256,21 @@ public class PaperTradingService {
                         CnTime.today(), barTime, result, ExecutionContract.SKIP_OUTSIDE_AUTHORIZATION);
             }
         }
+        // 当日往返护栏（2026-10-14 复盘补）：盘中授权通道一天只许动一次手。
+        // 实测踩过：10:08 规则卖出 → 10:12 规则买回（2/10 日线在分钟级震荡里互搏）→
+        // 10:20 再触发卖出被 T+1 锁死，全天两笔双边费用、被动持有到收盘。
+        // 复用 already_traded_today 语义（"今天已经动过了"），与日线结算口径一致；
+        // 止损卖出不在其列（生存线永远放行），"先卖后买的再进场"顺延到次日。
+        if (isAgentMode(strategy) && "buy".equals(pendingSignal)
+                && paperTradeRepository.existsByStrategyIdAndTradeDate(strategy.getId(), CnTime.today())) {
+            markToMarket(strategy, account, result);
+            markFingerprintDecisionMode(result);
+            PaperAccount blocked = traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME, trigger,
+                    CnTime.today(), barTime, result, ExecutionContract.SKIP_ALREADY_TRADED_TODAY);
+            notifyBlockedQuietly(strategy, "盘中往返已拦截",
+                    "今日已有成交，盘中买入信号不再执行（防当日来回打脸），下一交易日恢复");
+            return blocked;
+        }
         if (isAgentMode(strategy)) {
             // 止损通道与授权通道分开标注：委员会复盘时要能分清"边界内的执行"
             // 与"越过边界的硬止损"——后者是它下次开会该重新评估边界的信号。
@@ -1266,20 +1337,12 @@ public class PaperTradingService {
 
         JsonNode watch;
         try {
-            // 无新闻告警走旧签名（既有路径与测试桩不变）；有才带第 6 参；
-            // 经验回流（P4）：有成绩单时走全参签名（newsAlert 可为 null）
+            // 盘中语境（2026-10-14）：当日已成交 + 上次全委会结论，随全部调用带上
+            //（experience/newsAlert 可为 null，todayContext 组装失败时是空节点——都不挡调用）
             JsonNode experience = strategyExperienceQuietly(strategy);
-            if (experience != null) {
-                watch = strategyClient.intradayWatch(strategy.getConfigJson(), strategy.getSymbol(),
-                        events, buildPosition(account), authorizationNode(authorization),
-                        newsAlert, experience);
-            } else if (newsAlert == null) {
-                watch = strategyClient.intradayWatch(strategy.getConfigJson(), strategy.getSymbol(),
-                        events, buildPosition(account), authorizationNode(authorization));
-            } else {
-                watch = strategyClient.intradayWatch(strategy.getConfigJson(), strategy.getSymbol(),
-                        events, buildPosition(account), authorizationNode(authorization), newsAlert);
-            }
+            watch = strategyClient.intradayWatch(strategy.getConfigJson(), strategy.getSymbol(),
+                    events, buildPosition(account), authorizationNode(authorization),
+                    newsAlert, experience, todayContextNode(strategy));
         } catch (Exception e) {
             log.warn("Intraday watch call failed for strategy id={}: {}", strategy.getId(), e.getMessage());
             return null;   // 调用失败 = 没问成 → 降级回规则路径
@@ -1820,12 +1883,22 @@ public class PaperTradingService {
         JsonNode risk = config.get("risk");
         // 费率一律走 BigDecimal：它们是"乘在钱上的数"，用 double 相乘会把二进制误差
         // 带进成交额，而净值恒等式要逐笔对上账（见 Money）。
-        BigDecimal commission = rate(field(risk, "commission_pct"), DEFAULT_COMMISSION_PCT);
+        //
+        // 费率出处（2026-10-14 起，"不写死"原则）：
+        //   佣金   = 用户档案（与券商的真实约定）> 旧策略 risk.commission_pct（兼容）> 万 2.5 兜底；
+        //   印花税 = 官方生效日期表（risk.stamp_tax_pct 显式存在时尊重旧配置）；
+        //   过户费 = 官方生效日期表（双边，此前缺失，现补上）。
+        // 历史回放（同一结算日）自动落在当时的公告费率上。
+        BigDecimal commission = commissionPctFor(strategy, risk);
         BigDecimal slippage = rate(field(risk, "slippage_pct"), DEFAULT_SLIPPAGE_PCT);
-        // A 股卖出印花税（0.05%）与整手规则：科创板 688/689 起购 200 股，其余默认 100 股/手
-        BigDecimal stampTax = rate(field(risk, "stamp_tax_pct"), DEFAULT_STAMP_TAX_PCT);
+        BigDecimal stampTax = officialOrConfigured(risk, "stamp_tax_pct",
+                MarketRulesService.RULE_STAMP_TAX_SELL, DEFAULT_STAMP_TAX_PCT, tradeDate);
+        // 过户费在注册表引入（2026-10-14）之前不存在：不可用时按历史行为取 0，而不是编一个数
+        BigDecimal transferFee = officialOrConfigured(risk, "transfer_fee_pct",
+                MarketRulesService.RULE_TRANSFER_FEE, 0.0, tradeDate);
         BigDecimal lot = Money.price(numberOr(field(risk, "lot_size"),
-                defaultLotFor(strategy.getSymbol())));
+                marketRulesService != null ? MarketRulesService.lotFor(strategy.getSymbol())
+                        : defaultLotFor(strategy.getSymbol())));
 
         JsonNode positionConfig = config.get("position");
         String positionType = textOr(field(positionConfig, "type"), DEFAULT_POSITION_TYPE);
@@ -1941,7 +2014,14 @@ public class PaperTradingService {
 
         PaperTrade trade = null;
         if ("buy".equals(signal) && !isHolding(account)) {
-            BigDecimal fill = Money.price(price.multiply(BigDecimal.ONE.add(slippage)));
+            // 涨跌停挡单：参考价已到/越过当日涨停价时，真实市场排队买不进——模拟盘也不许成交。
+            if (limitBlocked(strategy, "buy", price, tradeDate)) {
+                log.info("Paper: buy blocked at limit-up for strategy id={} on {}",
+                        strategy.getId(), tradeDate);
+                return skip(account, trace, ExecutionContract.SKIP_LIMIT_BLOCKED);
+            }
+            // 成交价取整到 0.01 价位网格（买入向上取：真实挂单只能更贵，不能更便宜）。
+            BigDecimal fill = tickRound(price.multiply(BigDecimal.ONE.add(slippage)), true);
             if (fill.signum() <= 0) {
                 log.warn("Invalid fill price for buy on strategy id={}", strategy.getId());
                 return skip(account, trace, ExecutionContract.SKIP_INVALID_PRICE);
@@ -1954,14 +2034,16 @@ public class PaperTradingService {
                 return skip(account, trace, ExecutionContract.SKIP_INSUFFICIENT_CASH);
             }
 
-            // 整手取整：按 (预算 / (成交价*(1+佣金)*手数)) **向下**取整手。
+            // 整手取整：按 (预算 / (成交价*(1+佣金+过户费)*手数)) **向下**取整手。
             // 用 divide(...,0,DOWN) 而不是 floor(double)：整手这件事的判定不能靠浮点。
-            BigDecimal perLot = fill.multiply(BigDecimal.ONE.add(commission)).multiply(lot);
+            BigDecimal perLot = fill.multiply(
+                    BigDecimal.ONE.add(commission).add(transferFee)).multiply(lot);
             BigDecimal shares = perLot.signum() <= 0 ? BigDecimal.ZERO
                     : budget.divide(perLot, 0, RoundingMode.DOWN).multiply(lot);
             while (shares.signum() > 0) {
                 BigDecimal turnover = shares.multiply(fill);
-                if (turnover.add(commissionFee(turnover, commission)).compareTo(cash) <= 0) {
+                if (turnover.add(commissionFee(turnover, commission))
+                        .add(Money.amount(turnover.multiply(transferFee))).compareTo(cash) <= 0) {
                     break;
                 }
                 shares = shares.subtract(lot);
@@ -1974,7 +2056,8 @@ public class PaperTradingService {
                 return skip(account, trace, ExecutionContract.SKIP_INSUFFICIENT_CASH_FOR_ONE_LOT);
             }
             BigDecimal turnover = shares.multiply(fill);
-            BigDecimal fee = commissionFee(turnover, commission);
+            BigDecimal fee = commissionFee(turnover, commission)
+                    .add(Money.amount(turnover.multiply(transferFee)));   // 过户费双边
             BigDecimal cashAfter = Money.amount(cash.subtract(turnover).subtract(fee));
             if (cashAfter.signum() < 0) {
                 log.warn("Buy would exceed cash on strategy id={}", strategy.getId());
@@ -1993,12 +2076,20 @@ public class PaperTradingService {
             // T+1：A 股当日买入当日不可卖（barTime 带日期时按自然日判断）
             boolean t1Blocked = barTime != null && account.getLastBuyBar() != null
                     && sameTradingDay(barTime, account.getLastBuyBar());
-            BigDecimal fill = Money.price(price.multiply(BigDecimal.ONE.subtract(slippage)));
             if (t1Blocked) {
                 log.debug("Paper: T+1 blocks sell on same trading day (bar {}) for strategy id={}",
                         barTime, strategy.getId());
                 return skip(account, trace, ExecutionContract.SKIP_T1_BLOCKED);
-            } else if (fill.signum() <= 0) {
+            }
+            // 跌停挡单：跌停价上真实市场排队卖不出——模拟盘同样不成交。
+            if (limitBlocked(strategy, "sell", price, tradeDate)) {
+                log.info("Paper: sell blocked at limit-down for strategy id={} on {}",
+                        strategy.getId(), tradeDate);
+                return skip(account, trace, ExecutionContract.SKIP_LIMIT_BLOCKED);
+            }
+            // 成交价取整到 0.01 价位网格（卖出向下取：真实成交只能更便宜）。
+            BigDecimal fill = tickRound(price.multiply(BigDecimal.ONE.subtract(slippage)), false);
+            if (fill.signum() <= 0) {
                 log.warn("Invalid fill price for sell on strategy id={}", strategy.getId());
                 return skip(account, trace, ExecutionContract.SKIP_INVALID_PRICE);
             } else {
@@ -2022,7 +2113,8 @@ public class PaperTradingService {
                     }
                 }
                 BigDecimal turnover = shares.multiply(fill);
-                BigDecimal fee = commissionFee(turnover, commission);
+                BigDecimal fee = commissionFee(turnover, commission)
+                        .add(Money.amount(turnover.multiply(transferFee)));   // 过户费双边
                 BigDecimal stampAmount = Money.amount(turnover.multiply(stampTax));
                 BigDecimal cashAfter = Money.amount(cash.add(turnover).subtract(fee).subtract(stampAmount));
                 account.setCash(cashAfter);
@@ -2092,7 +2184,7 @@ public class PaperTradingService {
 
     /** 成交回执推送（旁路）：失败只记日志。用户没配推送时是空操作。 */
     private void notifyFill(Strategy strategy, PaperTrade trade) {
-        if (pushService == null || strategy.getUser() == null) {
+        if (strategy.getUser() == null) {
             return;
         }
         try {
@@ -2103,10 +2195,69 @@ public class PaperTradingService {
                     trade.getShares() == null ? "-" : trade.getShares().stripTrailingZeros().toPlainString(),
                     trade.getPrice() == null ? "-" : trade.getPrice().toPlainString(),
                     ExecutionContract.normalizeDecisionMode(strategy.getDecisionMode()));
-            pushService.push(strategy.getUser().getUsername(), title, body);
+            if (pushService != null) {
+                pushService.push(strategy.getUser().getUsername(), title, body);
+            }
+            // 消息中心（2026-10-14 复盘补）：Web Push 需要 HTTPS+PWA 才可达，未配置前是
+            // 死通道——成交必须同时落消息中心（页面里一定看得见的那一面）。
+            // 幂等键用成交 id：重跑同一根 bar 不会推送第二条。
+            if (messageService != null && trade.getId() != null) {
+                messageService.saveReport(strategy.getUser(), "PAPER_TRADE",
+                        "paper-fill:" + trade.getId(), trade.getSymbol(), title + "：" + body);
+            }
         } catch (Exception e) {
             log.debug("fill push failed for strategy {}: {}", strategy.getId(), e.getMessage());
         }
+    }
+
+    /** 拦截类事件通知（当日往返/熔断等）：dedupe 保证一天一条。 */
+    private void notifyBlockedQuietly(Strategy strategy, String title, String detail) {
+        if (messageService == null || strategy.getUser() == null) {
+            return;
+        }
+        try {
+            messageService.saveReport(strategy.getUser(), "PAPER_ALERT",
+                    "paper-block:" + strategy.getId() + ":" + CnTime.today(), strategy.getSymbol(),
+                    String.format("【%s】%s：%s", title, strategy.getName(), detail));
+        } catch (Exception e) {
+            log.debug("block notify failed for strategy {}: {}", strategy.getId(), e.getMessage());
+        }
+    }
+
+    /**
+     * 盘中语境（2026-10-14 复盘补）：当日已成交清单 + 上次全委会结论一句话。
+     * 盯盘交易员动手前的"今天动过手吗、委员会最近怎么说"——缺了这两样，
+     * 它会在不知道自己刚卖过的情况下把仓位买回来（当日实测踩过）。
+     */
+    private ObjectNode todayContextNode(Strategy strategy) {
+        ObjectNode node = mapper.createObjectNode();
+        try {
+            var trades = paperTradeRepository
+                    .findByStrategyIdAndTradeDateOrderByIdAsc(strategy.getId(), CnTime.today());
+            if (!trades.isEmpty()) {
+                ArrayNode arr = node.putArray("trades");
+                for (PaperTrade t : trades) {
+                    arr.addObject()
+                            .put("side", t.getSide() == null ? "" : t.getSide().toLowerCase(Locale.ROOT))
+                            .put("price", t.getPrice() == null ? null : t.getPrice().toPlainString())
+                            .put("shares", t.getShares() == null ? null
+                                    : t.getShares().stripTrailingZeros().toPlainString())
+                            .put("time", t.getCreatedAt() == null ? "" : t.getCreatedAt().toString());
+                }
+            }
+            for (PaperTradeTrace trace : paperTraceService.listRecent(strategy.getId(), 10)) {
+                if (ExecutionContract.SETTLEMENT_DAILY.equals(trace.getSettlementKind())) {
+                    var last = lastSettlementOf(trace);
+                    if (last != null && last.sentence() != null && !last.sentence().isBlank()) {
+                        node.put("last_committee", last.sentence());
+                    }
+                    break;
+                }
+            }
+        } catch (Exception e) {
+            log.debug("today context build failed for strategy {}: {}", strategy.getId(), e.getMessage());
+        }
+        return node;
     }
 
     /**
@@ -2320,10 +2471,306 @@ public class PaperTradingService {
                 .max(BigDecimal.valueOf(DEFAULT_MIN_COMMISSION_YUAN)));
     }
 
+    /**
+     * 佣金的三级出处：用户档案（与券商的真实约定）> 旧策略 risk.commission_pct（兼容历史
+     * 配置）> 万 2.5 兜底。档案里填了就以档案为准——"模拟即实盘"的费率应该跟着人走，
+     * 不跟着某条策略当年写死的数字走。
+     *
+     * <p>用户按 ID 现查而不是 {@code strategy.getUser().getCommissionPct()}：
+     * 结算不在事务里，关联的 User 多半是懒代理，直接取字段会抛
+     * LazyInitializationException 把整笔结算炸掉；现查还顺带保证每次结算拿到
+     * 用户最新改的费率。
+     */
+    private BigDecimal commissionPctFor(Strategy strategy, JsonNode risk) {
+        try {
+            if (strategy.getUser() != null) {
+                Long userId = strategy.getUser().getId();   // 代理上可读，不触发初始化
+                User user = userId == null ? null : userRepository.findById(userId).orElse(null);
+                BigDecimal userPct = user == null ? null : user.getCommissionPct();
+                if (userPct != null && userPct.signum() > 0) {
+                    return Money.ratePct(userPct.doubleValue()).movePointLeft(2);
+                }
+            }
+        } catch (Exception e) {
+            log.debug("User commission lookup failed for strategy id={}: {} — falling back to config",
+                    strategy.getId(), e.getMessage());
+        }
+        return rate(field(risk, "commission_pct"), DEFAULT_COMMISSION_PCT);
+    }
+
+    /**
+     * 官方费率的查表优先：配置里**显式写了**该键（老配置兼容/测试置 0）就用配置值；
+     * 没写就走 {@link MarketRulesService} 的生效日期表。历史回放时按结算日落在正确的
+     * 公告区间上。注册表不可用（仅单测 null；生产构造注入恒存在）时退回
+     * {@code unavailablePct}——它按"变更前的历史行为"取值（印花税 0.05 兜底、过户费 0），
+     * 保证旧口径的单测语义不变。
+     */
+    private BigDecimal officialOrConfigured(JsonNode risk, String configKey, String ruleKey,
+                                            double unavailablePct, LocalDate tradeDate) {
+        JsonNode configured = field(risk, configKey);
+        if (configured != null && configured.isNumber()) {
+            return rate(configured, unavailablePct);
+        }
+        if (marketRulesService != null) {
+            try {
+                BigDecimal official = marketRulesService.ratePct(ruleKey, tradeDate);
+                if (official != null && official.signum() >= 0) {
+                    return Money.ratePct(official.doubleValue()).movePointLeft(2);
+                }
+            } catch (Exception e) {
+                log.warn("Market fee lookup failed for {} ({}), using fallback {}%: {}",
+                        ruleKey, tradeDate, unavailablePct, e.getMessage());
+            }
+        }
+        return Money.ratePct(unavailablePct).movePointLeft(2);
+    }
+
+    /**
+     * 成交价取整到 A 股 0.01 价位网格：买入向上（真实挂单只会更贵）、卖出向下（只会更便宜）。
+     * 滑点乘出来的 4 位小数价格（如 6.7968）在真实市场不存在——这一步消掉它，
+     * 且方向永远对模拟盘不利（保守侧），不会美化结果。
+     */
+    private static BigDecimal tickRound(BigDecimal rawFill, boolean roundUp) {
+        BigDecimal units = rawFill.divide(MarketRulesService.TICK, 0,
+                roundUp ? RoundingMode.CEILING : RoundingMode.FLOOR);
+        return Money.price(units.multiply(MarketRulesService.TICK));
+    }
+
+    /**
+     * 涨跌停挡单：参考价触及当日涨/跌停价时不成交（真实市场排不到队）。
+     * 昨收取日线（前复权，与净值同一口径）；幅度按板块 + ST 推导。
+     * 拿不到昨收/名称时 fail-open（不挡）——挡单是真实性增强，不该因行情抖动停掉结算。
+     * 已知边界：日线是前复权而分钟成交是除权后价格，除权除息日附近可能误挡一次；
+     * 该日本就应走 {@code ex_dividend_day} 语义（后续分红处理一并解决）。
+     */
+    private boolean limitBlocked(Strategy strategy, String side, BigDecimal price, LocalDate tradeDate) {
+        if (stockDataGateway == null || price == null || price.signum() <= 0) {
+            return false;
+        }
+        try {
+            BigDecimal prevClose = previousDailyClose(strategy.getSymbol(), tradeDate);
+            if (prevClose == null || prevClose.signum() <= 0) {
+                return false;
+            }
+            String name = null;
+            try {
+                name = stockDataGateway.getStockForSymbol(strategy.getSymbol()).name();
+            } catch (Exception ignore) {
+                // 名称拿不到只影响 ST 判定：按非 ST 的板块幅度算，宁可少挡不可乱挡
+            }
+            double limitPct = MarketRulesService.limitPctFor(strategy.getSymbol(), name);
+            BigDecimal ratio = BigDecimal.valueOf(limitPct / 100.0);
+            BigDecimal limitUp = Money.price(prevClose.multiply(BigDecimal.ONE.add(ratio))
+                    .divide(MarketRulesService.TICK, 0, RoundingMode.HALF_UP)
+                    .multiply(MarketRulesService.TICK));
+            BigDecimal limitDown = Money.price(prevClose.multiply(BigDecimal.ONE.subtract(ratio))
+                    .divide(MarketRulesService.TICK, 0, RoundingMode.HALF_UP)
+                    .multiply(MarketRulesService.TICK));
+            return "buy".equals(side)
+                    ? price.compareTo(limitUp) >= 0
+                    : price.compareTo(limitDown) <= 0;
+        } catch (Exception e) {
+            log.warn("Limit check failed for strategy id={} ({} {}): {} — fail-open",
+                    strategy.getId(), side, tradeDate, e.getMessage());
+            return false;
+        }
+    }
+
+    /** 结算日之前的最后一根日线收盘（涨跌停价的基准）。 */
+    private BigDecimal previousDailyClose(String symbol, LocalDate tradeDate) {
+        StockHistoryResponse history = stockDataGateway.getStockHistory(symbol, "day");
+        if (history == null || history.timeSeries() == null) {
+            return null;
+        }
+        BigDecimal best = null;
+        LocalDate bestDate = null;
+        for (Map.Entry<String, StockHistoryResponse.DailyPrice> e : history.timeSeries().entrySet()) {
+            try {
+                LocalDate d = LocalDate.parse(e.getKey().substring(0, 10));
+                if (d.isBefore(tradeDate) && (bestDate == null || d.isAfter(bestDate))) {
+                    BigDecimal close = new BigDecimal(e.getValue().close().trim());
+                    if (close.signum() > 0) {
+                        best = close;
+                        bestDate = d;
+                    }
+                }
+            } catch (Exception ignore) {
+                // 脏行跳过
+            }
+        }
+        return best;
+    }
+
     /** A 股整手：科创板 688/689 起购 200 股/手，其余 100 股/手（可用 risk.lot_size 覆盖） */
     private double defaultLotFor(String symbol) {
         String s = symbol == null ? "" : symbol.toUpperCase(Locale.ROOT);
         return (s.startsWith("688") || s.startsWith("689")) ? 200.0 : 100.0;
+    }
+
+    // ==================== 分红除权（公司行动，2026-10-14） ====================
+
+    /**
+     * 分红除权调整：模拟盘"即实盘"的最后一块拼图。
+     *
+     * <h3>为什么必须有它</h3>日线历史是前复权、分钟成交是原始价：除权日不调整账户，
+     * 现金红利凭空丢失，且除息缺口会让持仓市值"假跳水"（中行这种高分红股一次 ~2%），
+     * trailing stop 还会被未调整的最高水位误触发——三项全是与实盘的硬偏差。
+     *
+     * <h3>调整口径</h3>
+     * <ul>
+     *   <li>现金红利：股数 × 每股派息（含税全额）。简化声明：A股个人持股&gt;1年免税，
+     *       模拟盘按免税口径；真实短持有期（&lt;1月/1月-1年）卖出时会补扣 10%/20%，
+     *       此处不模拟补扣——差异方向对模拟盘略乐观，量级 = 红利 × 税率；</li>
+     *   <li>送股/转增：股数 × 送转比例，向下取整（真实的"零碎股折现金"不模拟）；</li>
+     *   <li>成本：总成本不变 ÷ 新股数（只有送转摊薄，现金分红不动成本）；</li>
+     *   <li>最高水位（移动止损基准）：(HWM − 每股派息) ÷ (1 + 送转比例)，地板 0——
+     *       与交易所除权参考价同一公式，否则除息日会秒触发跟踪止损。</li>
+     * </ul>
+     *
+     * <h3>幂等与适用范围</h3>痕迹键 {@code corporate_action:<strategy>:<exDate>}，
+     * 已处理过的除权日永不重复入账；只调整【持仓起点（最近一次买入日）≤ 除权日 ≤ 今天】
+     * 的行——买入之前发生的分红与本账户无关。账户调整与痕迹写入在同一短事务，
+     * 半途失败整体回滚、下轮结算重试。
+     */
+    private PaperAccount applyCorporateActionsIfDue(Strategy strategy, PaperAccount account) {
+        try {
+            BigDecimal shares = orZero(account.getShares());
+            if (shares.signum() <= 0) {
+                return account;
+            }
+            String lastBuy = account.getLastBuyBar();
+            if (lastBuy == null || lastBuy.length() < 10) {
+                return account;   // 没有持仓起点，无从判断哪次除权"穿过"了这份持仓
+            }
+            LocalDate positionSince;
+            try {
+                positionSince = LocalDate.parse(lastBuy.substring(0, 10));
+            } catch (Exception e) {
+                return account;
+            }
+            LocalDate today = CnTime.today();
+            List<DividendInfo> rows = loadDividends(strategy.getSymbol());
+            for (DividendInfo div : rows) {
+                if (div.exDate().isAfter(today) || div.exDate().isBefore(positionSince)) {
+                    continue;
+                }
+                String dedupeKey = "corporate_action:" + strategy.getId() + ":" + div.exDate();
+                account = applyOneCorporateAction(strategy, account, shares, div, dedupeKey);
+                shares = orZero(account.getShares());   // 送转后股数变了，喂给下一行
+            }
+        } catch (Exception e) {
+            log.warn("Corporate action check failed for strategy id={}: {} — fail-open（下轮重试）",
+                    strategy.getId(), e.getMessage());
+        }
+        return account;
+    }
+
+    /** 单次除权的入账（痕迹 + 账户同一短事务；dedupe 命中直接返回，不动账）。 */
+    private PaperAccount applyOneCorporateAction(Strategy strategy, PaperAccount account,
+                                                 BigDecimal shares, DividendInfo div,
+                                                 String dedupeKey) {
+        BigDecimal cashBefore = orZero(account.getCash());
+        BigDecimal avgBefore = orZero(account.getAvgCost());
+        BigDecimal hwm = account.getHighWatermark();
+
+        BigDecimal cashDividend = Money.amount(shares.multiply(div.cashPerShare()));
+        BigDecimal bonusShares = div.stockPerShare().signum() > 0
+                ? shares.multiply(div.stockPerShare()).setScale(0, RoundingMode.DOWN)
+                : BigDecimal.ZERO;
+        BigDecimal sharesAfter = Money.price(shares.add(bonusShares));
+        BigDecimal avgAfter = sharesAfter.signum() > 0
+                ? Money.price(shares.multiply(avgBefore)
+                        .divide(sharesAfter, 4, RoundingMode.HALF_UP))
+                : avgBefore;
+        BigDecimal hwmAdjusted = (hwm != null && hwm.signum() > 0)
+                ? hwm.subtract(div.cashPerShare())
+                        .divide(BigDecimal.ONE.add(div.stockPerShare()), 4, RoundingMode.HALF_UP)
+                : null;
+        final BigDecimal hwmAfter = hwmAdjusted != null && hwmAdjusted.signum() > 0
+                ? Money.price(hwmAdjusted)
+                : zeroPrice();
+
+        PaperTradeTrace trace = newTrace(strategy, account, ExecutionContract.SETTLEMENT_DAILY,
+                ExecutionContract.TRIGGER_CORPORATE_ACTION, div.exDate(),
+                div.exDate().atStartOfDay().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd")),
+                null);
+        trace.setDecision(ExecutionContract.DECISION_SKIP);
+        trace.setSkipReason(ExecutionContract.SKIP_EX_DIVIDEND_DAY);
+        trace.setCashBefore(cashBefore);
+        trace.setSharesBefore(Money.price(shares));
+        trace.setAvgCostBefore(avgBefore);
+        trace.setEquityBefore(orZero(account.getEquity()));
+        trace.setCashAfter(Money.amount(cashBefore.add(cashDividend)));
+        trace.setSharesAfter(sharesAfter);
+        trace.setAvgCostAfter(avgAfter);
+        trace.setEquityAfter(null);   // 由调用方随本节结算重估，这里不猜
+        try {
+            ObjectNode snapshot = mapper.createObjectNode();
+            snapshot.put("schema_version", 1);
+            ObjectNode extra = snapshot.putObject("extra");
+            extra.put("corporate_action", String.format(
+                    "除权除息日 %s：每股派现 %s 元、每 10 股送转 %s 股（方案：%s）；"
+                            + "红利按含税全额入账（免税口径），送转零碎股向下取整",
+                    div.exDate(), div.cashPerShare().toPlainString(),
+                    div.stockPerShare().multiply(BigDecimal.TEN).stripTrailingZeros().toPlainString(),
+                    div.plan));
+            trace.setSnapshotJson(snapshot.toString());
+            trace.setSnapshotSchemaVersion(1);
+        } catch (Exception ignore) {
+            // 快照是证据的注脚，写不进不拦入账
+        }
+
+        final PaperAccount acc = account;
+        return transactionTemplate.execute(status -> {
+            if (!paperTraceService.recordOnceWithKey(trace, dedupeKey)) {
+                return acc;   // 已处理过（或写失败）：不动账，幂等边界就在这条痕迹上
+            }
+            acc.setCash(Money.amount(orZero(acc.getCash()).add(cashDividend)));
+            acc.setShares(sharesAfter);
+            acc.setAvgCost(avgAfter);
+            acc.setHighWatermark(hwmAfter);
+            log.info("Corporate action applied for strategy id={} on {}: cash +{}, shares {} -> {}, "
+                            + "avgCost {} -> {}, HWM {} -> {}",
+                    strategy.getId(), div.exDate(), cashDividend,
+                    shares.stripTrailingZeros().toPlainString(),
+                    sharesAfter.stripTrailingZeros().toPlainString(),
+                    avgBefore.toPlainString(), avgAfter.toPlainString(),
+                    hwm == null ? "-" : hwm.toPlainString(), hwmAfter.toPlainString());
+            return paperAccountRepository.save(acc);
+        });
+    }
+
+    private List<DividendInfo> loadDividends(String symbol) {
+        return dividendCache.get(symbol == null ? "" : symbol, s -> {
+            try {
+                JsonNode res = strategyClient.getDividends(s);
+                JsonNode list = res == null ? null : res.get("dividends");
+                if (list == null || !list.isArray()) {
+                    return List.<DividendInfo>of();
+                }
+                List<DividendInfo> rows = new ArrayList<>();
+                for (JsonNode row : list) {
+                    try {
+                        rows.add(new DividendInfo(
+                                LocalDate.parse(textOr(row.get("ex_date"), "").substring(0, 10)),
+                                decimalOrZero(row.get("cash_per_share")),
+                                decimalOrZero(row.get("stock_per_share")),
+                                textOr(row.get("plan"), "")));
+                    } catch (Exception ignore) {
+                        // 脏行跳过：一条解析失败不该让整只票失去除权保护
+                    }
+                }
+                return rows;
+            } catch (Exception e) {
+                log.warn("Dividends load failed for {}: {}", s, e.getMessage());
+                return List.<DividendInfo>of();
+            }
+        });
+    }
+
+    private static BigDecimal decimalOrZero(JsonNode node) {
+        return node != null && node.isNumber() ? Money.price(node.asDouble())
+                : BigDecimal.ZERO.setScale(Money.PRICE_SCALE);
     }
 
     private static BigDecimal zeroPrice() {
@@ -2374,6 +2821,26 @@ public class PaperTradingService {
             return fallback;
         }
         return Double.valueOf(node.asDouble());
+    }
+
+    /** bar 时间形如 "yyyy-MM-dd HH:mm:ss"（空格分隔，也容忍纯日期/缺秒）。解析失败返回 null。 */
+    private static final java.time.format.DateTimeFormatter BAR_TIME_FORMAT =
+            java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+    private static LocalDateTime parseBarTime(String barTime) {
+        if (barTime == null || barTime.isBlank()) {
+            return null;
+        }
+        // 兼容空格分隔（数据源实际格式）与 'T' 分隔（ISO）；缺秒补秒
+        String t = barTime.trim().replace('T', ' ');
+        try {
+            if (t.length() == 10) {
+                return LocalDate.parse(t).atStartOfDay();
+            }
+            return LocalDateTime.parse(t.length() == 16 ? t + ":00" : t, BAR_TIME_FORMAT);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /** bar 时间形如 "yyyy-MM-dd HH:mm:ss"，按自然日前 10 位判断是否同一交易日 */

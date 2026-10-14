@@ -278,6 +278,19 @@ def build_panel(minute_bars: list[dict], day_records: list[dict],
     if price:
         panel["price_vs_ma_pct"] = {key: _round((price / value - 1.0) * 100.0)
                                     for key, value in mas.items() if value}
+    # 技术面快照（2026-10-14）：RSI 与现价对 MA60 的位置——盯盘不该只看一分钟级
+    # 的量价抖动，日线结构（超买超卖、中长期均线上下方）是事件解读的坐标系。
+    try:
+        ind = compute_indicators(day_records or [])
+        idx = len(ind.get("dates") or []) - 1
+        rsi_series = ind.get("rsi")
+        if idx >= 0 and rsi_series is not None and idx < len(rsi_series) and rsi_series[idx] == rsi_series[idx]:
+            panel["rsi"] = _round(float(rsi_series[idx]))
+        ma60 = _daily_ma(day_closes, 60)
+        if ma60 and price:
+            panel["price_vs_ma60_pct"] = _round((price / ma60 - 1.0) * 100.0)
+    except Exception:  # noqa: BLE001 —— 指标算不出来就少这两项，不挡盯盘
+        pass
     pos_out: dict = {"shares": _f((position or {}).get("shares")) or 0.0}
     entry = _f((position or {}).get("entry_price"))
     if entry and price:
@@ -309,12 +322,19 @@ def _watch_system_prompt() -> str:
         "- partial_sell：按 size_fraction 比例减仓（会取整到整手）；\n"
         "- flag：不下单，但把这条事件标记给收盘后的委员会重点复盘（用于你看不准、"
         "但收盘后值得深挖的情形）。\n"
+        "判断顺序（职业操盘手的三层框架）：**先环境（market_context 的大盘/相对强弱、"
+        "today_context 里委员会最近的结论）→ 再价格结构与量价（panel 的均线位置、RSI、量比）"
+        "→ 最后才是事件本身**。逆大盘的异动与顺大盘的异动不是同一件事；与委员会最近结论"
+        "冲突的动作几乎总是错的——那类情形选 flag 交复盘，不要替委员会改主意。\n"
+        "today_context.trades 非空 = **今天已经动过手**：此时再买入，当日将无法卖出"
+        "（T+1 锁仓）——除非你有把握持有到明天，否则倾向 hold/flag；当天已买卖过一轮的"
+        "再进场，几乎总是情绪化决定。\n"
         "events_now 里 type=news_shock 表示该标的近 24 小时出现了 high impact 新闻，"
         "news_alert 字段是它的详情（方向/可信度/一句话解读）。新闻是信号不是命令："
         "可信度低或方向含糊的按 hold/flag 处理，不要替新闻放大结论。\n"
         "硬约束：你在授权边界内行动（allow_open=false 时不能 buy；allow_close=false 时"
         "不能 sell/partial_sell；max_position_pct 是仓位上限）；当前是 T+1 市场，"
-        "当日买入的份额卖不出去；止损类卖出不用你管（代码已经比你快）。"
+        "当日买入的份额卖不出去；止损类卖出不用你管（代码已经比你快）。\n"
         "克制是美德：一天里大部分事件的正确动作是 hold。"
     )
 
@@ -322,7 +342,9 @@ def _watch_system_prompt() -> str:
 def _watch_user_prompt(symbol: str, events: list[dict], panel: dict,
                        position: dict | None, authorization: dict | None,
                        config: dict | None, news_alert: dict | None = None,
-                       experience: dict | None = None) -> str:
+                       experience: dict | None = None,
+                       today_context: dict | None = None,
+                       market_context: dict | None = None) -> str:
     payload = {
         "symbol": symbol,
         "strategy_intent": {
@@ -342,6 +364,13 @@ def _watch_user_prompt(symbol: str, events: list[dict], panel: dict,
     # 经验回流（P4）：自己的历史战绩（轻量版）—— 动手前先看自己过去对错
     if isinstance(experience, dict) and experience:
         payload["experience"] = experience
+    # 盘中语境（2026-10-14）：当日已成交 + 上次全委会结论 —— "今天动过手吗、
+    # 委员会最近怎么说"，缺了它盯盘会在不知道刚卖过的情况下把仓位买回来（实测踩过）
+    if isinstance(today_context, dict) and today_context:
+        payload["today_context"] = today_context
+    # 大盘语境（2026-10-14）：指数/成交/涨跌家数（全市场共用 TTL 缓存，近零成本）
+    if isinstance(market_context, dict) and market_context:
+        payload["market_context"] = market_context
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
@@ -393,7 +422,9 @@ def intraday_decide(symbol: str, events: list[dict], position: dict | None,
                     minute_bars: list[dict], day_records: list[dict],
                     completion: Optional[Callable] = None,
                     news_alert: dict | None = None,
-                    experience: dict | None = None) -> dict:
+                    experience: dict | None = None,
+                    today_context: dict | None = None,
+                    market_context: dict | None = None) -> dict:
     """盯盘交易员的一次判断。**永不抛异常**：任何故障都退化成可执行的结论。
 
     返回 {action, size_fraction, confidence, reason, warnings, degraded, watch_tokens}：
@@ -430,7 +461,8 @@ def intraday_decide(symbol: str, events: list[dict], position: dict | None,
             [{"role": "system", "content": _watch_system_prompt()},
              {"role": "user", "content": _watch_user_prompt(symbol, events, panel,
                                                            position, authorization, config,
-                                                           news_alert, experience)}],
+                                                           news_alert, experience,
+                                                           today_context, market_context)}],
             temperature=0.1, max_tokens=WATCH_MAX_TOKENS)
     except Exception as exc:  # noqa: BLE001 —— 调用异常 = 没问成 → 降级
         logger.warning("盯盘调用失败 symbol=%s: %s", symbol, exc)

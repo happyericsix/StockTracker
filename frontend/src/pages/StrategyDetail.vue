@@ -20,6 +20,7 @@ import {
   switchDecisionMode, getExpectation, registerExpectation, getPaperOverview,
   getStrategyJournal, enableShare, disableShare,
 } from '../api/strategy.js'
+import { getHistory } from '../api/stock.js'
 import { dirTextClass } from '../utils/format.js'
 
 const router = useRouter()
@@ -246,6 +247,7 @@ const loadPaper = async () => {
   await loadTraces()
   await loadEquity()
   await loadJournal()
+  await loadOpsChart()
 }
 
 /** 净值曲线 + 机会成本：汇总由后端同一份算法给出，前端只显示 */
@@ -301,6 +303,203 @@ const renderEquityChart = async () => {
         markLine,
       },
     ],
+  }, { notMerge: true })
+}
+
+// ---- 操作 K 线：把每笔成交钉到标的行情上（在哪买的、在哪卖的，一眼可见）----
+const opsChartRef = ref(null)
+let opsChart = null
+const opsError = ref('')
+const opsBars = ref(120)
+const opsHiddenTrades = ref(0)
+let opsRawBars = []
+
+const OPS_RANGES = [
+  { label: '近60根', value: 60 },
+  { label: '近120根', value: 120 },
+  { label: '近250根', value: 250 },
+]
+
+const calcMA = (data, n) => {
+  const result = []
+  for (let i = 0; i < data.length; i++) {
+    if (i < n - 1) result.push('-')
+    else {
+      let sum = 0
+      for (let j = i - n + 1; j <= i; j++) sum += +data[j].close
+      result.push(+(sum / n).toFixed(2))
+    }
+  }
+  return result
+}
+
+const loadOpsChart = async () => {
+  opsError.value = ''
+  if (!strategy.value?.symbol) return
+  try {
+    // 与 KLineChart 同源同一接口：page=0 size=1000 拿全量日线，窗口在渲染时切
+    const res = await getHistory(strategy.value.symbol, 0, 1000, 'day')
+    opsRawBars = res.data?.content || []
+    if (!Array.isArray(opsRawBars) || opsRawBars.length === 0) {
+      opsError.value = 'K 线数据为空，暂时画不了操作图'
+      return
+    }
+    await renderOpsChart()
+  } catch (e) {
+    opsError.value = errorMessage(e, 'K 线数据加载失败，暂时画不了操作图')
+  }
+}
+
+const changeOpsRange = async (n) => {
+  if (opsBars.value === n) return
+  opsBars.value = n
+  await renderOpsChart()
+}
+
+const handleOpsResize = () => opsChart && opsChart.resize()
+
+const renderOpsChart = async () => {
+  await nextTick()
+  const el = opsChartRef.value
+  if (!el || !Array.isArray(opsRawBars) || opsRawBars.length === 0) return
+  const data = opsRawBars.slice(-opsBars.value)
+  const dates = data.map((d) => d.date)
+
+  const up = colorToken('--up') || '#d92c2c'
+  const down = colorToken('--down') || '#0e9668'
+  const ink2 = colorToken('--ink-2') || '#575e6e'
+  const ink3 = colorToken('--ink-3') || '#8b92a5'
+
+  const series = [
+    {
+      name: 'K线', type: 'candlestick', data: data.map((d) => [+d.open, +d.close, +d.low, +d.high]),
+      tooltip: {
+        valueFormatter: (v) => (Array.isArray(v)
+          ? `开 ${(+v[0]).toFixed(3)} / 收 ${(+v[1]).toFixed(3)} / 低 ${(+v[2]).toFixed(3)} / 高 ${(+v[3]).toFixed(3)}`
+          : (+v).toFixed(3)),
+      },
+      itemStyle: { color: up, color0: down, borderColor: up, borderColor0: down },
+    },
+  ]
+  const legend = ['K线']
+  const pushMA = (name, arr, color) => {
+    series.push({
+      name, type: 'line', data: arr, smooth: true, showSymbol: false,
+      tooltip: { valueFormatter: (v) => (+v).toFixed(3) },
+      lineStyle: { width: 1, color }, itemStyle: { color },
+    })
+    legend.push(name)
+  }
+  if (data.length >= 5) pushMA('MA5', calcMA(data, 5), colorToken('--chart-ma5') || '#d97706')
+  if (data.length >= 20) pushMA('MA20', calcMA(data, 20), colorToken('--chart-ma20') || '#0891b2')
+  if (data.length >= 60) pushMA('MA60', calcMA(data, 60), colorToken('--chart-ma60') || '#64748b')
+
+  // 成交标记：买 ▲ 钉在当日最低价下方、卖 ▼ 钉在最高价上方（保证不压蜡烛本体）；
+  // 同日同向多笔逐级外移；同日一买一卖自然分居蜡烛两侧。窗口外的成交计数提示，不静默丢。
+  // 每个标记带成交时刻（HH:mm）标签：与下方交易记录的时间一一对应——
+  // 同一根蜡烛上多笔时（如 10:42 卖 / 10:47 买）靠它分清谁是谁。
+  const timeOf = (t) => {
+    const m = String(t.createdAt || '').match(/T(\d{2}:\d{2})/)
+    return m ? m[1] : ''
+  }
+  const showLabels = trades.value.length <= 40 // 交易太密时标签只会糊成一片，不硬塞
+  const barByDate = new Map(data.map((d) => [d.date, d]))
+  const stackCount = new Map()
+  const buyPts = []
+  const sellPts = []
+  let hidden = 0
+  for (const t of trades.value) {
+    const side = String(t.side ?? '').toLowerCase()
+    if (side !== 'buy' && side !== 'sell') continue
+    const day = String(t.tradeDate ?? '').slice(0, 10)
+    const bar = barByDate.get(day)
+    if (!bar) { hidden++; continue }
+    const high = +bar.high
+    const low = +bar.low
+    const span = Math.max(high - low, high * 0.004)
+    const k = stackCount.get(day + side) || 0
+    stackCount.set(day + side, k + 1)
+    const y = side === 'buy'
+      ? low - span * (0.35 + k * 0.4)
+      : high + span * (0.35 + k * 0.4)
+    const time = timeOf(t)
+    ;(side === 'buy' ? buyPts : sellPts).push({
+      value: [day, y],
+      trade: t,
+      label: showLabels && time
+        ? {
+            show: true,
+            formatter: time,
+            position: side === 'buy' ? 'bottom' : 'top',
+            fontSize: 10,
+            color: side === 'buy' ? up : down,
+          }
+        : { show: false },
+    })
+  }
+  opsHiddenTrades.value = hidden
+
+  const tradeTooltip = (sideLabel) => ({
+    formatter: (p) => {
+      const t = p.data?.trade || {}
+      return [
+        `<b>${sideLabel} · ${p.data.value[0]}</b>`,
+        `成交价 ${t.price ?? 'N/A'} × ${t.shares ?? 'N/A'} 股`,
+        `金额 ${formatMoney(t.amount)}`,
+        t.reason ? `信号 ${t.reason}` : '',
+        t.createdAt ? `时间 ${formatTime(t.createdAt)}` : '',
+      ].filter(Boolean).join('<br/>')
+    },
+  })
+  series.push({
+    name: '买入', type: 'scatter', data: buyPts,
+    symbol: 'triangle', symbolSize: 13, symbolRotate: 0,
+    itemStyle: { color: up }, z: 12, emphasis: { scale: 1.4 },
+    tooltip: tradeTooltip('买入'),
+  })
+  series.push({
+    name: '卖出', type: 'scatter', data: sellPts,
+    symbol: 'triangle', symbolSize: 13, symbolRotate: 180,
+    itemStyle: { color: down }, z: 12, emphasis: { scale: 1.4 },
+    tooltip: tradeTooltip('卖出'),
+  })
+  legend.push('买入', '卖出')
+
+  // 决策来源切换日画竖线（与净值曲线同一语义：两侧不是同一个决策者）
+  const since = strategy.value?.decisionModeSince ? String(strategy.value.decisionModeSince) : ''
+  if (since && dates.includes(since)) {
+    series[0].markLine = {
+      symbol: 'none',
+      lineStyle: { color: ink3, type: 'dashed' },
+      label: { formatter: '切换决策来源', color: ink3 },
+      data: [{ xAxis: since }],
+    }
+  }
+
+  if (!opsChart) {
+    opsChart = echarts.init(el)
+    window.addEventListener('resize', handleOpsResize)
+  }
+  opsChart.setOption({
+    tooltip: {
+      // item 模式：买卖标记悬停出成交明细（axis 模式下 series 级 formatter 不生效）
+      trigger: 'item', confine: true,
+      backgroundColor: colorToken('--surface') || '#ffffff',
+      borderColor: colorToken('--border') || '#e3e6ec',
+      textStyle: { color: colorToken('--ink') || '#1b1e26', fontSize: 12 },
+    },
+    legend: { data: legend, top: 0, textStyle: { fontSize: 12, color: ink2 } },
+    grid: { left: 56, right: 20, top: 34, bottom: 52 },
+    xAxis: {
+      type: 'category', data: dates, boundaryGap: true,
+      axisLabel: { fontSize: 11, color: ink3 },
+    },
+    yAxis: { scale: true, axisLabel: { fontSize: 11, color: ink3 } },
+    dataZoom: [
+      { type: 'inside' },
+      { type: 'slider', height: 18, bottom: 10 },
+    ],
+    series,
   }, { notMerge: true })
 }
 
@@ -442,6 +641,12 @@ const loadDetail = async () => {
     error.value = errorMessage(e, '策略详情加载失败，请检查网络后重试')
   } finally {
     loading.value = false
+    // 骨架屏分支在 loading=true 时占着 DOM：图表容器此刻才挂载，
+    // 数据加载期间的渲染调用全部扑空（净值曲线空白的老 bug）——
+    // 这里等一拍再统一画，两处图表共用同一时机。
+    await nextTick()
+    await renderEquityChart()
+    await renderOpsChart()
   }
 }
 
@@ -546,6 +751,11 @@ onUnmounted(() => {
   if (equityChart) {
     equityChart.dispose()
     equityChart = null
+  }
+  if (opsChart) {
+    window.removeEventListener('resize', handleOpsResize)
+    opsChart.dispose()
+    opsChart = null
   }
 })
 </script>
@@ -928,6 +1138,37 @@ onUnmounted(() => {
             <span v-else class="w-full text-ink-3">无痕迹（痕迹功能上线前的成交，或痕迹写入失败）</span>
           </div>
         </div>
+      </section>
+
+      <!-- 操作 K 线：成交钉在行情上 -->
+      <section class="mb-4 rounded-xl border border-border bg-surface p-5">
+        <h3 class="mb-2.5 flex flex-wrap items-center gap-1.5 text-[15px] font-semibold text-ink">
+          操作 K 线 · 在行情里看每一步
+          <InfoTip
+            label="操作 K 线说明"
+            text="蜡烛是该标的的日线，▲ 是买入、▼ 是卖出：标记在哪根蜡烛上就是哪天成交的，旁边的小字是该笔的成交时刻，与下方交易记录的时间一一对应（悬停还能看成交价、数量与金额）。同一天一买一卖会分居蜡烛上下两侧。标记反复挤在同一片区域，说明策略在均线附近来回买卖——相邻的一对 ▼▲ 就是一次卖低买高的往返。滚轮/拖动可缩放平移。"
+          />
+          <span class="ml-auto flex gap-1.5">
+            <button
+              v-for="r in OPS_RANGES" :key="r.value" type="button"
+              class="rounded-md border px-2 py-0.5 text-[12px] transition-colors"
+              :class="opsBars === r.value ? 'border-accent bg-accent-soft text-accent' : 'border-border text-ink-2 hover:border-accent hover:text-accent'"
+              @click="changeOpsRange(r.value)"
+            >{{ r.label }}</button>
+          </span>
+        </h3>
+        <p v-if="opsError" class="text-[12.5px] text-up" role="alert">{{ opsError }}</p>
+        <Empty
+          v-else-if="trades.length === 0"
+          title="还没有成交可标注"
+          desc="模拟盘成交后，每一笔会作为 ▲▼ 标记出现在这里对应的 K 线上。"
+        />
+        <template v-else>
+          <p v-if="opsHiddenTrades > 0" class="mb-2 text-[12px] text-ink-3">
+            当前窗口外还有 {{ opsHiddenTrades }} 笔更早的成交，切大窗口可见。
+          </p>
+          <div ref="opsChartRef" class="h-[420px]"></div>
+        </template>
       </section>
 
       <!-- 决策日志 -->

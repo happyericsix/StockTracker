@@ -72,6 +72,11 @@ public class StrategyClient {
         return get("/api/v1/agent/diagnostic/" + symbol);
     }
 
+    /** 分红送配（每股口径，只含已定除权除息日的行）——模拟盘除权调整的数据源。 */
+    public JsonNode getDividends(String symbol) {
+        return get("/api/v1/dividends/" + symbol);
+    }
+
     public JsonNode evaluateBar(String configJson, String symbol, String date, JsonNode position) {
         var body = new HashMap<String, Object>();
         body.put("strategy_json", raw(configJson));
@@ -212,6 +217,27 @@ public class StrategyClient {
         if (authorization != null) body.put("authorization", authorization);
         if (newsAlert != null) body.put("news_alert", newsAlert);
         if (experience != null && !experience.isEmpty()) body.put("experience", experience);
+        return post("/api/v1/agent/intraday-decide", body, Duration.ofSeconds(15));
+    }
+
+    /**
+     * 带盘中语境的盯盘（2026-10-14 复盘补）：todayContext = {trades: [当日已成交],
+     * last_committee: 上次全委会结论一句话}。修的是"10:08 规则卖 → 10:12 规则买回 →
+     * 10:20 想再卖被 T+1 锁死"这类当日往返——盯盘交易员动手前必须知道今天动过手、
+     * 再买当日就出不去、以及全委会最近定的边界与理由。null = 不带（fail-open）。
+     */
+    public JsonNode intradayWatch(String configJson, String symbol, JsonNode events,
+                                  JsonNode position, JsonNode authorization, JsonNode newsAlert,
+                                  JsonNode experience, JsonNode todayContext) {
+        var body = new HashMap<String, Object>();
+        body.put("strategy_json", raw(configJson));
+        body.put("symbol", symbol);
+        body.put("events", events);
+        if (position != null) body.put("position", position);
+        if (authorization != null) body.put("authorization", authorization);
+        if (newsAlert != null) body.put("news_alert", newsAlert);
+        if (experience != null && !experience.isEmpty()) body.put("experience", experience);
+        if (todayContext != null && !todayContext.isEmpty()) body.put("today_context", todayContext);
         return post("/api/v1/agent/intraday-decide", body, Duration.ofSeconds(15));
     }
 
