@@ -33,10 +33,11 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 #: 腾讯指数代码（与 akshare_client.normalize_symbol 的前缀约定一致）。
+#: 创业板指是 sz399006——399002 是"深成指R"（收益指数），上线实测踩过。
 TENCENT_INDEX_CODES = {
     "上证指数": "sh000001",
     "深证综指": "sz399106",      # 深市全市场口径（深证成指只覆盖 500 只样本股）
-    "创业板指": "sz399002",
+    "创业板指": "sz399006",
 }
 
 #: 腾讯指数响应的字段位（实测钉死；与个股同构）：3=点位 4=昨收 31=涨跌额 32=涨跌幅% 37=成交额(万元)
