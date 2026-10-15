@@ -10,6 +10,7 @@ import com.happyericsix.stocktracker.dto.StockResponse;
 import com.happyericsix.stocktracker.dto.StockSearchResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.cache.annotation.CachePut;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 
@@ -57,8 +58,23 @@ public class StockDataGateway {
 
     @Cacheable(value = "stocks", key = "#stockSymbol")
     public StockResponse getStockForSymbol(final String stockSymbol) {
+        return fetchStockForSymbol(stockSymbol);
+    }
+
+    /**
+     * 焦点快车道（2026-10-15）：绕过读缓存强制取新价，并把新值写回两级缓存 ——
+     * 图表页正在看的票每 3 秒被 {@code FocusQuoteStreamJob} 刷一次，
+     * 顺带让 15 秒自选批和其他读者立刻拿到更近的价。
+     * 只给"个别票、高频"的路径用；批量路径仍走 {@link #getStockForSymbol} 的缓存。
+     */
+    @CachePut(value = "stocks", key = "#stockSymbol")
+    public StockResponse refreshStockForSymbol(final String stockSymbol) {
+        return fetchStockForSymbol(stockSymbol);
+    }
+
+    private StockResponse fetchStockForSymbol(final String stockSymbol) {
         long startTime = System.currentTimeMillis();
-        log.info("Fetching stock quote for symbol: {} (cache miss)", stockSymbol);
+        log.info("Fetching stock quote for symbol: {}", stockSymbol);
 
         StockQuoteResponse response = akshareStockClient.getStockQuote(stockSymbol);
 

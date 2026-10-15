@@ -29,9 +29,11 @@ public class StockQuoteStreamController {
     }
 
     @GetMapping("/stream")
-    public SseEmitter stream(Authentication authentication) {
+    public SseEmitter stream(Authentication authentication,
+            @org.springframework.web.bind.annotation.RequestParam(required = false) String focus) {
         User user = userRepository.findByUsername(authentication.getName())
                 .orElseThrow(() -> new IllegalArgumentException("用户不存在"));
-        return sseService.registerQuotes(user.getId());
+        // focus=图表页正在看的标的：进 15 秒刷新批，SSE 会推它的实时价（2026-10-15）
+        return sseService.registerQuotes(user.getId(), focus);
     }
 }

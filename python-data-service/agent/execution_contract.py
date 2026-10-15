@@ -140,6 +140,7 @@ SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED = "intraday_watch_budget_exceeded"
 #（平仓不受影响——熔断是把风险降下来，不是把出口锁死）。
 # 与单策略的风控不同：这条管的是"整个组合今天亏了多少"，由 Java 结算侧判定与落痕迹。
 SKIP_PORTFOLIO_HALTED = "portfolio_halted"
+SKIP_VOLUME_CAPPED = "volume_capped"            # 单 bar 成交量参与率不足一手（流动性约束）
 
 SKIP_REASONS = (
     SKIP_MARKET_CLOSED,
@@ -166,6 +167,7 @@ SKIP_REASONS = (
     SKIP_WATCH_HOLD,
     SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED,
     SKIP_PORTFOLIO_HALTED,
+    SKIP_VOLUME_CAPPED,
 )
 
 UNKNOWN_PREFIX = "unknown_"

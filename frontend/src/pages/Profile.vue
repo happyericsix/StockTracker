@@ -5,7 +5,7 @@
  */
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { getProfile, changePassword, updateProfile, testPush } from '../api/user.js'
+import { getProfile, changePassword, updateProfile, testPush, getPushLog } from '../api/user.js'
 import { getLlmUsage } from '../api/paper.js'
 import { messageBus } from '../composables/messageBus.js'
 import QrLogin from '../components/QrLogin.vue'
@@ -167,6 +167,7 @@ const handleTestPush = async () => {
     pushMsg.value = e.response?.data?.message || '测试请求失败'
   } finally {
     pushBusy.value = false
+    loadPushLogs()
   }
 }
 
@@ -183,6 +184,26 @@ const handleDisablePush = async () => {
   } finally {
     pushBusy.value = false
   }
+}
+
+// ---- 最近推送状态：把"推送到底有没有成功"变成可查的事实 ----
+const pushLogs = ref([])
+const loadPushLogs = async () => {
+  try {
+    const res = await getPushLog(5)
+    pushLogs.value = Array.isArray(res.data) ? res.data : []
+  } catch {
+    pushLogs.value = []
+  }
+}
+const PUSH_CHANNEL_LABELS = { bark: 'Bark', serverchan: 'Server酱' }
+const pushChannelLabel = (channel) => PUSH_CHANNEL_LABELS[channel] || channel || '?'
+const pushTimeFmt = (iso) => {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return ''
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
 // ---- 交易费用口径：佣金是用户与券商的约定，档案里一份、全局生效 ----
@@ -247,6 +268,7 @@ onMounted(() => {
   fetchProfile()
   loadThsStatus()
   loadLlmUsage()
+  loadPushLogs()
 })
 </script>
 
@@ -300,6 +322,21 @@ onMounted(() => {
           当前已启用：{{ profile.pushChannel === 'bark' ? 'Bark' : 'Server酱' }}（Key 已保存，不在页面回显）
         </p>
         <p v-if="pushMsg" class="text-[12.5px] text-accent" role="status">{{ pushMsg }}</p>
+
+        <!-- 最近推送状态：每次真实发出的推送一行（含"发条测试"的尝试）。
+             配完通道再没出过声时，这里能看出"推送一直在失败"还是"确实没触发过"。 -->
+        <div v-if="pushLogs.length" class="mt-1 border-t border-border pt-3">
+          <p class="mb-2 text-[12px] font-medium text-ink-2">最近推送状态</p>
+          <div class="flex flex-col gap-1.5">
+            <div v-for="row in pushLogs" :key="row.id" class="flex items-baseline gap-2 text-[12.5px]">
+              <span class="num shrink-0 text-ink-3">{{ pushTimeFmt(row.createdAt) }}</span>
+              <span class="shrink-0 font-medium" :class="row.ok ? 'text-down' : 'text-up'">{{ row.ok ? '成功' : '失败' }}</span>
+              <span class="shrink-0 text-ink-2">{{ pushChannelLabel(row.channel) }}</span>
+              <span class="min-w-0 flex-1 truncate text-ink" :title="row.body || row.title">{{ row.title }}</span>
+              <span v-if="!row.ok && row.error" class="max-w-[45%] shrink-0 truncate text-up" :title="row.error">{{ row.error }}</span>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 

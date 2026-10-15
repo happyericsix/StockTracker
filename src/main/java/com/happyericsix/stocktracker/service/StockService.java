@@ -44,14 +44,18 @@ public class StockService {
     private static final long PER_STOCK_TIMEOUT_SECONDS = 10;
 
     @Autowired
+    private final SseEmitterService sseEmitterService;
+
     public StockService(StockDataGateway stockDataGateway,
                         FavoriteStockRepository favoriteStockRepository,
                         UserRepository userRepository,
-                        @Qualifier("priceRefreshExecutor") ExecutorService priceRefreshExecutor) {
+                        @Qualifier("priceRefreshExecutor") ExecutorService priceRefreshExecutor,
+                        SseEmitterService sseEmitterService) {
         this.stockDataGateway = stockDataGateway;
         this.favoriteStockRepository = favoriteStockRepository;
         this.userRepository = userRepository;
         this.priceRefreshExecutor = priceRefreshExecutor;
+        this.sseEmitterService = sseEmitterService;
     }
 
     // ==================== 股票搜索（委托，缓存见 StockDataGateway）====================
@@ -200,7 +204,6 @@ public class StockService {
      */
     public List<RefreshedPrice> refreshFavorites() {
         List<FavoriteStock> allFavorites = favoriteStockRepository.findAll();
-        if (allFavorites.isEmpty()) return List.of();
 
         // 按 symbol 去重：N 个用户加同一只 → 只取第一条（buyPrice 反正不用了，保留也无所谓）
         Map<String, FavoriteStock> uniqueBySymbol = allFavorites.stream()
@@ -208,6 +211,14 @@ public class StockService {
                         FavoriteStock::getStockSymbol,
                         fav -> fav,
                         (a, b) -> a));   // 重复 symbol：保留第一条
+
+        // 焦点标的（2026-10-15）：SSE 订阅者正在图表页看的票，与自选并批刷新——
+        // 图表页的实时价不再受"是否在自选"限制。不在自选里的票造一个壳 FavoriteStock。
+        for (String focus : sseEmitterService.quoteFocusSymbols()) {
+            uniqueBySymbol.computeIfAbsent(focus, sym -> FavoriteStock.builder()
+                    .stockSymbol(sym).build());
+        }
+        if (uniqueBySymbol.isEmpty()) return List.of();
 
         long t0 = System.currentTimeMillis();
 
@@ -226,6 +237,32 @@ public class StockService {
         log.info("refreshFavorites: {}/{} unique symbols (from {} favorite rows) in {}ms (parallel, pool=8)",
                 result.size(), uniqueBySymbol.size(), allFavorites.size(), cost);
         return result;
+    }
+
+    /**
+     * 焦点票快车道（2026-10-15）：图表页正在看的票，绕过读缓存强制取新价。
+     * 与 {@link #refreshFavorites()} 的分工：那边是"所有自选 15 秒一批、走缓存"，
+     * 这边是"焦点票 3 秒一发、@CachePut 直通源"——免费快照源约 3 秒一跳，
+     * 再快就是把同一份价多拉几遍。焦点集合来自 SSE 订阅注册（离开图表页即清除），
+     * 通常只有个位数；为个位数票保持串行即可，不值得动用 8 线程池。
+     */
+    public List<RefreshedPrice> refreshFocusQuotes() {
+        var focusSymbols = sseEmitterService.quoteFocusSymbols();
+        if (focusSymbols.isEmpty()) return List.of();
+
+        return focusSymbols.stream()
+                .map(sym -> {
+                    try {
+                        StockResponse stock = stockDataGateway.refreshStockForSymbol(sym);
+                        Double price = priceOf(stock);
+                        return price == null ? null : new RefreshedPrice(sym, price, null);
+                    } catch (Exception e) {
+                        log.warn("refreshFocusQuotes: {} failed: {}", sym, e.getMessage());
+                        return null;
+                    }
+                })
+                .filter(Objects::nonNull)
+                .toList();
     }
 
     private RefreshedPrice awaitWithTimeout(CompletableFuture<RefreshedPrice> future, long timeoutSeconds) {
@@ -256,17 +293,14 @@ public class StockService {
             log.warn("Indicators fetch failed for {}: {}", fav.getStockSymbol(), e.getMessage());
         }
 
+
         return new RefreshedPrice(fav.getStockSymbol(), price, indicators);
     }
 
     /** 解析价：失败 / 为 0 / 格式异常统一返回 null，让上游决定是否跳过 */
     private Double getCurrentPriceSafe(String symbol) {
         try {
-            StockResponse stock = stockDataGateway.getStockForSymbol(symbol);
-            if (stock == null || stock.price() == null) return null;
-            String p = stock.price().trim();
-            if (p.isEmpty() || "0.0".equals(p) || "0".equals(p)) return null;
-            return Double.parseDouble(p);
+            return priceOf(stockDataGateway.getStockForSymbol(symbol));
         } catch (NumberFormatException e) {
             log.warn("getCurrentPrice: bad price format for {}: {}", symbol, e.getMessage());
             return null;
@@ -274,6 +308,14 @@ public class StockService {
             log.warn("getCurrentPrice failed for {}: {}", symbol, e.getMessage());
             return null;
         }
+    }
+
+    /** StockResponse → Double：null 响应 / 空串 / "0" 一律 null（停牌与拉取失败都长这样） */
+    private Double priceOf(StockResponse stock) {
+        if (stock == null || stock.price() == null) return null;
+        String p = stock.price().trim();
+        if (p.isEmpty() || "0.0".equals(p) || "0".equals(p)) return null;
+        return Double.parseDouble(p);
     }
 
     public List<StockResponse> getFavoritesWithLivePrices(final String username) {

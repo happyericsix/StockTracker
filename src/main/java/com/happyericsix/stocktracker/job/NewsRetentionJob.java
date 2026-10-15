@@ -2,6 +2,7 @@ package com.happyericsix.stocktracker.job;
 
 import com.happyericsix.stocktracker.repository.JobRunRepository;
 import com.happyericsix.stocktracker.repository.NewsEventRepository;
+import com.happyericsix.stocktracker.repository.PushLogRepository;
 import com.happyericsix.stocktracker.service.JobRunService;
 import com.happyericsix.stocktracker.service.NewsRetention;
 import org.slf4j.Logger;
@@ -33,17 +34,22 @@ public class NewsRetentionJob {
     private static final List<Integer> DISCLOSURE_LEVELS = List.of(1, 3);
     /** 心跳点名册的保留期：运维只关心"最近还好吗"，历史行没有复盘价值。 */
     private static final int JOB_RUN_RETENTION_DAYS = 90;
+    /** 推送日志保留期：诊断只看"最近还好吗"，与心跳同一纪律。 */
+    private static final int PUSH_LOG_RETENTION_DAYS = 90;
 
     private final NewsEventRepository newsEventRepository;
     private final NewsRetention retention;
     private final JobRunRepository jobRunRepository;
+    private final PushLogRepository pushLogRepository;
     private final JobRunService jobRunService;
 
     public NewsRetentionJob(NewsEventRepository newsEventRepository, NewsRetention retention,
-                            JobRunRepository jobRunRepository, JobRunService jobRunService) {
+                            JobRunRepository jobRunRepository, PushLogRepository pushLogRepository,
+                            JobRunService jobRunService) {
         this.newsEventRepository = newsEventRepository;
         this.retention = retention;
         this.jobRunRepository = jobRunRepository;
+        this.pushLogRepository = pushLogRepository;
         this.jobRunService = jobRunService;
     }
 
@@ -68,7 +74,11 @@ public class NewsRetentionJob {
             // 心跳点名册顺带瘦身（它和资讯一样：不清理就只增不减）
             long purgedRuns = jobRunRepository.deleteByFinishedAtBefore(
                     now.minusDays(JOB_RUN_RETENTION_DAYS));
-            return "删除过期资讯 " + removed + " 条、过期心跳 " + purgedRuns + " 行";
+            // 推送日志同一待遇：诊断用途的近期数据，历史行没有复盘价值
+            long purgedPushLogs = pushLogRepository.deleteByCreatedAtBefore(
+                    now.minusDays(PUSH_LOG_RETENTION_DAYS));
+            return "删除过期资讯 " + removed + " 条、过期心跳 " + purgedRuns
+                    + " 行、过期推送日志 " + purgedPushLogs + " 行";
         });
     }
 }

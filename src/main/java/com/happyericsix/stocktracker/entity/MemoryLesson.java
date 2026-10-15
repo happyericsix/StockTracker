@@ -68,6 +68,22 @@ public class MemoryLesson {
     @Column(nullable = false, length = 512)
     private String symptom;
 
+    /**
+     * 症状原文（LLM 原句，带标点，给人读）——记忆白盒 2026-10-15。
+     * {@link #symptom} 存的是去标点小写的规范化键（去重/计数用），把它当正文展示
+     * 就是"无头句"的来源；展示一律用本字段，历史行可能为 null（前端回退 symptom）。
+     */
+    @Column(name = "symptom_text", columnDefinition = "TEXT")
+    private String symptomText;
+
+    /**
+     * 记忆分区（2026-10-15）：chat = 用户与聊天助手的对话域；
+     * strategy:N = 第 N 条模拟盘策略独立域（周反思教训/委员会经验）。
+     * 委员会回读严格按 scope 过滤 —— 多策略并跑时 A 策略的教训不会进 B 策略的提示词。
+     */
+    @Column(nullable = false, length = 64)
+    private String scope;
+
     /** 上下文（股票、参数等），JSON 文本 */
     @Column(columnDefinition = "TEXT")
     private String context;
@@ -128,5 +144,15 @@ public class MemoryLesson {
     public String lessonKey() {
         return (taskType == null ? "" : taskType.trim().toLowerCase()) + "|"
                 + (symptom == null ? "" : symptom.trim().toLowerCase());
+    }
+
+    /** chat 域的 scope 值（与写入侧的推导约定一致）。 */
+    public static final String SCOPE_CHAT = "chat";
+
+    public static final String STRATEGY_SCOPE_PREFIX = "strategy:";
+
+    /** 第 N 条策略的 scope 值。 */
+    public static String strategyScope(Long strategyId) {
+        return STRATEGY_SCOPE_PREFIX + strategyId;
     }
 }

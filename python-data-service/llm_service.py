@@ -53,6 +53,98 @@ BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/"
 MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 TIMEOUT = int(os.getenv("DEEPSEEK_TIMEOUT", "30"))
 
+# 503/超时退避重试（2026-10-15 场景实验室发现）：DeepSeek 高峰期会瞬时 503/读超时
+# （官方错误码文档定性为过载、建议重试），而盯盘/委员会零重试 + 30s 超时意味着
+# agent 恰好在市场最需要判断的时刻失明（10-15 上午全部 LLM 降级即此因）。
+RETRY_ATTEMPTS = int(os.getenv("DEEPSEEK_RETRY", "3"))
+RETRY_BACKOFF_S = float(os.getenv("DEEPSEEK_RETRY_BACKOFF", "2.0"))
+RETRYABLE_STATUS = {502, 503, 504, 429}
+
+# ==================== 备用供应商转移（2026-10-15） ====================
+# 行业标准分层兜底（LiteLLM Router / OpenRouter 同款思路）：重试扛瞬时抖动，
+# 持续过载则冷却主供应商、切备用（OpenAI 兼容端点：硅基流动/昆仑/Moonshot/GLM 皆可）。
+# 配齐三个变量即启用：LLM_FALLBACK_BASE_URL / LLM_FALLBACK_API_KEY / LLM_FALLBACK_MODEL。
+# 推理型模型思考开关（2026-10-15）：flash/v4-pro 默认带思考，盯盘 300 token 的预算
+# 会被 reasoning 烧光、正式回答为空（当天实测：全部"模型返回空内容"降级）。
+# 默认关闭思考（盯盘要秒级+短格式输出）；要开设 DEEPSEEK_DISABLE_THINKING=0。
+DISABLE_THINKING = os.getenv("DEEPSEEK_DISABLE_THINKING", "1") not in ("0", "false", "False")
+
+FALLBACK_BASE_URL = os.getenv("LLM_FALLBACK_BASE_URL", "").rstrip("/")
+FALLBACK_API_KEY = os.getenv("LLM_FALLBACK_API_KEY", "")
+FALLBACK_MODEL = os.getenv("LLM_FALLBACK_MODEL", "")
+PROVIDER_COOLDOWN_S = float(os.getenv("LLM_PROVIDER_COOLDOWN", "600"))
+
+def _providers() -> list:
+    """(名字, base_url, key, model) 序列：主 DeepSeek + 可选备用。"""
+    ps = [("primary", BASE_URL, API_KEY, MODEL)]
+    if FALLBACK_BASE_URL and FALLBACK_API_KEY and FALLBACK_MODEL:
+        ps.append(("fallback", FALLBACK_BASE_URL, FALLBACK_API_KEY, FALLBACK_MODEL))
+    return ps
+
+# 内存态冷却表：重启归零无害（最多多打几次注定失败的请求）。
+_provider_cooldown_until: dict = {}
+
+def _mark_cooldown(name: str):
+    import time as _t
+    _provider_cooldown_until[name] = _t.time() + PROVIDER_COOLDOWN_S
+    logger.warning("LLM 供应商 %s 进入 %.0f 分钟冷却（持续过载）", name, PROVIDER_COOLDOWN_S / 60)
+
+def _post_chat(payload: dict) -> dict:
+    """跨供应商的 chat/completions：重试扛抖动（单供应商内），冷却+切换扛持续故障。
+    返回解析后的 JSON 体（model 字段已按实际供应商覆盖）。全部供应商失败时抛最后异常。"""
+    import time as _t
+    import copy
+    now = _t.time()
+    providers = [p for p in _providers() if _provider_cooldown_until.get(p[0], 0) <= now]
+    if not providers:                      # 全在冷却：仍试主供应商（冷却不是停机）
+        providers = [_providers()[0]]
+    last_exc = None
+    for name, base, key, model in providers:
+        try:
+            body = dict(payload, model=model)
+            if name == "primary" and DISABLE_THINKING:
+                body.setdefault("reasoning_effort", "none")
+            resp = _post_with_retry(f"{base}/v1/chat/completions",
+                                    json=body,
+                                    headers={"Authorization": f"Bearer {key}",
+                                             "Content-Type": "application/json"},
+                                    timeout=TIMEOUT)
+            data = resp.json()
+            data["_provider"] = name       # 供日志/计量知道这次是谁答的
+            return data
+        except Exception as e:             # noqa: BLE001 —— 换下一个供应商，全部挂了抛最后一个
+            last_exc = e
+            logger.warning("LLM 供应商 %s 失败：%s", name, str(e)[:120])
+            _mark_cooldown(name)
+    raise last_exc
+
+
+def _post_with_retry(url, **kwargs):
+    """带指数退避的 POST：只对过载类状态码与网络异常重试，4xx 语义错误立即抛。"""
+    import time as _t
+    last_exc = None
+    for attempt in range(RETRY_ATTEMPTS):
+        try:
+            resp = requests.post(url, **kwargs)
+            if resp.status_code in RETRYABLE_STATUS and attempt < RETRY_ATTEMPTS - 1:
+                wait = RETRY_BACKOFF_S * (2 ** attempt)
+                logger.warning("LLM %d（第 %d 次），%.1fs 后重试", resp.status_code, attempt + 1, wait)
+                _t.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_exc = e
+            if attempt < RETRY_ATTEMPTS - 1:
+                wait = RETRY_BACKOFF_S * (2 ** attempt)
+                logger.warning("LLM 网络异常（第 %d 次 %s），%.1fs 后重试", attempt + 1, type(e).__name__, wait)
+                _t.sleep(wait)
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("unreachable")
+
 # ===== Prompt 加载 =====
 PROMPT_DIR = Path(__file__).parent / "prompts"
 _PROMPT_CACHE: dict[str, str] = {}
@@ -72,7 +164,9 @@ def _load_prompt(name: str) -> str:
 
 
 def _is_available() -> bool:
-    return bool(API_KEY) and API_KEY != "your-api-key-here"
+    if API_KEY and API_KEY != "your-api-key-here":
+        return True
+    return bool(FALLBACK_API_KEY)   # 主 key 缺失但配了备用：仍然可用
 
 
 # ===== 核心调用 =====
@@ -130,9 +224,9 @@ def chat(
     }
 
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
-        resp.raise_for_status()
-        data = resp.json()
+        data = _post_chat(payload)
+        if data.get("_provider") == "fallback":
+            logger.info("LLM 由备用供应商应答（主供应商冷却中）")
         content = data["choices"][0]["message"]["content"].strip()
         logger.info(f"LLM 调用成功: scenario={scenario}, tokens={data.get('usage', {}).get('total_tokens', '?')}")
         # Enforce short responses for stock_analyst
@@ -268,18 +362,25 @@ def chat_completion(messages, tools=None, temperature=0.2, max_tokens=1200):
                "temperature": temperature, "max_tokens": max_tokens}
     if tools:
         payload["tools"] = tools
-    url = f"{BASE_URL}/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
     started = time.time()
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
-        resp.raise_for_status()
-        body = resp.json()
+        body = _post_chat(payload)
+        if body.get("_provider") == "fallback":
+            logger.info("LLM(chat_completion) 由备用供应商应答")
+        body.pop("_provider", None)   # 计量/调用方不认这个字段
     except Exception:
         _record_llm_usage(ok=False, latency_ms=int((time.time() - started) * 1000))
         raise
     _record_llm_usage(ok=True, latency_ms=int((time.time() - started) * 1000), body=body)
     choice = body["choices"][0]
+    # 推理型模型兜底：思考烧光预算时 content 为空而 reasoning_content 有货——
+    # 回退到思考内容（盯盘的严格格式行大概率解析失败转 hold，但至少可见、可排查）
+    try:
+        msg = choice.get("message") or {}
+        if not str(msg.get("content") or "").strip() and msg.get("reasoning_content"):
+            msg["content"] = msg["reasoning_content"]
+    except Exception:  # noqa: BLE001
+        pass
     # 把 usage **挂回 choice**：调用方拿到的是 choices[0]，而 usage 在响应体顶层。
     # 少了这一步，任何按"返回值的 usage"统计成本的调用方都会记成 0 ——
     # 实测踩过：多角色委员会的 token 预算因此**从未生效**（与 TradingAgents 在非价目表模型上

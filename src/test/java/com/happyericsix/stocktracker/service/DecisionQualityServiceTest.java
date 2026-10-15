@@ -42,18 +42,16 @@ class DecisionQualityServiceTest {
     @Mock
     private PaperTradeTraceRepository paperTradeTraceRepository;
     @Mock
-    private UserRepository userRepository;
-    @Mock
     private StockDataGateway stockDataGateway;
 
     private DecisionQualityService service;
 
     @BeforeEach
     void setUp() {
+        // 2026-10-14：quality()（智囊 vs 规则对比）已删，构造器少了 UserRepository；
+        // 剩下的两个方法（经验包/教训退役）不依赖用户名解析
         service = new DecisionQualityService(paperTradeRepository, paperTradeTraceRepository,
-                userRepository, stockDataGateway);
-        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(
-                User.builder().id(1L).username("alice").build()));
+                stockDataGateway);
     }
 
     /** 造一段日线：trade 日收盘 100，之后每天 +1。 */
@@ -79,74 +77,9 @@ class DecisionQualityServiceTest {
                 .build();
     }
 
-    @Test
-    @SuppressWarnings("unchecked")
-    void buyBeforeRiseCountsAsWinAndSellBeforeFallToo() {
-        // 09-01 收 100，随后 101、102、103、104、105（第 5 个交易日 = 105）
-        historyFrom("2026-09-01", 100, 101, 102, 103, 104, 105);
-        LocalDate d = LocalDate.of(2026, 9, 1);
-        when(paperTradeRepository.findByUserIdAndTradeDateGreaterThanEqualOrderByTradeDateDescCreatedAtDesc(
-                anyLongAny(), org.mockito.ArgumentMatchers.any(LocalDate.class)))
-                .thenReturn(List.of(trade("BUY", 100, d), trade("SELL", 100, d)));
-
-        Map<String, Object> out = service.quality("alice", 5, 60);
-
-        List<Map<String, Object>> bySide = (List<Map<String, Object>>) out.get("bySide");
-        // BUY：+5% 对齐收益（win）；SELL：前向 +5%，对齐 = -5%（loss——卖在涨前是错的）
-        Map<String, Object> buy = bySide.stream().filter(m -> "buy".equals(m.get("key"))).findFirst().orElseThrow();
-        Map<String, Object> sell = bySide.stream().filter(m -> "sell".equals(m.get("key"))).findFirst().orElseThrow();
-        assertThat(((Number) buy.get("winRatePct")).doubleValue()).isEqualTo(100.0);
-        assertThat(((Number) sell.get("winRatePct")).doubleValue()).isEqualTo(0.0);
-        assertThat(((Number) sell.get("avgAlignedPct")).doubleValue()).isEqualTo(-5.0);
-    }
-
-    @Test
-    @SuppressWarnings("unchecked")
-    void tradesWithoutEnoughFutureBarsStayPending() {
-        // 只有 3 根 bar：5 日窗口走不满 → pending，不许进胜率
-        historyFrom("2026-09-01", 100, 101, 102);
-        when(paperTradeRepository.findByUserIdAndTradeDateGreaterThanEqualOrderByTradeDateDescCreatedAtDesc(
-                anyLongAny(), org.mockito.ArgumentMatchers.any(LocalDate.class)))
-                .thenReturn(List.of(trade("BUY", 100, LocalDate.of(2026, 9, 1))));
-
-        Map<String, Object> out = service.quality("alice", 5, 60);
-        assertThat((List<?>) out.get("bySource")).isEmpty();
-        List<Map<String, Object>> recent = (List<Map<String, Object>>) out.get("recent");
-        assertThat(recent).hasSize(1);
-        assertThat(recent.get(0).get("status")).isEqualTo("pending");
-    }
-
-    @Test
-    @SuppressWarnings("unchecked")
-    void statsCoverAllTradesWhileRecentListIsTrimmed() {
-        historyFrom("2026-09-01", 100, 101, 102, 103, 104, 105);
-        // 25 笔成交：如果统计被"明细只留 20"截断，胜率就会算错
-        List<PaperTrade> many = new java.util.ArrayList<>();
-        for (int i = 0; i < 25; i++) {
-            many.add(trade("BUY", 100, LocalDate.of(2026, 9, 1)));
-        }
-        when(paperTradeRepository.findByUserIdAndTradeDateGreaterThanEqualOrderByTradeDateDescCreatedAtDesc(
-                anyLongAny(), org.mockito.ArgumentMatchers.any(LocalDate.class)))
-                .thenReturn(many);
-
-        Map<String, Object> out = service.quality("alice", 5, 60);
-        Map<String, Object> agent = ((List<Map<String, Object>>) out.get("bySource")).get(0);
-        assertThat(((Number) agent.get("evaluated")).intValue()).isEqualTo(25);
-        assertThat((List<?>) out.get("recent")).hasSize(20);
-    }
-
-    @Test
-    void missingHistoryDegradesToEmpty() {
-        when(stockDataGateway.getStockHistory(anyString(), anyString())).thenReturn(null);
-        when(paperTradeRepository.findByUserIdAndTradeDateGreaterThanEqualOrderByTradeDateDescCreatedAtDesc(
-                anyLongAny(), org.mockito.ArgumentMatchers.any(LocalDate.class)))
-                .thenReturn(List.of(trade("BUY", 100, LocalDate.of(2026, 9, 1))));
-
-        Map<String, Object> out = service.quality("alice", 5, 60);
-        assertThat((List<?>) out.get("bySource")).isEmpty();
-    }
-
     // ==================== 单策略经验包（P4 经验回流） ====================
+    // （原「智囊 vs 规则」quality() 的 4 个用例已随方法一起删除：按决策源分组对比
+    //  的前提不成立——规则出信号、委员会划边界、边界内执行，是同一流水线的层。）
 
     @Test
     @SuppressWarnings("unchecked")

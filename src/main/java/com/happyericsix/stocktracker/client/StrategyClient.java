@@ -250,6 +250,26 @@ public class StrategyClient {
         return post("/api/v1/agent/weekly-reflection", payload, Duration.ofSeconds(60));
     }
 
+    /**
+     * 季度策略信的评语半环（2026-10-15）：季度材料 → 一段总评 + 参数**提议**（文本）。
+     * 与周反思同一条纪律：60s 超时（1 次调用）；失败由调用方按"未生成评语"处理 ——
+     * 季度信的数字底座是确定性代码，不因模型不可用而少发。
+     */
+    public JsonNode quarterlyReview(JsonNode payload) {
+        return post("/api/v1/agent/quarterly-review", payload, Duration.ofSeconds(60));
+    }
+
+    /**
+     * 策略修订提案（P2 修订闭环，2026-10-15）：健康材料 + 当前 config →
+     * 结构化参数提案 + **时间衰减加权**的回测门禁证据（数据窗口截到当天，越近权重越高）。
+     *
+     * <p>超时 120s：1 次 LLM 提案调用（≤1400 token）+ 两次真实化回测（毫秒级）。
+     * 失败语义 fail-closed：Python 返回 ok=false 时调用方不生成待审批记录。
+     */
+    public JsonNode strategyRevision(JsonNode payload) {
+        return post("/api/v1/agent/strategy-revision", payload, Duration.ofSeconds(120));
+    }
+
     private JsonNode raw(String json) {        try { return mapper.readTree(json); }
         catch (Exception e) { return mapper.createObjectNode(); }
     }

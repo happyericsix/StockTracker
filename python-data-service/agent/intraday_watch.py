@@ -51,7 +51,7 @@ GAP_PCT = 2.0
 
 #: 盯盘 agent 单次输出的 max_tokens：action + size + confidence + 一句理由，300 足够，
 #: 超了只会换来散文（而散文正是解析失败的来源）。
-WATCH_MAX_TOKENS = 300
+WATCH_MAX_TOKENS = 800   # 2026-10-15 提自 300：推理型模型即使关了思考，面板描述也偶超 300
 
 #: 动作封闭集（结算侧按它执行；未知动作一律按 hold 处理）。
 ACTION_HOLD = "hold"
@@ -299,6 +299,14 @@ def build_panel(minute_bars: list[dict], day_records: list[dict],
         hwm = _f((position or {}).get("high_watermark"))
         if hwm:
             pos_out["drawdown_from_high_pct"] = _round((hwm - price) / hwm * 100.0)
+    lots = (position or {}).get("lots")
+    if isinstance(lots, list) and lots:
+        pos_out["lots"] = [
+            {k: lot.get(k) for k in ("opened", "age_days", "cost", "shares", "pnl_pct", "locked_today")
+             if isinstance(lot, dict) and lot.get(k) is not None}
+            for lot in lots[:8]
+        ]
+        pos_out["lots_note"] = "卖出按先进先出对冲批次；locked_today=True 的批次今日不可卖（T+1）"
     panel["position"] = pos_out
     return panel
 

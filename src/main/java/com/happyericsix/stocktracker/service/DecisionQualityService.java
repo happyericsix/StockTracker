@@ -8,7 +8,6 @@ import com.happyericsix.stocktracker.entity.PaperTradeTrace;
 import com.happyericsix.stocktracker.entity.Strategy;
 import com.happyericsix.stocktracker.repository.PaperTradeRepository;
 import com.happyericsix.stocktracker.repository.PaperTradeTraceRepository;
-import com.happyericsix.stocktracker.repository.UserRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -25,21 +24,19 @@ import java.util.Map;
 /**
  * 决策质量对账：**每一笔成交，N 个交易日之后回头看，方向对了吗？**
  *
- * <h3>为什么这个面板是产品的良心</h3>
- * "agent 帮你优化策略"是本产品的核心主张，但主张不等于证据 ——
- * 委员会每天开会很热闹，用户却没有任何一页能回答"agent 的决策到底比规则好多少"。
- * 这里把已发生的成交变成可对账的样本：
+ * <h3>这个类现在是什么（2026-10-14 收窄）</h3>
+ * 原「智囊 vs 规则」对比面板（{@code quality()}，按决策源分组比胜率）已删除：
+ * 规则与 agent 是同一条流水线的层——规则出信号、委员会划授权边界、边界内执行——
+ * 不是两个可对比的决策者；且成交上的 decision_mode 标签会把"授权内的规则单"
+ * 记成 agent，按来源分组测不出干净的东西。
  *
+ * <p>留下的是**对账机制本身**（单笔方向对错，N 交易日回看）：
  * <ul>
- *   <li>前向收益：成交价 → N 个交易日后的收盘价（**统一口径**：买卖同一种评估）；</li>
- *   <li>方向对齐：买入看涨对，卖出看跌对（卖在跌前也是对）；</li>
- *   <li>按决策源（agent / 规则）与方向分组，胜率与平均对齐收益直接对比；</li>
- *   <li>还没到评估日的成交标为 pending，**不进统计**——不许用半程数据冒充结果。</li>
+ *   <li>{@link #strategyExperience}：单策略经验包——委员会每次开会前读"自己的病历"；</li>
+ *   <li>{@link #agentOutcomeSince}：教训退役——按后续战绩判断一条经验教训该不该下架。</li>
  * </ul>
- *
- * <p>口径上的诚实声明（前端也会展示）：这是"单笔方向对错"的对账，
- * 不是策略收益（策略收益看模拟盘曲线）；它回答的是"**决策质量**"，
- * 与仓位大小无关。评估价用日线收盘（与日线结算同一口径）。
+ * 按策略（而非按决策源）对答案的界面出口在策略详情页的「决策日志」
+ * （{@code TradeJournalService}），与这里口径互补、各管一段。
  */
 @Service
 public class DecisionQualityService {
@@ -47,11 +44,9 @@ public class DecisionQualityService {
 
     private static final int DEFAULT_HORIZON = 5;
     private static final int DEFAULT_LOOKBACK_DAYS = 60;
-    private static final int MAX_HORIZON = 20;
 
     private final PaperTradeRepository paperTradeRepository;
     private final PaperTradeTraceRepository paperTradeTraceRepository;
-    private final UserRepository userRepository;
     private final StockDataGateway stockDataGateway;
 
     /** 日线收盘缓存：一次对账要对同一只票的几十笔成交各查一次历史，不缓存就是自残。 */
@@ -62,74 +57,10 @@ public class DecisionQualityService {
 
     public DecisionQualityService(PaperTradeRepository paperTradeRepository,
                                   PaperTradeTraceRepository paperTradeTraceRepository,
-                                  UserRepository userRepository,
                                   StockDataGateway stockDataGateway) {
         this.paperTradeRepository = paperTradeRepository;
         this.paperTradeTraceRepository = paperTradeTraceRepository;
-        this.userRepository = userRepository;
         this.stockDataGateway = stockDataGateway;
-    }
-
-    public Map<String, Object> quality(String username, Integer horizonDays, Integer lookbackDays) {
-        int horizon = clamp(horizonDays == null ? DEFAULT_HORIZON : horizonDays, 1, MAX_HORIZON);
-        int lookback = clamp(lookbackDays == null ? DEFAULT_LOOKBACK_DAYS : lookbackDays, 7, 365);
-        LocalDate since = LocalDate.now().minusDays(lookback);
-
-        Long userId = userRepository.findByUsername(username).map(u -> u.getId()).orElse(null);
-        Map<String, Object> out = new LinkedHashMap<>();
-        out.put("horizonDays", horizon);
-        out.put("since", since.toString());
-        if (userId == null) {
-            out.put("bySource", List.of());
-            out.put("bySide", List.of());
-            out.put("recent", List.of());
-            return out;
-        }
-
-        List<PaperTrade> trades = paperTradeRepository
-                .findByUserIdAndTradeDateGreaterThanEqualOrderByTradeDateDescCreatedAtDesc(userId, since);
-
-        // 分组累加器：mode/side → [evaluated, wins, sumAlignedPct]
-        Map<String, int[]> bySource = new LinkedHashMap<>();
-        Map<String, int[]> bySide = new LinkedHashMap<>();
-        List<Map<String, Object>> recent = new ArrayList<>();
-
-        for (PaperTrade trade : trades) {
-            String mode = traceModeOf(trade);
-            String side = trade.getSide() == null ? "" : trade.getSide().toLowerCase();
-            BigDecimal entry = trade.getPrice();
-            if (entry == null || entry.signum() <= 0) {
-                continue;
-            }
-            Double fwd = forwardReturn(trade.getSymbol(), trade.getTradeDate(), horizon);
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("date", trade.getTradeDate() == null ? null : trade.getTradeDate().toString());
-            row.put("symbol", trade.getSymbol());
-            row.put("strategy", trade.getStrategy() == null ? null : trade.getStrategy().getName());
-            row.put("side", side);
-            row.put("mode", mode);
-            row.put("price", Money.price(entry));
-            if (fwd == null) {
-                row.put("status", "pending"); // 还没走满 N 个交易日，不进统计
-            } else {
-                double aligned = "sell".equals(side) ? -fwd : fwd;
-                row.put("status", "evaluated");
-                row.put("forwardPct", round(fwd * 100.0));
-                row.put("alignedPct", round(aligned * 100.0));
-                row.put("win", aligned > 0);
-                bump(bySource, mode, aligned > 0, aligned);
-                bump(bySide, side, aligned > 0, aligned);
-            }
-            recent.add(row);
-        }
-
-        out.put("bySource", bySource.entrySet().stream()
-                .map(e -> statsOf(e.getKey(), e.getValue())).toList());
-        out.put("bySide", bySide.entrySet().stream()
-                .map(e -> statsOf(e.getKey(), e.getValue())).toList());
-        // 统计算全量，明细只留最近 20 条（列表本就按日期倒序）
-        out.put("recent", recent.size() > 20 ? recent.subList(0, 20) : recent);
-        return out;
     }
 
     // ==================== 单策略经验包（agent 互通 P4，经验回流） ====================
@@ -347,30 +278,6 @@ public class DecisionQualityService {
             log.warn("history load failed for {}: {}", symbol, e.getMessage());
             return List.of();
         }
-    }
-
-    private static void bump(Map<String, int[]> acc, String key, boolean win, double alignedPct) {
-        // int[3] = {evaluated, wins, alignedPct*100 累加(存为百万分之一精度避免浮点累加误差)}
-        int[] a = acc.computeIfAbsent(key, k -> new int[3]);
-        a[0]++;
-        if (win) {
-            a[1]++;
-        }
-        a[2] += (int) Math.round(alignedPct * 100.0 * 100.0);
-    }
-
-    private static Map<String, Object> statsOf(String key, int[] a) {
-        Map<String, Object> m = new LinkedHashMap<>();
-        m.put("key", key);
-        m.put("evaluated", a[0]);
-        m.put("wins", a[1]);
-        m.put("winRatePct", a[0] > 0 ? round(a[1] * 100.0 / a[0]) : null);
-        m.put("avgAlignedPct", a[0] > 0 ? round(a[2] / 100.0 / a[0]) : null);
-        return m;
-    }
-
-    private static int clamp(int v, int min, int max) {
-        return Math.max(min, Math.min(max, v));
     }
 
     private static double round(double v) {

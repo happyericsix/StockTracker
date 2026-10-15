@@ -64,8 +64,12 @@ public class MessageService {
      * 活在模拟盘页面（配合策略调整）—— 它们再进消息中心就是同一件事说第二遍，
      * 而重复通知是用户关掉通知的第一原因。聊天/日报数据本身仍照常落库
      * （聊天历史、审计与回放都靠它），只是不再出现在消息中心与未读角标里。
+     *
+     * <p>STRATEGY_REVIEW（2026-10-15）是收窄原则下的**刻意的例外**：月度小结/季度
+     * 策略信是用户点名要的"提醒"——频率是每策略每月最多一条，不属于日报级噪声；
+     * 而且它不是"页面上能看的东西再说一遍"，复盘页面并不展示它。
      */
-    private static final List<String> CENTER_TYPES = List.of("ALERT", "STRATEGY_SENTINEL");
+    private static final List<String> CENTER_TYPES = List.of("ALERT", "STRATEGY_SENTINEL", "STRATEGY_REVIEW");
 
     /**
      * 分页查询（消息中心主用）
@@ -191,6 +195,15 @@ public class MessageService {
         } catch (Exception e) {
             log.warn("记忆账本写入失败 user={}: {}", userId, e.getMessage());
         }
+    }
+
+    /**
+     * 这份报告是否已发过（按幂等键）。调用方用它决定"要不要花成本生成"——
+     * 例如季度信的评语半环要调一次 LLM，先问一声再动手。
+     */
+    public boolean reportSent(String dedupeKey) {
+        return dedupeKey != null && !dedupeKey.isBlank()
+                && messageRepo.findByDedupeKey(dedupeKey).isPresent();
     }
 
     /**

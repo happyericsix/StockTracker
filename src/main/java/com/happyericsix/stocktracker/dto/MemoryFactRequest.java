@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonAlias;
 import lombok.Data;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 一条待写入的语义事实。
@@ -63,4 +64,8 @@ public class MemoryFactRequest {
      */
     @JsonAlias("user_visible")
     private Boolean userVisible;
+
+    /** 句级来源（记忆白盒）：具体事件 id；空/缺省回退请求级的整段会话 id。 */
+    @JsonAlias("source_event_ids")
+    private List<Long> sourceEventIds;
 }

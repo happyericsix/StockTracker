@@ -1278,6 +1278,122 @@ async def weekly_reflection_endpoint(req: Request):
         return {"ok": False, "lessons": [], "warnings": ["周反思端点异常"]}
 
 
+# ==================== 季度策略信（2026-10-15）====================
+# 与周反思的分工：周反思面向**委员会**（教训回流提示词，结构化、宁缺毋滥）；
+# 季度信面向**用户**（一封可读的复盘信：逻辑还成立吗/参数还合适吗/和基准比怎样）。
+# 数字底座全部由 Java 确定性算好（报告纪律：判断依据不能每次生成都不一样），
+# LLM 只负责"评语"半环 —— 且评语里的参数建议是**提议**，永不自动改配置。
+
+QUARTERLY_LETTER_MAX_CHARS = 900
+
+_QUARTERLY_REVIEW_SYSTEM = (
+    "你是这条模拟盘策略的季度复盘官，正在给策略的主人写一封复盘信的「评语」部分。"
+    "输入是一个季度的客观材料：季度战绩（收益/回撤/胜率/空仓占比/对买入持有的超额）、"
+    "季度成交明细、教训库现状（含本季自动退役的教训）、样本外验证结论。\n"
+    "请回答三件事：① 策略的逻辑这个季度还成立吗（用事实说话，不许编数字）；"
+    "② 参数/风控有没有值得调整的**提议**（明确说「提议、需主人确认」，你不是执行者）；"
+    "③ 和买入持有比，这套操作值不值这个摩擦。\n"
+    "要求：直接称呼「你」；引用材料里的具体数字做依据；样本不足就直说样本不足；"
+    "不超过 300 字；不预测行情、不给投资建议、不用列表堆砌 —— 写成几段自然的话。"
+    "只输出 JSON：{\"verdict\": \"一段 2-3 句的总评\", \"suggestions\": \"参数/风控的提议，"
+    "没有就说暂无\"}"
+)
+
+
+def quarterly_review_run(payload: dict, completion=None) -> dict:
+    """一封季度信的评语半环（**1 次** LLM 调用）。永不抛异常：失败退化成「未生成评语」。"""
+    import json as _json
+
+    import llm_service
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("strategy"), dict):
+        return {"ok": False, "letter": None, "warnings": ["payload 缺少 strategy 字段"]}
+    checker = getattr(llm_service, "_is_available", None)
+    if callable(checker):
+        try:
+            if not checker():
+                return {"ok": False, "letter": None, "warnings": ["模型服务不可用"]}
+        except Exception:  # noqa: BLE001 —— 探测失败不应阻止尝试
+            pass
+    call = completion or llm_service.chat_completion
+    try:
+        choice = call(
+            [{"role": "system", "content": _QUARTERLY_REVIEW_SYSTEM},
+             {"role": "user", "content": _json.dumps(payload, ensure_ascii=False, default=str)}],
+            temperature=0.3, max_tokens=600)
+        text = str((((choice or {}).get("message") or {}).get("content")) or "")
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "letter": None, "warnings": [f"季度评语调用失败（{type(exc).__name__}）"]}
+    if "AI 服务暂不可用" in text:
+        return {"ok": False, "letter": None, "warnings": ["模型服务占位响应"]}
+
+    import re as _re
+    verdict, suggestions = None, None
+    match = _re.search(r"\{.*\}", text, _re.DOTALL)
+    if match:
+        try:
+            data = _json.loads(match.group(0))
+            verdict = str(data.get("verdict") or "").strip()[:QUARTERLY_LETTER_MAX_CHARS] or None
+            suggestions = str(data.get("suggestions") or "").strip()[:400] or None
+        except Exception:  # noqa: BLE001 —— 读不懂就当没有评语
+            pass
+    if verdict is None:
+        return {"ok": False, "letter": None, "warnings": ["模型返回无法解析为评语"]}
+    return {"ok": True, "letter": {"verdict": verdict, "suggestions": suggestions}, "warnings": []}
+
+
+@app.post("/api/v1/agent/quarterly-review")
+async def quarterly_review_endpoint(req: Request):
+    """**季度策略信**的评语半环：季度材料 → 总评 + 参数提议（文本，不落库不执行）。
+
+    请求体（Java PaperPeriodicReviewService 组装）：
+        {"strategy": {...}, "period": {...}, "stats": {...}, "trades": [...],
+         "lessons": {...}?, "verification": {...}?}
+
+    - fail-open：任何失败 ok=false + warning，Java 侧季度信仍会发出（只带数字、写明未生成评语）；
+    - 评语是「写给用户看的话」，不是教训（教训走周反思→MemoryLesson 那条线）。
+    """
+    try:
+        data = await req.json()
+        result = await asyncio.to_thread(quarterly_review_run, data if isinstance(data, dict) else {})
+        return result
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"quarterly review error: {e}", exc_info=True)
+        return {"ok": False, "letter": None, "warnings": ["季度评语端点异常"]}
+
+
+# ==================== 策略修订提案（P2，2026-10-15）====================
+# 与季度信的分工：季度信是「写给用户看的话」（提议永不落地）；本端点是**结构化修订闭环**
+# 的提案半环 —— 健康材料 → 参数级提案 → 立刻用「截至今天、近期加权」的真实化回测开门禁，
+# 产物由 Java 落 StrategyRevision 等人审批。与沙盒 evolve_replay 的 _gate 同一血统，
+# 差别：① 数据窗口永远截到今天并按半衰期加权（不再固定重放 2025）；
+#       ② 门禁过了也不自动应用 —— 应用动作在 Java 审批路径（人签字 + configUpdatedAt）。
+
+def strategy_revision_run(payload: dict, completion=None) -> dict:
+    from agent.revision import propose_revision
+    return propose_revision(payload if isinstance(payload, dict) else {}, completion)
+
+
+@app.post("/api/v1/agent/strategy-revision")
+async def strategy_revision_endpoint(req: Request):
+    """**策略修订提案**：健康材料 + 当前 config → 结构化提案 + 回测门禁证据。
+
+    请求体（Java StrategyRevisionService 组装）：
+        {"config": {...DSL...}, "health": {journal/expectation/equity/trades/lessons},
+         "strategy": {"id":..,"name":..,"symbol":..}}
+
+    - 数据窗口与加权口径见 agent/revision.py 头注释（截到今天 + 指数衰减）；
+    - fail-closed 语义：提案不可解析/校验不过/门禁不过都会**如实返回**，
+      Java 侧据此决定是否生成待审批记录（未过门禁的提案也留档，供人看否决理由）。
+    """
+    try:
+        data = await req.json()
+        return await asyncio.to_thread(strategy_revision_run, data if isinstance(data, dict) else {})
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"strategy revision error: {e}", exc_info=True)
+        return {"ok": False, "error": "修订提案端点异常"}
+
+
 # ==================== 同花顺扫码登录 ====================
 
 QR_STORE: dict = {}

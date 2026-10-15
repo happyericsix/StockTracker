@@ -152,6 +152,8 @@ public class PaperTradeTraceResponse {
                 "盯盘 agent 的当日调用预算用完，盘中回落到规则+授权执行 —— 预算是成本止损线，不是模型的结论");
         map.put(ExecutionContract.SKIP_PORTFOLIO_HALTED,
                 "组合熔断：全部模拟盘当日的总回撤超过阈值，新的开仓被暂停（平仓不受影响）");
+        map.put(ExecutionContract.SKIP_VOLUME_CAPPED,
+                "这根 K 线的成交量太小，按 25% 参与率上限吃不满一手 —— 流动性不足，大单会推价");
         return map;
     }
 

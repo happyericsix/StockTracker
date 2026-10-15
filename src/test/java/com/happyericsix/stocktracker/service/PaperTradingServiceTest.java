@@ -3,6 +3,7 @@ package com.happyericsix.stocktracker.service;
 import com.happyericsix.stocktracker.client.StrategyClient;
 import com.happyericsix.stocktracker.dto.MemoryFactRequest;
 import com.happyericsix.stocktracker.dto.PaperAccountResponse;
+import com.happyericsix.stocktracker.dto.StockHistoryResponse;
 import com.happyericsix.stocktracker.entity.PaperAccount;
 import com.happyericsix.stocktracker.entity.PaperAuthorization;
 import com.happyericsix.stocktracker.entity.PaperEquitySnapshot;
@@ -77,6 +78,20 @@ class PaperTradingServiceTest {
 
     @Mock
     private PlatformTransactionManager transactionManager;
+
+    /**
+     * 涨跌停挡单/参与率用的行情网关。未打桩的用例里 getStockHistory 返回 null →
+     * previousDailyClose 拿不到 → limitBlocked fail-open（不挡），既有断言不受影响。
+     */
+    @Mock
+    private StockDataGateway stockDataGateway;
+
+    /**
+     * 批次账本仓储（2026-10-15）。未打桩时 findBy* 返回 null → sellableShares/
+     * consumeLots 各自捕获 NPE 后走 legacy 语义，既有用例（整仓 T+1、均价近似）不变。
+     */
+    @Mock
+    private com.happyericsix.stocktracker.repository.PaperPositionLotRepository lotRepository;
 
     @Mock
     private MemoryFactService memoryFactService;
@@ -2027,8 +2042,9 @@ class PaperTradingServiceTest {
     // ==================== 分红除权（公司行动） ====================
 
     /**
-     * 除权日到达时：现金红利入账、送转摊薄成本、HWM 按除权公式下调、痕迹落库。
-     * 用 10000 股 @ 成本 6.0、每股派 0.12 元、10 送 2（每股 0.2）钉住整套数学。
+     * 除权日到达时：现金红利（按持股期限扣税后）入账、送转摊薄成本、HWM 按除权公式
+     * 下调、痕迹落库。用 10000 股 @ 成本 6.0、每股派 0.12 元、10 送 2（每股 0.2）、
+     * 持有 10 天（红利税率 20%）钉住整套数学。
      */
     @Test
     void exDividendDayCreditsCashDilutesCostAndAdjustsWatermark() throws Exception {
@@ -2074,9 +2090,9 @@ class PaperTradingServiceTest {
 
         paperTradingService.evaluateDaily();
 
-        // 现金红利 = 10000 × 0.12 = 1200
-        assertMoney("6200.00", account.getCash());
-        // 送股 10000 × 0.2 = 2000 → 12000 股
+        // 现金红利 = 10000 × 0.12 × (1 − 20%) = 960（持有 10 天 → 红利税 20%）
+        assertMoney("5960.00", account.getCash());
+        // 送股 10000 × 0.2 = 2000 → 12000 股（整除，无零碎股折现）
         assertMoney("12000", account.getShares());
         // 成本摊薄 = 10000×6.0 / 12000 = 5.0000
         assertMoney("5.0000", account.getAvgCost());
@@ -2128,5 +2144,242 @@ class PaperTradingServiceTest {
         assertMoney("100000.00", account.getCash(), "买入前的分红不该入账");
         assertMoney("10000", account.getShares());
         verify(paperTraceService, never()).recordOnceWithKey(any(), anyString());
+    }
+
+    // ==================== 涨跌停精细化（封死才挡）与参与率上限 ====================
+
+    /** 昨收 10.0 → 主板涨停价 11.00。给两根日线：前一日收 10.0。 */
+    private void stubHistoryWithPrevClose(String prevClose, String today) {
+        Map<String, StockHistoryResponse.DailyPrice> series = new java.util.LinkedHashMap<>();
+        series.put(prevClose, new StockHistoryResponse.DailyPrice(
+                "10", "10.1", "9.9", "10", "1000"));
+        series.put(today, new StockHistoryResponse.DailyPrice(
+                "11", "11", "11", "11", "1000"));
+        when(stockDataGateway.getStockHistory(anyString(), anyString()))
+                .thenReturn(new StockHistoryResponse(
+                        new StockHistoryResponse.MetaData("600519"), series));
+    }
+
+    private Strategy limitTestStrategy(String configJson) {
+        User user = User.builder().id(1L).username("alice").password("x").email("a@b.c").build();
+        return Strategy.builder()
+                .id(12L).name("涨跌停测试").symbol("600519")
+                .configJson(configJson).user(user).paperEnabled(true)
+                .build();
+    }
+
+    /** 一字涨停（bar high == low == 11.00 == 涨停价）：真实排不进队，模拟盘必须挡。 */
+    @Test
+    void sealedLimitUpBlocksTheBuy() throws Exception {
+        String configJson = "{\"initial_capital\":100000.0,"
+                + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0}}";
+        Strategy strategy = limitTestStrategy(configJson);
+        PaperAccount account = new PaperAccount();
+        account.setUser(strategy.getUser());
+        account.setStrategy(strategy);
+        account.setInitialCapital(new java.math.BigDecimal("100000.00"));
+        account.setCash(new java.math.BigDecimal("100000.00"));
+        LocalDate today = LocalDate.now();
+        stubHistoryWithPrevClose(today.minusDays(1).toString(), today.toString());
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(12L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(12L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
+        when(strategyClient.evaluateBar(eq(configJson), eq("600519"), anyString(), any()))
+                .thenReturn(mapper.readTree(String.format(
+                        "{\"signal\":\"buy\",\"price\":11.0,\"matched_conditions\":[\"price_above\"],"
+                                + "\"snapshot\":{\"schema_version\":1,\"bar\":{\"date\":\"%s\","
+                                + "\"open\":11.0,\"high\":11.0,\"low\":11.0,\"close\":11.0,\"volume\":100}}}",
+                        today)));
+
+        paperTradingService.evaluateDaily();
+
+        verify(paperTradeRepository, never()).save(any(PaperTrade.class));
+        ArgumentCaptor<PaperTradeTrace> traceCaptor = ArgumentCaptor.forClass(PaperTradeTrace.class);
+        verify(paperTraceService).record(traceCaptor.capture());
+        assertEquals(ExecutionContract.SKIP_LIMIT_BLOCKED, traceCaptor.getValue().getSkipReason());
+    }
+
+    /** 触板但盘中打开过（high 11.0 > low 10.80）：真实能成交，模拟盘必须放行。 */
+    @Test
+    void limitTouchedButOpenedAllowsTheBuy() throws Exception {
+        String configJson = "{\"initial_capital\":100000.0,"
+                + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0}}";
+        Strategy strategy = limitTestStrategy(configJson);
+        PaperAccount account = new PaperAccount();
+        account.setUser(strategy.getUser());
+        account.setStrategy(strategy);
+        account.setInitialCapital(new java.math.BigDecimal("100000.00"));
+        account.setCash(new java.math.BigDecimal("100000.00"));
+        LocalDate today = LocalDate.now();
+        stubHistoryWithPrevClose(today.minusDays(1).toString(), today.toString());
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(12L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(12L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
+        when(paperTradeRepository.save(any(PaperTrade.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
+        when(strategyClient.evaluateBar(eq(configJson), eq("600519"), anyString(), any()))
+                .thenReturn(mapper.readTree(String.format(
+                        "{\"signal\":\"buy\",\"price\":11.0,\"matched_conditions\":[\"price_above\"],"
+                                + "\"snapshot\":{\"schema_version\":1,\"bar\":{\"date\":\"%s\","
+                                + "\"open\":10.8,\"high\":11.0,\"low\":10.8,\"close\":11.0,\"volume\":1000000}}}",
+                        today)));
+
+        paperTradingService.evaluateDaily();
+
+        ArgumentCaptor<PaperTrade> tradeCaptor = ArgumentCaptor.forClass(PaperTrade.class);
+        verify(paperTradeRepository).save(tradeCaptor.capture());
+        assertEquals("BUY", tradeCaptor.getValue().getSide());
+        assertMoney("9000", tradeCaptor.getValue().getShares(),
+                "10 万资金 @11 元，无费用 → 9000 股；打开过的涨停不该挡");
+    }
+
+    /**
+     * 成交量参与率：预算能买 9000 股，但 bar 只成交了 8000 股 → 25% 上限 2000 股
+     * → 整手后 2000 股。模拟"大单推价"的冲击成本——固定滑点盖不住的部分。
+     */
+    @Test
+    void volumeParticipationCapsTheBuySize() throws Exception {
+        String configJson = "{\"initial_capital\":100000.0,"
+                + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0}}";
+        Strategy strategy = limitTestStrategy(configJson);
+        PaperAccount account = new PaperAccount();
+        account.setUser(strategy.getUser());
+        account.setStrategy(strategy);
+        account.setInitialCapital(new java.math.BigDecimal("100000.00"));
+        account.setCash(new java.math.BigDecimal("100000.00"));
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(12L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(12L)).thenReturn(Optional.empty());
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
+        when(paperTradeRepository.save(any(PaperTrade.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
+        when(strategyClient.evaluateBar(eq(configJson), eq("600519"), anyString(), any()))
+                .thenReturn(mapper.readTree(String.format(
+                        "{\"signal\":\"buy\",\"price\":10.0,\"matched_conditions\":[\"price_above\"],"
+                                + "\"snapshot\":{\"schema_version\":1,\"bar\":{\"date\":\"%s\","
+                                + "\"open\":10.0,\"high\":10.1,\"low\":9.9,\"close\":10.0,\"volume\":8000}}}",
+                        LocalDate.now())));
+
+        paperTradingService.evaluateDaily();
+
+        ArgumentCaptor<PaperTrade> tradeCaptor = ArgumentCaptor.forClass(PaperTrade.class);
+        verify(paperTradeRepository).save(tradeCaptor.capture());
+        assertMoney("2000", tradeCaptor.getValue().getShares(),
+                "预算 10000 股，但 bar 量 8000 × 25% = 2000 股封顶");
+    }
+
+    // ==================== 持仓批次账本（2026-10-15） ====================
+
+    /** 昨天开的批次：1000 股 @ 成本 9.50（未平）。 */
+    private com.happyericsix.stocktracker.entity.PaperPositionLot lot(
+            Strategy strategy, LocalDate opened, String cost, String remaining) {
+        return com.happyericsix.stocktracker.entity.PaperPositionLot.builder()
+                .user(strategy.getUser()).strategy(strategy)
+                .openedDate(opened).openedBar(opened + " 10:00:00").tradeId(99L)
+                .price(new java.math.BigDecimal(cost)).fee(java.math.BigDecimal.ZERO)
+                .shares(new java.math.BigDecimal("1000.0000"))
+                .remainingShares(new java.math.BigDecimal(remaining))
+                .createdAt(java.time.LocalDateTime.now())
+                .updatedAt(java.time.LocalDateTime.now())
+                .build();
+    }
+
+    private Strategy lotStrategy(PaperAccount account) {
+        User user = User.builder().id(1L).username("alice").password("x").email("a@b.c").build();
+        Strategy strategy = Strategy.builder()
+                .id(13L).name("批次测试").symbol("600519")
+                .configJson("{\"initial_capital\":100000.0,"
+                        + "\"risk\":{\"commission_pct\":0.0,\"slippage_pct\":0.0}}")
+                .user(user).paperEnabled(true)
+                .build();
+        account.setUser(user);
+        account.setStrategy(strategy);
+        return strategy;
+    }
+
+    /**
+     * 卖出按先进先出对冲批次：昨开批次 1000 股 @9.50，今日 10.50 卖出 →
+     * realized = (10.50 − 9.50) × 1000 = 1000.00，matched_lots 记下批次成本，
+     * 批次余量清零。
+     */
+    @Test
+    void sellConsumesTheLotFifoAndRecordsRealizedPnl() throws Exception {
+        PaperAccount account = new PaperAccount();
+        account.setInitialCapital(new java.math.BigDecimal("100000.00"));
+        account.setCash(java.math.BigDecimal.ZERO);
+        account.setShares(new java.math.BigDecimal("1000.0000"));
+        account.setAvgCost(new java.math.BigDecimal("9.5000"));
+        account.setEquity(new java.math.BigDecimal("10500.00"));
+        account.setHighWatermark(new java.math.BigDecimal("10.5000"));
+        account.setLastBuyBar(LocalDate.now().minusDays(1).toString());
+        Strategy strategy = lotStrategy(account);
+        com.happyericsix.stocktracker.entity.PaperPositionLot openLot =
+                lot(strategy, LocalDate.now().minusDays(1), "9.5000", "1000.0000");
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(13L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(13L)).thenReturn(Optional.of(account));
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
+        when(paperTradeRepository.save(any(PaperTrade.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
+        // 开放批次查询（T+1 在内存按 openedDate 过滤）→ 昨天的批次可卖
+        when(lotRepository.findByStrategyIdAndRemainingSharesGreaterThanOrderByOpenedDateAscIdAsc(
+                eq(13L), any())).thenReturn(List.of(openLot));
+        when(strategyClient.evaluateBar(anyString(), eq("600519"), anyString(), any()))
+                .thenReturn(mapper.readTree(
+                        "{\"signal\":\"sell\",\"price\":10.5,\"matched_conditions\":[\"price_cross_ma\"]}"));
+
+        paperTradingService.evaluateDaily();
+
+        ArgumentCaptor<PaperTrade> tradeCaptor = ArgumentCaptor.forClass(PaperTrade.class);
+        verify(paperTradeRepository).save(tradeCaptor.capture());
+        assertMoney("1000.00", tradeCaptor.getValue().getRealizedPnl(),
+                "已实现盈亏 = (10.50 − 9.50) × 1000");
+        assertNotNull(tradeCaptor.getValue().getMatchedLots(), "对冲明细必须落库");
+        assertTrue(tradeCaptor.getValue().getMatchedLots().contains("9.5000"),
+                "明细里要有批次成本");
+        ArgumentCaptor<com.happyericsix.stocktracker.entity.PaperPositionLot> lotCaptor =
+                ArgumentCaptor.forClass(com.happyericsix.stocktracker.entity.PaperPositionLot.class);
+        verify(lotRepository).save(lotCaptor.capture());
+        assertMoney("0", lotCaptor.getValue().getRemainingShares(), "批次应被消耗到 0");
+    }
+
+    /** 全部批次都是今天开的 → T+1 批次级锁定：卖出信号被挡，留 t1_blocked 痕。 */
+    @Test
+    void sameDayLotIsLockedByBatchLevelT1() throws Exception {
+        PaperAccount account = new PaperAccount();
+        account.setInitialCapital(new java.math.BigDecimal("100000.00"));
+        account.setCash(java.math.BigDecimal.ZERO);
+        account.setShares(new java.math.BigDecimal("1000.0000"));
+        account.setAvgCost(new java.math.BigDecimal("10.0000"));
+        account.setEquity(new java.math.BigDecimal("10000.00"));
+        account.setHighWatermark(new java.math.BigDecimal("10.5000"));
+        account.setLastBuyBar(LocalDate.now().toString());   // 今天开的仓
+        Strategy strategy = lotStrategy(account);
+        com.happyericsix.stocktracker.entity.PaperPositionLot todayLot =
+                lot(strategy, LocalDate.now(), "10.0000", "1000.0000");
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(13L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(13L)).thenReturn(Optional.of(account));
+        // 开放批次查询 → 只有今天开的批次（T+1 内存过滤后解锁份额为 0）；t1 挡下路径不保存账户
+        when(lotRepository.findByStrategyIdAndRemainingSharesGreaterThanOrderByOpenedDateAscIdAsc(
+                eq(13L), any())).thenReturn(List.of(todayLot));
+        when(strategyClient.evaluateBar(anyString(), eq("600519"), anyString(), any()))
+                .thenReturn(mapper.readTree(
+                        "{\"signal\":\"sell\",\"price\":10.5,\"matched_conditions\":[\"price_cross_ma\"]}"));
+
+        paperTradingService.evaluateDaily();
+
+        verify(paperTradeRepository, never()).save(any(PaperTrade.class));
+        ArgumentCaptor<PaperTradeTrace> traceCaptor = ArgumentCaptor.forClass(PaperTradeTrace.class);
+        verify(paperTraceService).record(traceCaptor.capture());
+        assertEquals(ExecutionContract.SKIP_T1_BLOCKED, traceCaptor.getValue().getSkipReason());
     }
 }

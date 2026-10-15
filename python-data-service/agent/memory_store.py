@@ -170,10 +170,11 @@ def _lesson_payload(lesson: dict) -> dict:
 
     与事实层同样的坑：字段名对不上就静默丢内容
     （task_type 丢了 → 经验归到错误的键上，复发次数统计不出来）。
+    evidenceEventIds 是句级来源（记忆白盒）：LLM 引用的行号已映射成具体事件 id。
     """
-    return {
+    payload = {
         "taskType": lesson.get("task_type") or lesson.get("taskType"),
-        "symptom": lesson.get("symptom"),
+        "symptom": lesson.get("symptom") or lesson.get("symptomText") or lesson.get("symptom_text"),
         "context": lesson.get("context"),
         "attempts": lesson.get("attempts"),
         "resolution": lesson.get("resolution"),
@@ -182,6 +183,10 @@ def _lesson_payload(lesson: dict) -> dict:
         "provenance": lesson.get("provenance"),
         "trust": lesson.get("trust"),
     }
+    evidence = lesson.get("evidence_event_ids") or lesson.get("evidenceEventIds")
+    if isinstance(evidence, list) and evidence:
+        payload["evidenceEventIds"] = evidence
+    return payload
 
 
 def search_facts(user_id, query=None, symbol=None, fact_type=None, limit=8) -> list:
@@ -221,7 +226,7 @@ def _fact_payload(fact: dict) -> dict:
     "类型=observation、时间=空"，而时间正是这个系统的核心。
     契约由 tests/test_memory_internal_contract.py 钉住。
     """
-    return {
+    payload = {
         "subject": fact.get("subject"),
         "predicate": fact.get("predicate"),
         "object": fact.get("object"),
@@ -234,6 +239,11 @@ def _fact_payload(fact: dict) -> dict:
         "trust": fact.get("trust"),
         "confirmed": fact.get("confirmed"),
     }
+    # 句级来源（记忆白盒）：有具体引用时覆盖整段会话的 fallback
+    source_ids = fact.get("source_event_ids") or fact.get("sourceEventIds")
+    if isinstance(source_ids, list) and source_ids:
+        payload["sourceEventIds"] = source_ids
+    return payload
 
 
 def list_events(user_id, session_key) -> list:

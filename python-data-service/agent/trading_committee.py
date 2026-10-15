@@ -307,8 +307,21 @@ def _position(position: dict | None) -> dict:
         except (TypeError, ValueError):
             return None
 
-    return {"shares": value("shares") or 0.0, "avg_cost": value("entry_price"),
-            "high_watermark": value("high_watermark")}
+    out = {"shares": value("shares") or 0.0, "avg_cost": value("entry_price"),
+           "high_watermark": value("high_watermark")}
+    # 持仓批次（2026-10-15）：每批的开仓时刻/年龄/成本/浮盈亏%/今日是否锁定——
+    # 卖出决策对着具体批次说话（A 股先进先出与红利税的法定口径都在批次上）
+    lots = position.get("lots")
+    if isinstance(lots, list) and lots:
+        trimmed = []
+        for lot in lots[:8]:
+            if isinstance(lot, dict):
+                trimmed.append({k: lot.get(k) for k in
+                                ("opened", "age_days", "cost", "shares", "pnl_pct", "locked_today")
+                                if lot.get(k) is not None})
+        out["lots"] = trimmed
+        out["lots_note"] = "卖出按先进先出对冲批次；locked_today=True 的批次今日不可卖（T+1）"
+    return out
 
 
 # ==================== 1b. 召集门控（事件驱动） ====================

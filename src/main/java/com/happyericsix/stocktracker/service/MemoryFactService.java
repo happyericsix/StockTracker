@@ -133,7 +133,10 @@ public class MemoryFactService {
                     .confirmed(Boolean.TRUE.equals(item.getConfirmed()))
                     // 双层记忆：用户层默认可见；系统遥测由 observation()/observationStory() 工厂标记
                     .userVisible(!Boolean.FALSE.equals(item.getUserVisible()))
-                    .sourceEventIds(toJsonIds(request.getSourceEventIds()))
+                    // 句级来源优先（记忆白盒 2026-10-15）：LLM 引用的行号已在 Python 侧映射成
+                    // 具体事件 id；没有就退回请求级的整段会话 id —— 来源宁可粗，不能断
+                    .sourceEventIds(toJsonIds(item.getSourceEventIds() != null && !item.getSourceEventIds().isEmpty()
+                            ? item.getSourceEventIds() : request.getSourceEventIds()))
                     .build());
 
             results.add(new FactWriteResult(saved.getId(), subject, predicate, value,
@@ -240,6 +243,20 @@ public class MemoryFactService {
         }
         return sb.append(']').toString();
     }
+
+    /** JSON 数组文本 → 对象（记忆白盒：来源 id 列表外发用）；读不懂返回 null，不假装。 */
+    private Object fromJson(String json) {
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        try {
+            return MAPPER.readValue(json, Object.class);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static final tools.jackson.databind.ObjectMapper MAPPER = new tools.jackson.databind.ObjectMapper();
 
     // ==================== 读取：当前有效的事实 ====================
 
@@ -592,6 +609,10 @@ public class MemoryFactService {
         item.put("recordedAt", fact.getRecordedAt() == null ? null : fact.getRecordedAt().toString());
         item.put("dataAsOf", fact.getDataAsOf() == null ? null : fact.getDataAsOf().toString());
         item.put("active", true);
+        // 记忆白盒（2026-10-15）：来源外发 —— 前端"查看来源"按这些 id 拉原始对话，
+        // sessionKey 说明"这是哪天的会话里说的"
+        item.put("sessionKey", fact.getSessionKey());
+        item.put("sourceEventIds", fromJson(fact.getSourceEventIds()));
 
         // "此前为 X"：变更链对用户可见，避免模型凭空给出一个数字
         if (fact.getSupersedesId() != null) {

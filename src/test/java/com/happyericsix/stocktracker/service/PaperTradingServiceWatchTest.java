@@ -71,6 +71,10 @@ class PaperTradingServiceWatchTest {
     private UserRepository userRepository;
     @Mock
     private org.springframework.transaction.PlatformTransactionManager transactionManager;
+
+    /** 降级告警（2026-10-15）走消息中心：验证 saveReport 被调用即可。 */
+    @Mock
+    private com.happyericsix.stocktracker.service.MessageService messageService;
     @Mock
     private MemoryFactService memoryFactService;
     @Mock
@@ -259,9 +263,13 @@ class PaperTradingServiceWatchTest {
         assertEquals(ExecutionContract.TRIGGER_WATCH, captor.getValue().getTrigger());
     }
 
-    /** LLM 降级（degraded）→ 盯盘不接管，回落"规则+授权"：规则 buy 信号照常执行。 */
+    /**
+     * LLM 降级（degraded）→ **持仓不动 + 留痕**（2026-10-15 收权）：agent 模式的盘中
+     * 动作只能由 agent 签发。旧语义"回落规则执行"让 10-15 09:32 的亏损卖出发生在
+     * 无人过目的情况下——宁可不动也不错剁。
+     */
     @Test
-    void degradedWatchFallsBackToRuleExecution() throws Exception {
+    void degradedWatchHoldsInsteadOfFallingBackToRules() throws Exception {
         Strategy strategy = agentStrategy();
         PaperAccount account = flatAccount(strategy);
         stubCommon(strategy, account);
@@ -273,13 +281,23 @@ class PaperTradingServiceWatchTest {
 
         paperTradingService.evaluateRealtime();
 
-        // 盯盘没问成 → 规则信号在授权内照常执行：盘中绝不因 LLM 故障瘫痪
-        verify(paperTradeRepository, times(1)).save(any(PaperTrade.class));
+        // 规则给了 buy，但 agent 没答上来 → 不许成交，留 agent_llm_unavailable 的痕
+        verify(paperTradeRepository, never()).save(any(PaperTrade.class));
+        ArgumentCaptor<PaperTradeTrace> traceCaptor = ArgumentCaptor.forClass(PaperTradeTrace.class);
+        verify(paperTraceService).record(traceCaptor.capture());
+        assertEquals(ExecutionContract.SKIP_AGENT_LLM_UNAVAILABLE, traceCaptor.getValue().getSkipReason());
+
+        // 且用户要被主动告警（消息中心，小时级节流键）：不能让用户自己翻痕迹才发现降级
+        ArgumentCaptor<String> keyCaptor = ArgumentCaptor.forClass(String.class);
+        verify(messageService).saveReport(any(), anyString(), keyCaptor.capture(),
+                anyString(), anyString());
+        assertTrue(keyCaptor.getValue().startsWith("llm_degraded:10:"),
+                "降级告警的幂等键应按策略+小时分桶：" + keyCaptor.getValue());
     }
 
-    /** 预算耗尽 → 留一行"盯盘下班"的痕 + 回落规则执行（预算是成本止损线，不是停摆）。 */
+    /** 预算耗尽 → 留痕说明"盯盘下班" + 同样不再回落规则执行（盘中动作必须有 agent 签名）。 */
     @Test
-    void exhaustedBudgetFallsBackAndLeavesATrace() throws Exception {
+    void exhaustedBudgetHoldsAndLeavesATrace() throws Exception {
         ReflectionTestUtils.setField(paperTradingService, "intradayWatchDailyBudget", 0);
         Strategy strategy = agentStrategy();
         PaperAccount account = flatAccount(strategy);
@@ -289,16 +307,14 @@ class PaperTradingServiceWatchTest {
 
         paperTradingService.evaluateRealtime();
 
-        // 预算 0：一次都不问模型
+        // 预算 0：一次都不问模型，也不许规则替它动手
         verify(strategyClient, never()).intradayWatch(anyString(), anyString(), any(), any(), any(), any(), any(), any());
         ArgumentCaptor<PaperTradeTrace> traceCaptor = ArgumentCaptor.forClass(PaperTradeTrace.class);
-        verify(paperTraceService, atLeastOnce()).record(traceCaptor.capture());
-        assertTrue(traceCaptor.getAllValues().stream()
-                        .anyMatch(t -> ExecutionContract.SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED
-                                .equals(t.getSkipReason())),
+        verify(paperTraceService).record(traceCaptor.capture());
+        assertEquals(ExecutionContract.SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED,
+                traceCaptor.getValue().getSkipReason(),
                 "预算尽要留痕，否则'盯盘今天为什么没工作'无从回答");
-        // 且回落规则路径：规则 buy 信号照常成交
-        verify(paperTradeRepository, times(1)).save(any(PaperTrade.class));
+        verify(paperTradeRepository, never()).save(any(PaperTrade.class));
     }
 
     /** 止损硬通道绕过盯盘：不等模型，直接执行（盯盘一次都不许被调）。 */
@@ -382,7 +398,7 @@ class PaperTradingServiceWatchTest {
                         "{\"id\":321,\"title\":\"公司被立案调查\",\"direction\":\"利空\","
                                 + "\"impact_level\":\"high\",\"credibility\":82,\"analyzed\":true,"
                                 + "\"plain_summary\":\"证监会立案调查公告。\"}"));
-        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), any()))
+        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), any(), any(), any()))
                 .thenReturn(watchResponse("hold", 0.0));
 
         paperTradingService.evaluateRealtime();

@@ -24,3 +24,7 @@ export const retireLesson = (id) => request.post(`/memory/lessons/${id}/retire`)
 
 /** 会话摘要（前情提要）：可以看到助手是怎么总结对话的 */
 export const listMemoryEpisodes = () => request.get('/memory/episodes')
+
+/** 记忆的原始来源（记忆白盒）：按事件 id 拉产生这条记忆的原始对话/事件 */
+export const fetchMemorySources = (ids) =>
+  request.get('/memory/sources', { params: { ids: ids.join(',') } })

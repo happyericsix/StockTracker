@@ -53,6 +53,8 @@ public class JobRunService {
     public static final String JOB_PAPER_RETRY = "paper-retry";
     /** 周复盘（周五 16:30）：样本外验证 + 空转摘要。 */
     public static final String JOB_PAPER_WEEKLY = "paper-weekly";
+    /** 月度/季度复盘（周五 16:40，按月幂等）：月度小结 + 季度策略信。 */
+    public static final String JOB_PAPER_PERIODIC = "paper-periodic";
     /** 事件线专题（交易时段每小时 :20）。 */
     public static final String JOB_NEWS_TOPICS = "news-topics";
     /** 新闻抓取（事件驱动入口保留）：资讯页手动刷新 + 定时全量趟（交易日 15:40/19:00/21:00 + 每日 08:00）。 */

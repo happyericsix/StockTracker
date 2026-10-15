@@ -10,13 +10,12 @@
  * 操作弱化；所有原功能保留，只是重新分区与降级）：
  *   ① 资产总览 —— 赚没赚（总资产大数字 + 当日盈亏 + 次级数据一行）
  *   ② 我的策略 —— 在跑什么（卡片网格：净值主数字 + 期间收益徽章 + 最近动态一句）
- *   ③ 决策对账 —— 智囊比规则准多少（默认收起：这是专业视角，不该占首屏）
  * 数据聚合只做显示层的求和/求差，口径仍以后端为准。
  */
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { getPaperOverview, startPaper, stopPaper } from '../api/strategy.js'
-import { getPortfolio, getDecisionQuality, getPaperReport } from '../api/paper.js'
+import { getPortfolio, getPaperReport } from '../api/paper.js'
 import StrategyEditSheet from '../components/StrategyEditSheet.vue'
 import Badge from '../components/ui/badge.vue'
 import Button from '../components/ui/button.vue'
@@ -165,36 +164,16 @@ const corrLabel = (rho) => {
   return '基本独立'
 }
 
-// ---------- 决策对账（③ 智囊比规则准多少：默认收起） ----------
-const quality = ref(null)
-const loadQuality = async () => {
-  try {
-    const res = await getDecisionQuality(5, 60)
-    quality.value = res.data || null
-  } catch {
-    quality.value = null
-  }
-}
-const modeKeyLabel = (key) => (key === 'agent' ? '智囊' : '规则')
-const sideKeyLabel = (key) => (key === 'buy' ? '买入' : key === 'sell' ? '卖出' : '—')
-const qualityPendingCount = computed(() =>
-  (quality.value?.recent || []).filter((r) => r.status === 'pending').length)
-const qualityEvaluated = computed(() =>
-  (quality.value?.bySource || []).reduce((sum, s) => sum + (s.evaluated || 0), 0))
-/** 对账 summary 那一行的一句总览：两方胜率并排，谁高谁低一眼可见 */
-const qualitySummary = computed(() => {
-  const src = quality.value?.bySource || []
-  const agent = src.find((s) => s.key === 'agent')
-  const rule = src.find((s) => s.key === 'rule')
-  if (!agent && !rule) return ''
-  const fmt = (s) => (s && s.winRatePct != null ? `${s.winRatePct}%（${s.evaluated} 笔）` : '暂无样本')
-  return `智囊 ${fmt(agent)} · 规则 ${fmt(rule)}`
-})
+// ---------- 决策对账（③ 智囊 vs 规则）已于 2026-10-14 移除 ----------
+// 原因：规则与 agent 是同一条流水线的层（规则出信号 → 委员会划边界 → 边界内执行），
+// 不是两个可对比的决策者；且成交上的 decision_mode 标签会把"授权内规则单"记成
+// agent，分组对比测不出任何干净的东西。单笔方向对账仍保留在策略详情页的
+// 「决策日志」（按策略对答案，不按来源分组）；委员会的经验回流
+// （strategyExperience / agentOutcomeSince）在后端照旧工作。
 
 onMounted(() => {
   load()
   loadPortfolio()
-  loadQuality()
 })
 </script>
 
@@ -387,51 +366,6 @@ onMounted(() => {
         </li>
       </ul>
     </section>
-
-    <!-- ③ 决策对账：智囊比规则准多少。专业视角，默认收起 -->
-    <details
-      v-if="!loading && quality && (qualityEvaluated > 0 || qualityPendingCount > 0)"
-      class="mt-5 rounded-xl border border-border bg-surface p-5"
-    >
-      <summary class="flex cursor-pointer list-none flex-wrap items-center gap-x-3 gap-y-1 [&::-webkit-details-marker]:hidden">
-        <span class="text-[15px] font-semibold text-ink">决策对账：智囊 vs 规则谁更准</span>
-        <span class="num text-[12px] text-ink-3">{{ qualitySummary }}</span>
-        <span class="text-ink-3 transition-transform duration-150 [details[open]_&]:rotate-90">▸</span>
-      </summary>
-      <p class="mb-3 mt-2.5 max-w-[75ch] text-[12.5px] leading-relaxed text-ink-2">
-        按「方向对错」对账（买入看涨对、卖出看跌对），不是盈亏——盈亏看上面各策略的曲线。
-        每笔成交 {{ quality.horizonDays }} 个交易日后回头看，还没走满的不计入。
-      </p>
-      <div class="num grid gap-2.5 [grid-template-columns:repeat(auto-fit,minmax(200px,1fr))]">
-        <div v-for="s in quality.bySource" :key="s.key" class="flex flex-col gap-1 rounded-lg bg-surface-2 p-3">
-          <span class="text-[12px] text-ink-2">{{ modeKeyLabel(s.key) }}</span>
-          <strong class="text-[18px] font-semibold text-ink">{{ s.winRatePct === null ? '—' : s.winRatePct + '%' }} 胜率</strong>
-          <span class="text-[12px] text-ink-3">{{ s.evaluated }} 笔已对账 · 平均方向收益 {{ s.avgAlignedPct === null ? '—' : formatPct(s.avgAlignedPct) }}</span>
-        </div>
-      </div>
-      <details v-if="(quality.recent || []).length" class="mt-2.5 overflow-x-auto">
-        <summary class="cursor-pointer text-[13px] text-ink-2">最近 {{ quality.recent.length }} 笔明细</summary>
-        <table class="mt-2 w-full min-w-[560px] text-[12.5px]">
-          <thead>
-            <tr class="text-left text-ink-2">
-              <th class="py-1 pr-2 font-medium">日期</th><th class="pr-2 font-medium">标的</th><th class="pr-2 font-medium">方向</th>
-              <th class="pr-2 font-medium">决策</th><th class="pr-2 font-medium">价格</th><th class="pr-2 font-medium">对齐收益</th><th class="font-medium">状态</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="(r, i) in quality.recent" :key="i" class="border-t border-border">
-              <td class="num py-1.5 pr-2 text-ink">{{ r.date }}</td>
-              <td class="num pr-2 text-ink">{{ r.symbol }}</td>
-              <td class="pr-2 text-ink">{{ sideKeyLabel(r.side) }}</td>
-              <td class="pr-2 text-ink">{{ modeKeyLabel(r.mode) }}</td>
-              <td class="num pr-2 text-ink">{{ r.price }}</td>
-              <td class="num pr-2" :class="dirTextClass(r.alignedPct)">{{ r.alignedPct == null ? '—' : formatPct(r.alignedPct) }}</td>
-              <td class="text-ink">{{ r.status === 'pending' ? '未到期' : (r.win ? '对' : '错') }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </details>
-    </details>
 
     <StrategyEditSheet :open="editingId !== null" :strategy-id="editingId" @close="editingId = null" @saved="onEditSaved" />
   </div>

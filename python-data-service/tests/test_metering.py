@@ -207,6 +207,8 @@ def test_llm_calls_are_metered_with_tokens(monkeypatch):
     meter = fresh_meter(monkeypatch)
 
     class _Resp:
+        status_code = 200   # 2026-10-15：调用侧退避重试会读 status_code
+
         def raise_for_status(self):
             return None
 

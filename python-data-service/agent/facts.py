@@ -76,8 +76,12 @@ def canonical_predicate(raw) -> str:
     return "".join(ch for ch in normalized if ch.isalnum() or ch == "_")[:MAX_PREDICATE_CHARS]
 
 
-def normalize(raw_facts, now=None, source_event_ids=None) -> list[dict]:
-    """把模型给出的事实列表整理成可入库结构。非法项直接丢弃，不做修补。"""
+def normalize(raw_facts, now=None, source_event_ids=None, line_ids=None) -> list[dict]:
+    """把模型给出的事实列表整理成可入库结构。非法项直接丢弃，不做修补。
+
+    line_ids 在场时用 source_refs 把每条事实的来源细化到句级（与 lessons 的
+    evidence_refs 同一套行号机制），否则退回整段会话 id。
+    """
     if not isinstance(raw_facts, list):
         return []
 
@@ -118,7 +122,9 @@ def normalize(raw_facts, now=None, source_event_ids=None) -> list[dict]:
             # 用户亲口说的内容才可能是 high；模型抽取的一律 medium，注入时会标注
             "trust": "medium",
             "confirmed": bool(item.get("confirmed", False)),
-            "source_event_ids": list(source_event_ids or []),
+            "source_event_ids": _resolve_refs(
+                item.get("source_refs") or item.get("sourceRefs"),
+                line_ids, source_event_ids),
         }
 
         key = (fact["subject"].lower(), fact["predicate"])
@@ -144,6 +150,27 @@ def _confidence(raw) -> float:
     except (TypeError, ValueError):
         return 0.6  # 模型没给置信度时用中等默认值，而不是直接丢弃
     return max(0.0, min(1.0, value))
+
+
+# 单条事实最多引用几行来源（与 lessons.MAX_EVIDENCE_REFS 同一纪律）
+MAX_SOURCE_REFS = 8
+
+
+def _resolve_refs(refs, line_ids, fallback) -> list:
+    """LLM 引用的行号 → 具体事件 id。行号无效/为空时退回整段会话 id（见 lessons 同名函数）。"""
+    if not isinstance(refs, list) or not line_ids:
+        return list(fallback or [])
+    resolved = []
+    for raw in refs:
+        try:
+            idx = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= idx <= len(line_ids) and line_ids[idx - 1] is not None:
+            resolved.append(line_ids[idx - 1])
+    seen = set()
+    unique = [i for i in resolved if not (i in seen or seen.add(i))]
+    return unique[:MAX_SOURCE_REFS] if unique else list(fallback or [])
 
 
 def describe(fact: dict) -> str:

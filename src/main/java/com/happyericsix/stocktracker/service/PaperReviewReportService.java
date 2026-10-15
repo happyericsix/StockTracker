@@ -377,8 +377,11 @@ public class PaperReviewReportService {
      *
      * <p>三种状态必须说成三句不同的话：没验证过 / 验证过但没有可用样本 / 有结论但已过期。
      * 把它们混成一句"样本外验证：无"，读者就分不清是"没做"还是"做了不算数"。
+     *
+     * <p>public（2026-10-15）：月度/季度复盘（PaperPeriodicReviewService）复用同一行 ——
+     * "规则证据"的口径全系统只能有一份。
      */
-    private String verificationLine(Strategy strategy, LocalDate asOf) {
+    public String verificationLine(Strategy strategy, LocalDate asOf) {
         StrategyService.VerificationSummary summary = strategyService == null ? null
                 : strategyService.latestVerification(
                         strategy.getUser() == null ? null : strategy.getUser().getId(), strategy.getId());

@@ -5,6 +5,7 @@
 - 批量/分析数据：akshare（后续 LLM 使用）
 """
 import logging
+import os
 import re
 import time
 from datetime import datetime, timedelta
@@ -125,11 +126,14 @@ def resolve_symbol(symbol_or_keyword: str) -> Optional[str]:
     return None
 
 
-# ==================== 行情缓存（15s TTL） ====================
-
+# ==================== 行情缓存（默认 3s，可配） ====================
+# 2026-10-15 从 15 收紧到 3：图表页焦点票走 3 秒快车道（Java FocusQuoteStreamJob），
+# 缓存 15s 会让"3 秒推一次"推的有 2/3 是旧价。腾讯免费快照本身约 3 秒一跳，
+# TTL=3 意味着每次快车道取数几乎都是源上最新；自选 15s 批也因此从"最多 25~30s 旧价"
+# 变成真 15s 新鲜度。上游压力 ≈ 每票每 3 秒一次 HTTP，浏览器行情页都是这个量级。
 _quote_cache: dict[str, tuple[float, dict]] = {}
 _quote_cache_lock = threading.Lock()
-QUOTE_CACHE_TTL = 15  # 秒
+QUOTE_CACHE_TTL = int(os.getenv("QUOTE_CACHE_TTL", "3"))
 
 
 # ==================== K线历史缓存（1h TTL） ====================
@@ -141,7 +145,10 @@ HISTORY_CACHE_TTL = 3600  # 日/周/月 K：1 小时
 #（实测 2026-10-08：15:30 结算当口腾讯源还没有当天 bar，17:05 才有）。
 # 这类请求若也走 1 小时缓存，15:30 那次"没有当天 bar"会被一直端给后续调用 ——
 # 模拟盘从启动那天起就永远结算不了。只回看历史的请求（回测/验证）不受影响。
-HISTORY_RECENT_TTL = 300
+# 2026-10-15 从 300 收紧到 60：图表页盘中 30 秒轮询日线，今日半根 K 线被 5 分钟缓存
+# 冻结的话"实时刷新"名存实亡（用户实测图不动）。60s 让蜡烛最迟 1 分钟长一次，
+# 上游压力 = 每分钟每票一次日线请求，单用户部署完全可承受。
+HISTORY_RECENT_TTL = int(os.getenv("HISTORY_RECENT_TTL", "60"))
 MINUTE_CACHE_TTL = 30     # 分钟 K：30 秒
 
 # 一次批量行情最多取多少只（腾讯接口对 URL 长度敏感，50 只约 500 字符，很安全）

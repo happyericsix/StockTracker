@@ -309,6 +309,67 @@ def test_consolidation_invalidates_the_semantic_index(monkeypatch):
     assert invalidated["user"] == 7
 
 
+# ==================== 记忆白盒（2026-10-15）：行号 + 句级证据 ====================
+
+def test_dialog_lines_are_numbered_and_aligned_with_event_ids():
+    events = EVENTS + [
+        {"id": None, "kind": "chat_user", "role": "user", "content": "无 id 的历史行", "occurredAt": "2026-09-14T10:06:00"},
+    ]
+    dialog, used_ids, _, line_ids = consolidate._build_dialog(events)
+
+    # 每行带 [n] 序号，行号与 line_ids 严格对齐（回溯正确性的前提）
+    assert "[1] [2026-09-14 10:00] 用户: 帮我做一个20日上穿60日买入的策略" in dialog
+    assert len(line_ids) == 4
+    assert line_ids == [11, 12, 13, None]   # 无 id 的行占位 None，不破坏对齐
+    assert used_ids == [11, 12, 13]
+
+
+def test_evidence_refs_resolve_to_specific_event_ids(monkeypatch):
+    """教训的来源按 LLM 引用的行号细化到句级，不再只有"整段会话"。"""
+    payload = dict(VALID_SUMMARY)
+    payload["lessons"] = [{
+        "task_type": "backtest", "symptom": "回测显示回撤偏大",
+        "resolution": "收紧止损到 5%", "reusable_rule": "回撤偏大先收紧止损再观察",
+        "confidence": 0.8, "evidence_refs": [2, 3],
+    }]
+    calls = _patch(monkeypatch, EVENTS, json.dumps(payload, ensure_ascii=False))
+
+    consolidate.consolidate_session(1, "1:2026-09-14")
+
+    lesson = calls["lessons"]["lessons"][0]
+    assert lesson["evidence_event_ids"] == [12, 13]   # 第 2、3 行 → 事件 12、13
+
+
+def test_source_refs_resolve_for_facts_and_invalid_refs_fall_back(monkeypatch):
+    payload = dict(VALID_SUMMARY)
+    payload["facts"] = [
+        # 引用第 1 行（"帮我做策略"里没说过止损——测试只验证映射，不验证语义）
+        dict(VALID_SUMMARY["facts"][0], source_refs=[1]),
+        # 引用越界行号：必须退回整段会话，而不是空来源或错来源
+        dict(VALID_SUMMARY["facts"][1], source_refs=[99]),
+    ]
+    payload["lessons"] = []
+    calls = _patch(monkeypatch, EVENTS, json.dumps(payload, ensure_ascii=False))
+
+    consolidate.consolidate_session(1, "1:2026-09-14")
+
+    facts = calls["facts"]["facts"]
+    assert facts[0]["source_event_ids"] == [11]
+    assert facts[1]["source_event_ids"] == [11, 12, 13]
+
+
+def test_prompt_carries_line_numbers_and_ref_instructions(monkeypatch):
+    """提示词必须教 LLM 用行号引用，否则 evidence_refs 永远不会出现。"""
+    calls = _patch(monkeypatch, EVENTS, json.dumps(VALID_SUMMARY, ensure_ascii=False))
+
+    consolidate.consolidate_session(1, "1:2026-09-14")
+
+    user_content = calls["messages"][1]["content"]
+    assert "行号" in user_content and "[1]" in user_content
+    assert "evidence_refs" in calls["messages"][0]["content"]
+    assert "source_refs" in calls["messages"][0]["content"]
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

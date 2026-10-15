@@ -31,7 +31,6 @@ public class PaperController {
 
     private final PaperTradingService paperTradingService;
     private final com.happyericsix.stocktracker.service.PortfolioService portfolioService;
-    private final com.happyericsix.stocktracker.service.DecisionQualityService decisionQualityService;
     private final com.happyericsix.stocktracker.repository.UserRepository userRepository;
 
     @GetMapping("/overview")
@@ -53,16 +52,9 @@ public class PaperController {
         return Result.success(portfolioService.portfolio(userId));
     }
 
-    /**
-     * 决策质量对账：每笔成交 N 个交易日后的方向对错，按决策源（agent/规则）分组对比。
-     * 这是"agent 到底比规则好多少"这个问题唯一的答案页。
-     */
-    @GetMapping("/decision-quality")
-    public Result<Map<String, Object>> decisionQuality(
-            Authentication authentication,
-            @org.springframework.web.bind.annotation.RequestParam(required = false) Integer horizon,
-            @org.springframework.web.bind.annotation.RequestParam(required = false) Integer lookback) {
-        return Result.success(decisionQualityService.quality(
-                authentication.getName(), horizon, lookback));
-    }
+    // 「决策对账：智囊 vs 规则」（/decision-quality）已于 2026-10-14 移除：
+    // 规则与 agent 是同一条流水线的层（规则出信号 → 委员会划授权边界 → 边界内执行），
+    // 不是两个可对比的决策者；成交上的 decision_mode 标签会把授权内的规则单记成
+    // agent，按来源分组对比测不出干净的东西。单笔方向对账保留在策略详情页的
+    // 「决策日志」；委员会的经验回流（strategyExperience/agentOutcomeSince）不受影响。
 }

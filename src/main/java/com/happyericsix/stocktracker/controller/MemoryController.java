@@ -1,6 +1,7 @@
 package com.happyericsix.stocktracker.controller;
 
 import com.happyericsix.stocktracker.dto.Result;
+import com.happyericsix.stocktracker.entity.MemoryEvent;
 import com.happyericsix.stocktracker.entity.User;
 import com.happyericsix.stocktracker.repository.UserRepository;
 import com.happyericsix.stocktracker.service.MemoryFactService;
@@ -155,6 +156,58 @@ public class MemoryController {
             }
         }
         return Result.success(out);
+    }
+
+    /**
+     * 记忆的原始来源（记忆白盒 2026-10-15）：按事件 id 批量返回账本原文。
+     *
+     * <p>这是"查看来源"抽屉的数据源 —— 事实/教训条目上带的 sourceEventIds /
+     * evidenceEventIds 指到这里，用户可以亲手核对"AI 是根据哪句话记住这件事的"。
+     * 归属校验：只回当前用户自己的事件，别人的 id 悄悄跳过（不报错也不泄露存在性）。
+     * 上限 20 条：一条记忆引用的原文就是几句话，不是整段会话。
+     */
+    @GetMapping("/sources")
+    public Result<List<Map<String, Object>>> sources(Authentication authentication,
+                                                     @RequestParam String ids) {
+        Long userId = currentUserId(authentication);
+        if (userId == null) {
+            return Result.error(401, "登录已失效");
+        }
+        List<Long> parsed = new ArrayList<>();
+        for (String part : ids.split(",")) {
+            String trimmed = part.trim();
+            if (trimmed.isEmpty() || parsed.size() >= 20) {
+                continue;
+            }
+            try {
+                parsed.add(Long.parseLong(trimmed));
+            } catch (NumberFormatException ignored) {
+                // 脏输入跳过：来源查看是旁路，不值得为它 400
+            }
+        }
+        if (parsed.isEmpty()) {
+            return Result.success(List.of());
+        }
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (MemoryEvent event : memoryService.eventsByIds(userId, parsed)) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", event.getId());
+            row.put("kind", event.getKind());
+            row.put("role", event.getRole());
+            row.put("content", clip(event.getContent(), 600));
+            row.put("symbol", event.getSymbol());
+            row.put("occurredAt", event.getOccurredAt() == null ? null : event.getOccurredAt().toString());
+            row.put("provenance", event.getProvenance());
+            out.add(row);
+        }
+        return Result.success(out);
+    }
+
+    private static String clip(String text, int limit) {
+        if (text == null || text.length() <= limit) {
+            return text;
+        }
+        return text.substring(0, limit) + "…";
     }
 
     private Long currentUserId(Authentication authentication) {

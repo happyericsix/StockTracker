@@ -39,4 +39,10 @@ public class MemoryLessonRequest {
 
     /** high / medium / low */
     private String trust;
+
+    /**
+     * 句级证据（记忆白盒 2026-10-15）：LLM 引用的对话行号已在 Python 侧映射成
+     * 具体事件 id。空/缺省时回退请求级的整段会话 id。
+     */
+    private List<Long> evidenceEventIds;
 }

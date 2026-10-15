@@ -10,6 +10,7 @@ import { ref, onMounted, onUnmounted, nextTick, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, Megaphone, Newspaper, FileText, Globe } from 'lucide-vue-next'
 import { getHistory, getMinuteKline, getStock } from '../api/stock.js'
+import { quoteBus } from '../composables/quoteBus.js'
 import { getStockEvents, getStockRead } from '../api/news.js'
 import { getSentiment } from '../api/market.js'
 import { anchorDateFor as anchorOnAxis } from '../utils/newsAnchor.js'
@@ -112,6 +113,9 @@ const MARK_LIMIT = 12
 
 const chartRef = ref(null)
 let chart = null
+// 用户当前的缩放窗口：实时补丁/盘中轮询整图重画（notMerge）时必须带回去，
+// 否则每次 SSE 到价都会把用户拖好的区间弹回初始 50%-100%
+let zoomWindow = null
 
 // ---------- 令牌读取（canvas 不认 CSS 变量名） ----------
 // 缓存键带上当前主题：SPA 内切换深浅色后不刷新页面，旧缓存会把浅色值带回深色图上。
@@ -175,6 +179,7 @@ const disposeChart = () => {
     chart.dispose()
     chart = null
   }
+  zoomWindow = null
   window.removeEventListener('resize', handleResize)
 }
 
@@ -567,6 +572,98 @@ const loadStockRead = async (sym) => {
   }
 }
 
+// ---------- 实时刷新（2026-10-15）：SSE 即时补丁 + 盘中 30 秒轮询 ----------
+// 之前页面只在挂载时拉一次数据，之后永远不动——盘中最新的那根蜡烛是死的。
+// 两条腿：① quoteBus 的行情 SSE（约 15 秒一批，图表页此前根本没接）做即时价格补丁；
+// ② 交易时段每 30 秒整段重取（分钟缓存 30s、日线 25s，节奏对齐服务端）重画最后一根。
+const currentData = ref([])
+const currentSym = ref('')
+let liveTimer = null
+
+const inMarketHours = () => {
+  const d = new Date()
+  const day = d.getDay()
+  if (day === 0 || day === 6) return false
+  const m = d.getHours() * 60 + d.getMinutes()
+  return (m >= 555 && m <= 690) || (m >= 780 && m <= 905)   // 09:15-11:30 / 13:00-15:05，含缓冲
+}
+
+/** SSE 即时补丁：只改头牌价与最后一根蜡烛的 close/high/low，不整段重取 */
+const patchLivePrice = (price) => {
+  if (!Number.isFinite(price) || !currentData.value.length) return
+  const last = currentData.value[currentData.value.length - 1]
+  last.close = price
+  last.high = Math.max(Number(last.high) || price, price)
+  last.low = Math.min(Number(last.low) || price, price)
+  if (stockInfo.value) stockInfo.value.price = price
+  lastUpdate.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+  if (chart && !loading.value) renderChart(currentSym.value, currentData.value)
+}
+
+/** SSE 批次里找本页标的的条目（键是带市场前缀的完整代码，做精确/后缀两级匹配） */
+const liveEntryOf = (sym) => {
+  if (!sym) return undefined
+  const key = String(sym).toUpperCase()
+  const direct = quoteBus.quotes[key]
+  if (direct) return direct
+  const digits = key.slice(-6)
+  for (const [k, v] of Object.entries(quoteBus.quotes)) {
+    if (String(k).toUpperCase().endsWith(digits)) return v
+  }
+  return undefined
+}
+
+const livePriceOf = (sym) => liveEntryOf(sym)?.price
+
+/** 盘中轮询：整段重取后原位重画（chart 已在，renderChart 只 setOption） */
+const refreshLive = async () => {
+  const sym = symbol.value
+  if (loading.value || !chart || !sym) return
+  try {
+    let list = []
+    if (period.value === 'minute') {
+      const res = await getMinuteKline(sym, minutePeriod.value).catch(() => null)
+      list = (Array.isArray(res?.data) ? res.data : []).map((r) => ({
+        date: r.date, open: r.open, close: r.close, high: r.high, low: r.low, volume: r.volume,
+      }))
+    } else {
+      const res = await getHistory(sym, 0, 1000, period.value).catch(() => null)
+      list = res?.data?.content || []
+    }
+    if (symbol.value !== sym || !list.length) return   // 切股竞态：丢弃旧响应
+    const data = list.slice(-range.value)
+    currentData.value = data
+    currentSym.value = sym
+    indicators.value = calcIndicators(data)
+    // 日线的"今日收盘"就是最新价：头部价格跟着每轮刷新走（SSE 焦点价优先，见 patchLivePrice）
+    if (period.value !== 'minute' && data.length) {
+      const lastClose = Number(data[data.length - 1].close)
+      if (Number.isFinite(lastClose)) {
+        stockInfo.value = stockInfo.value || {}
+        stockInfo.value.price = lastClose
+      }
+    }
+    lastUpdate.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+    renderChart(sym, data)
+  } catch {
+    // 轮询失败静默：下一轮再来，不打断页面
+  }
+}
+
+const startLive = () => {
+  stopLive()
+  liveTimer = setInterval(() => { if (inMarketHours()) refreshLive() }, 30_000)
+}
+const stopLive = () => {
+  if (liveTimer) { clearInterval(liveTimer); liveTimer = null }
+}
+
+// SSE 补丁：盯"到货时刻"（entry.at）而不是价格值 —— 焦点票 3 秒一批的推送，
+// 即使价格暂时没动也让「更新 HH:MM:SS」跳一下。行情页"活着"的观感一半来自时间戳在走。
+watch(() => liveEntryOf(symbol.value)?.at, () => {
+  if (inMarketHours()) patchLivePrice(livePriceOf(symbol.value))
+})
+
 // K 线主链路竞态防护（切股/切周期/切范围并发时旧响应不得覆盖新图）
 let loadDataSeq = 0
 
@@ -643,6 +740,8 @@ const loadData = async (sym) => {
     }
 
     indicators.value = calcIndicators(data)
+    currentData.value = data
+    currentSym.value = sym
     lastUpdate.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
 
     await nextTick()
@@ -780,6 +879,18 @@ const renderChart = (sym, data) => {
   // 事件标记挂第一条 series（主图）
   if (series.length) series[0].markLine = buildMarkLine()
 
+  // 重画前先带走用户当前缩放窗口（chart 已在 = 这是补丁式重画，不是新图）
+  if (chart) {
+    try {
+      const dz = chart.getOption().dataZoom
+      if (Array.isArray(dz) && dz.length && dz[0].start != null && dz[0].end != null) {
+        zoomWindow = { start: dz[0].start, end: dz[0].end }
+      }
+    } catch { /* 首画前没有可读的窗口，走默认 */ }
+  }
+  const zoomStart = zoomWindow?.start ?? 50
+  const zoomEnd = zoomWindow?.end ?? 100
+
   chart.setOption({
     title: {
       text: `${stockName} ${subPeriodLabel}`,
@@ -798,19 +909,26 @@ const renderChart = (sym, data) => {
       confine: true,
     },
     legend: { data: legend, top: 46, textStyle: { fontSize: 12, color: token('--ink-2', '#575e6e') } },
+    // 垂直分区从底往上锚定，各层间隙为固定像素，任何画布高度下都不互相入侵：
+    // 滑块 [H-24,H-6] → 日期标签行 [H-48,H-24] → 成交量 [76%, H-52] → 主图 [82, 74%]。
+    // （旧版主图 height:58% + 成交量 top:76% 在矮视口下两区直接重叠，
+    //   主图的日期标签被画进成交量柱中间——就是"标签挡柱子"的来源。）
     grid: [
-      { left: 50, right: 20, top: 82, height: '58%' },
-      { left: 50, right: 20, top: '76%', height: '12%' },
+      { left: 50, right: 20, top: 82, bottom: '26%' },
+      { left: 50, right: 20, top: '76%', bottom: 52 },
     ],
     xAxis: [
       { type: 'category', data: dates, scale: true, boundaryGap: false,
         axisLine: { onZero: false, lineStyle: { color: token('--border', '#e3e6ec') } },
-        axisLabel: { formatter: (v) => v.substring(5), fontSize: 11, color: token('--ink-3', '#8b92a5') },
+        // 日期只在图底显示一次（挂在成交量轴上）；主图轴只留底线做分区
+        axisLabel: { show: false },
         splitLine: { show: false },
         axisPointer: { z: 100 } },
       { type: 'category', gridIndex: 1, data: dates, scale: true, boundaryGap: false,
         axisLine: { onZero: false, lineStyle: { color: token('--border', '#e3e6ec') } },
-        axisTick: { show: false }, axisLabel: { show: false }, splitLine: { show: false } },
+        axisTick: { show: false },
+        axisLabel: { formatter: (v) => v.substring(5), fontSize: 11, color: token('--ink-3', '#8b92a5') },
+        splitLine: { show: false } },
     ],
     yAxis: [
       { scale: true, splitArea: { show: true, areaStyle: { color: [token('--bg', '#f5f6f8'), 'transparent'] } },
@@ -820,9 +938,9 @@ const renderChart = (sym, data) => {
         axisLine: { show: false }, axisTick: { show: false }, splitLine: { show: false } },
     ],
     dataZoom: [
-      { type: 'inside', xAxisIndex: [0, 1], start: 50, end: 100,
+      { type: 'inside', xAxisIndex: [0, 1], start: zoomStart, end: zoomEnd,
         moveOnMouseMove: false, zoomOnMouseWheel: true },
-      { show: true, xAxisIndex: [0, 1], type: 'slider', top: '94%', height: 18, start: 50, end: 100,
+      { show: true, xAxisIndex: [0, 1], type: 'slider', bottom: 6, height: 18, start: zoomStart, end: zoomEnd,
         handleStyle: { color: token('--accent', '#2153d6') } },
     ],
     series: [
@@ -869,10 +987,15 @@ onMounted(() => {
   narrowMedia?.addEventListener('change', onNarrowChange)
   void market.load()
   loadData(route.params.symbol)
+  quoteBus.connect()
+  quoteBus.setFocus(route.params.symbol)
+  startLive()
 })
 
 onUnmounted(() => {
   stopEventPolling()
+  stopLive()
+  quoteBus.setFocus('')
   const container = chartRef.value
   container?.removeEventListener('mousemove', onChartMouseMove)
   container?.removeEventListener('mouseleave', onChartMouseLeave)
@@ -882,6 +1005,7 @@ onUnmounted(() => {
 })
 
 watch(() => route.params.symbol, (newSym) => {
+  quoteBus.setFocus(newSym)
   if (newSym && newSym.toUpperCase() !== symbol.value) {
     symbol.value = newSym.toUpperCase()
     loadData(symbol.value)
@@ -980,7 +1104,8 @@ const macdColor = (h) => h == null
     </div>
 
     <!-- 单列（手机）：图 → 事件 → 指标；桌面两列：图/指标在左、事件在右 -->
-    <div class="grid gap-3 [grid-template-areas:'notice''chart''events''indicators'] [grid-template-columns:minmax(0,1fr)] lg:[grid-template-areas:'notice_notice''chart_events''indicators_events'] lg:w-[calc(1200px+1.5rem)] lg:max-w-none lg:[grid-template-columns:minmax(0,1fr)_360px] lg:items-start">
+    <!-- 宽度跟随壳层容器（1200px 含内边距）：旧版强制 1224px 会把右栏顶出视口 48px，整页出现横向滚动 -->
+    <div class="grid gap-3 [grid-template-areas:'notice''chart''events''indicators'] [grid-template-columns:minmax(0,1fr)] lg:[grid-template-areas:'notice_notice''chart_events''indicators_events'] lg:[grid-template-columns:minmax(0,1fr)_360px] lg:items-start">
       <!-- 休市口径提示：跨整幅宽度 -->
       <p
         v-if="marketNotice"

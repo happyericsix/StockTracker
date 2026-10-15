@@ -29,12 +29,7 @@ export const getPaperTraces = (id, limit = 50) =>
 // 净值曲线：点 + 由同一份点算出的汇总（回撤、空仓比例、相对买入持有的超额）
 export const getPaperEquity = (id, days = 120) =>
   request.get(`/strategies/${id}/paper/equity`, { params: { days } })
-// 决策来源：rule（策略 DSL）/ agent（多角色委员会）。会改变历史解释依据，所以是显式动作，
-// 生效日由后端记录 —— 界面只负责发起，不自己算"从哪天开始"。
-// 切到 agent 且模拟盘在跑时，后端会在这次请求里同步开第一次委员会（启动即思考），
-// 8 次串行 LLM 调用与启动模拟盘同一条纪律：与 startPaper 同步放宽到 300s。
-export const switchDecisionMode = (id, mode) =>
-  request.post(`/strategies/${id}/decision-mode`, null, { params: { mode }, timeout: 300000 })
+// 决策来源已统一为 agent（2026-10-15）：切换接口下线，规则引擎保留为策略定义与降级底座
 // 预期：到 deadline 为止，某个账户层面的度量是否 ≥ 门槛（到期由每日结算自动回填）
 export const getExpectation = (id) => request.get(`/strategies/${id}/expectation`)
 export const registerExpectation = (id, { metric, threshold, horizonDays }) =>
@@ -45,6 +40,18 @@ export const registerExpectation = (id, { metric, threshold, horizonDays }) =>
 // 挂在 /paper 下（不是 /strategies/{id}/...）：它是跨策略的读视图，
 // 也是"这个功能在哪"的顶级入口 —— 原来必须先点进某条策略才看得到任何东西。
 export const getPaperOverview = () => request.get('/paper/overview')
+
+// ---- 策略修订闭环（P2，2026-10-15）----
+// 健康信号（确定性，无 LLM）；生成 = 1 次提案 LLM + 截至当天的时间衰减加权回测门禁。
+// 生成较慢（模型 + 两次回测），超时放宽到 150s（后端 120s + 余量）。
+export const getRevisionHealth = (id) => request.get(`/strategies/${id}/revision/health`)
+export const generateRevision = (id) =>
+  request.post(`/strategies/${id}/revisions/generate`, null, { timeout: 150000 })
+export const getRevisions = (id) => request.get(`/strategies/${id}/revisions`)
+export const approveRevision = (id, revisionId, note) =>
+  request.post(`/strategies/${id}/revisions/${revisionId}/approve`, { note })
+export const rejectRevision = (id, revisionId, note) =>
+  request.post(`/strategies/${id}/revisions/${revisionId}/reject`, { note })
 
 // ---- 只读分享（token 即凭证；重新生成=旧链接失效，删除=下线） ----
 export const enableShare = (id) => request.post(`/strategies/${id}/share`)

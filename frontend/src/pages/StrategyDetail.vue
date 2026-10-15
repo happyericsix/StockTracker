@@ -17,8 +17,10 @@ import * as echarts from 'echarts'
 import {
   listStrategies, runBacktest, getStrategyDiagnostic, startPaper, stopPaper,
   getPaperAccount, getPaperTrades, getPaperTraces, getPaperEquity,
-  switchDecisionMode, getExpectation, registerExpectation, getPaperOverview,
+  getExpectation, registerExpectation, getPaperOverview,
   getStrategyJournal, enableShare, disableShare,
+  getRevisions, getRevisionHealth, generateRevision,
+  approveRevision, rejectRevision,
 } from '../api/strategy.js'
 import { getHistory } from '../api/stock.js'
 import { dirTextClass } from '../utils/format.js'
@@ -46,8 +48,6 @@ const diagnosticData = ref(null)
 const diagnosticError = ref('')
 const backtestChartRef = ref(null)
 let backtestChart = null
-const modeLoading = ref(false)
-const modeError = ref('')
 const expectation = ref(null)
 const expectationError = ref('')
 const expectationLoading = ref(false)
@@ -573,21 +573,6 @@ function safeParseConfig(json) {
   }
 }
 
-/** 切换决策来源：会改变历史解释依据，走显式接口、后端记录生效日 */
-const changeDecisionMode = async (mode) => {
-  if (mode === decisionMode.value) return
-  modeLoading.value = true
-  modeError.value = ''
-  try {
-    await switchDecisionMode(strategy.value.id, mode)
-    await loadDetail()
-  } catch (e) {
-    modeError.value = errorMessage(e, '切换决策来源失败')
-  } finally {
-    modeLoading.value = false
-  }
-}
-
 /** 痕迹：回答"为什么今天没成交"。失败也要说出来，留白会被读成"什么都没发生" */
 const loadTraces = async () => {
   tracesError.value = ''
@@ -742,7 +727,91 @@ const copyShare = async () => {
   }
 }
 
-onMounted(loadDetail)
+// ---- 策略修订闭环（P2，2026-10-15）：健康信号 → 提案 → 人审批 ----
+// 提案的证据是「截至当天、按交易日指数衰减加权」的回测对比（半衰期 60 天），
+// 未过门禁的提案也展示（否决理由透明），但不给批准按钮。
+const revisionHealth = ref([])
+const revisions = ref([])
+const revisionGenerating = ref(false)
+const revisionError = ref('')
+const revisionNotice = ref('')
+const revisionActing = ref(false)
+
+const pendingRevision = computed(() =>
+  revisions.value.find((r) => r.status === 'pending') || null)
+const historyRevisions = computed(() =>
+  revisions.value.filter((r) => r.status !== 'pending').slice(0, 5))
+
+const parseJsonField = (text) => {
+  if (!text) return null
+  try { return JSON.parse(text) } catch { return null }
+}
+const pendingProposal = computed(() => parseJsonField(pendingRevision.value?.proposalJson))
+const pendingEvidence = computed(() => parseJsonField(pendingRevision.value?.evidenceJson))
+const pendingHealth = computed(() => parseJsonField(pendingRevision.value?.healthJson))
+
+const signalTone = (level) => (level === 'warn' ? 'warn' : level === 'ok' ? 'down' : 'neutral')
+
+const revisionStatusText = { approved: '已批准', rejected: '已拒绝', superseded: '被顶替' }
+
+const loadRevisions = async () => {
+  if (!strategy.value) return
+  try {
+    const [revRes, healthRes] = await Promise.all([
+      getRevisions(strategy.value.id),
+      getRevisionHealth(strategy.value.id),
+    ])
+    revisions.value = Array.isArray(revRes.data) ? revRes.data : []
+    revisionHealth.value = Array.isArray(healthRes.data) ? healthRes.data : []
+  } catch {
+    // 健康信号是软失败：拿不到就只留生成入口
+    revisionHealth.value = []
+  }
+}
+
+const generateProposal = async () => {
+  if (!strategy.value) return
+  revisionGenerating.value = true
+  revisionError.value = ''
+  revisionNotice.value = ''
+  try {
+    await generateRevision(strategy.value.id)
+    revisionNotice.value = '提案已生成（含截至当天的加权回测证据），请审批。'
+    await loadRevisions()
+  } catch (e) {
+    revisionError.value = errorMessage(e, '提案生成失败：模型或行情服务暂不可用，稍后再试')
+  } finally {
+    revisionGenerating.value = false
+  }
+}
+
+/** 批准/拒绝后重载：批准会改 configJson（口径线右移），详情与修订列表都要刷新 */
+const actOnRevision = async (action) => {
+  const revision = pendingRevision.value
+  if (!revision || !strategy.value) return
+  revisionActing.value = true
+  revisionError.value = ''
+  revisionNotice.value = ''
+  try {
+    if (action === 'approve') {
+      await approveRevision(strategy.value.id, revision.id)
+      revisionNotice.value = '已批准并应用：策略配置已更新（净值图会画出口径分界线）。'
+    } else {
+      await rejectRevision(strategy.value.id, revision.id)
+      revisionNotice.value = '已拒绝该提案。'
+    }
+    await Promise.all([loadDetail(), loadRevisions()])
+  } catch (e) {
+    revisionError.value = errorMessage(e, '操作失败，请稍后重试')
+  } finally {
+    revisionActing.value = false
+  }
+}
+
+onMounted(async () => {
+  await loadDetail()
+  loadRevisions()
+})
 onUnmounted(() => {
   if (backtestChart) {
     backtestChart.dispose()
@@ -863,26 +932,140 @@ onUnmounted(() => {
         <pre class="num m-0 max-h-[400px] overflow-auto whitespace-pre-wrap break-words rounded-lg bg-sidebar p-3.5 font-mono text-[12px] leading-relaxed text-sidebar-ink">{{ prettyConfig }}</pre>
       </section>
 
-      <!-- 决策来源 -->
+      <!-- 决策来源区块已于 2026-10-15 移除：决策者统一为多角色委员会（agent）。
+           规则 DSL 仍是策略定义与确定性降级底座，不再作为可切换的独立模式。 -->
+
+      <!-- 策略修订（P2）：健康信号 → 结构化提案（截至当天、近期加权的回测证据）→ 人审批 -->
       <section class="mb-4 rounded-xl border border-border bg-surface p-5">
         <h3 class="mb-2 flex items-center gap-1.5 text-[15px] font-semibold text-ink">
-          决策来源
+          策略修订
           <InfoTip
-            label="决策来源说明"
-            text="换来源后，净值曲线从生效日分成两段：两段不是同一个决策者做出来的，不能当一条连续的业绩读。委员会有事才开会（规则信号、波动骤增、太久没看、首次决策），开一次约 8 次模型调用、2 万 token；没事的日子不花钱。agent 模式的开仓与一般平仓只在 15:30 结算时决策；止损类卖出是硬风控，盘中直接执行，不受授权限制。"
+            label="策略修订说明"
+            text="委员会跑了一段时间后，可基于客观健康信号（决策命中率、可验证预期、回撤）生成参数修订提案。每份提案都附带截至当天的回测对比：数据窗口截到最新一根 K 线，并按交易日指数衰减加权（半衰期 60 天，越近权重越高），不再用一段固定旧数据一票定夺。提案需人工批准才生效，应用后净值图会画出口径分界线。"
           />
         </h3>
-        <p class="text-[13px] leading-relaxed text-ink-2">
-          当前由 <strong class="text-ink">{{ decisionModeLabel(decisionMode) }}</strong> 做决定<template v-if="strategy.decisionModeSince">，自 {{ strategy.decisionModeSince }} 起生效</template>。
-        </p>
-        <p v-if="modeError" class="mt-2 text-[12.5px] text-up" role="alert">{{ modeError }}</p>
-        <div class="mt-3 flex flex-wrap gap-2">
-          <Button size="sm" :variant="!isAgentMode ? 'primary' : 'secondary'" :disabled="modeLoading || !isAgentMode" :loading="modeLoading && !isAgentMode" @click="changeDecisionMode('rule')">
-            {{ isAgentMode ? '切回规则引擎' : '当前：规则引擎' }}
+
+        <!-- 健康信号：确定性代码算的，不是模型说的 -->
+        <div v-if="revisionHealth.length" class="mb-3 flex flex-col gap-1.5">
+          <p
+            v-for="s in revisionHealth"
+            :key="s.key"
+            class="flex items-start gap-2 text-[13px] leading-relaxed"
+            :class="s.level === 'warn' ? 'text-warn' : 'text-ink-2'"
+          >
+            <Badge :tone="signalTone(s.level)">{{ s.level === 'warn' ? '预警' : s.level === 'ok' ? '正常' : '说明' }}</Badge>
+            <span>{{ s.detail }}</span>
+          </p>
+        </div>
+
+        <p v-if="revisionError" class="text-[12.5px] text-up" role="alert">{{ revisionError }}</p>
+        <p v-if="revisionNotice" class="mb-2.5 text-[13px] text-down">{{ revisionNotice }}</p>
+
+        <!-- 待审批提案 -->
+        <div v-if="pendingRevision && pendingProposal" class="rounded-lg border border-border bg-surface-2 p-3.5">
+          <div class="flex flex-wrap items-center gap-2">
+            <Badge :tone="pendingRevision.gatePassed ? 'down' : 'warn'">
+              {{ pendingRevision.gatePassed ? '已过回测门禁' : '未过回测门禁' }}
+            </Badge>
+            <span v-if="pendingEvidence?.window" class="text-[12px] text-ink-3">{{ pendingEvidence.window.note }}</span>
+          </div>
+
+          <p class="mt-2.5 text-[13px] leading-relaxed text-ink">
+            <span class="mr-1.5 text-[12px] text-ink-3">修改理由</span>{{ pendingProposal.rationale }}
+          </p>
+          <p class="mt-1 text-[12.5px] leading-relaxed text-ink-2">
+            <span class="mr-1.5 text-[12px] text-ink-3">预期与代价</span>{{ pendingProposal.expected_effect }}
+          </p>
+
+          <!-- 参数 diff：提案的核心，一行一处改动 -->
+          <div v-if="pendingProposal.diff?.length" class="mt-3 overflow-x-auto">
+            <table class="num w-full min-w-[480px] border-collapse text-[12px]">
+              <thead>
+                <tr class="border-b border-border text-left text-ink-3">
+                  <th class="py-1.5 pr-3 font-medium">参数</th>
+                  <th class="py-1.5 pr-3 font-medium">现值</th>
+                  <th class="py-1.5 font-medium">提案值</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(d, i) in pendingProposal.diff" :key="i" class="border-b border-border/60">
+                  <td class="py-1.5 pr-3 font-mono text-[11.5px] text-ink-2">{{ d.path }}</td>
+                  <td class="py-1.5 pr-3 text-ink-3">{{ JSON.stringify(d.old) }}</td>
+                  <td class="py-1.5 font-medium text-ink">{{ JSON.stringify(d.new) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- 回测证据：全期 + 近期加权并排，口径写明 -->
+          <div v-if="pendingEvidence?.old && pendingEvidence?.new" class="mt-3 overflow-x-auto">
+            <table class="num w-full min-w-[420px] border-collapse text-[12px]">
+              <thead>
+                <tr class="border-b border-border text-left text-ink-3">
+                  <th class="py-1.5 pr-3 font-medium">回测对比（{{ pendingEvidence.window?.start }} ~ {{ pendingEvidence.window?.end }}）</th>
+                  <th class="py-1.5 pr-3 font-medium">现行配置</th>
+                  <th class="py-1.5 font-medium">提案配置</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr class="border-b border-border/60">
+                  <td class="py-1.5 pr-3 text-ink-2">近期加权年化收益（半衰期 {{ pendingEvidence.new.half_life_days }} 日）</td>
+                  <td class="py-1.5 pr-3 text-ink-3">{{ pendingEvidence.old.weighted_daily_return_pct }}%</td>
+                  <td class="py-1.5 font-medium" :class="dirTextClass(pendingEvidence.new.weighted_daily_return_pct - pendingEvidence.old.weighted_daily_return_pct)">
+                    {{ pendingEvidence.new.weighted_daily_return_pct }}%
+                  </td>
+                </tr>
+                <tr class="border-b border-border/60">
+                  <td class="py-1.5 pr-3 text-ink-2">近期最大回撤（近 {{ pendingEvidence.new.recent_window_bars }} 根，占权重 {{ pendingEvidence.new.recent_window_weight_share_pct }}%）</td>
+                  <td class="py-1.5 pr-3 text-ink-3">{{ pendingEvidence.old.weighted_max_drawdown_pct }}%</td>
+                  <td class="py-1.5 font-medium">{{ pendingEvidence.new.weighted_max_drawdown_pct }}%</td>
+                </tr>
+                <tr class="border-b border-border/60">
+                  <td class="py-1.5 pr-3 text-ink-2">全期收益 / 全期最大回撤</td>
+                  <td class="py-1.5 pr-3 text-ink-3">{{ pendingEvidence.old.total_return_pct }}% / {{ pendingEvidence.old.max_drawdown_pct }}%</td>
+                  <td class="py-1.5 font-medium">{{ pendingEvidence.new.total_return_pct }}% / {{ pendingEvidence.new.max_drawdown_pct }}%</td>
+                </tr>
+                <tr class="border-b border-border/60">
+                  <td class="py-1.5 pr-3 text-ink-2">完成交易次数</td>
+                  <td class="py-1.5 pr-3 text-ink-3">{{ pendingEvidence.old.closed_trades }}</td>
+                  <td class="py-1.5 font-medium">{{ pendingEvidence.new.closed_trades }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p class="mt-2.5 text-[12.5px] leading-relaxed" :class="pendingRevision.gatePassed ? 'text-down' : 'text-warn'">
+            门禁结论：{{ pendingEvidence?.reason || (pendingRevision.gatePassed ? '通过' : '未通过') }}
+          </p>
+
+          <div class="mt-3 flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="primary"
+              :loading="revisionActing"
+              :disabled="!pendingRevision.gatePassed"
+              @click="actOnRevision('approve')"
+            >批准并应用</Button>
+            <Button size="sm" :disabled="revisionActing" @click="actOnRevision('reject')">拒绝</Button>
+            <span v-if="!pendingRevision.gatePassed" class="self-center text-[12px] text-ink-3">未过门禁的提案不能批准（近期加权口径下没跑赢现版），可拒绝后重新生成</span>
+          </div>
+        </div>
+
+        <!-- 生成入口 + 历史 -->
+        <div class="mt-3 flex flex-wrap items-center gap-2.5 border-t border-border pt-3">
+          <Button size="sm" variant="primary" :loading="revisionGenerating" :disabled="!!pendingRevision" @click="generateProposal">
+            {{ pendingRevision ? '已有待审批提案' : '生成修订提案' }}
           </Button>
-          <Button size="sm" :variant="isAgentMode ? 'primary' : 'secondary'" :disabled="modeLoading || isAgentMode" :loading="modeLoading && isAgentMode" @click="changeDecisionMode('agent')">
-            {{ isAgentMode ? '当前：多角色委员会' : '切换为多角色委员会' }}
-          </Button>
+          <span class="text-[12px] text-ink-3">1 次模型调用 + 加权回测验证，约需 30~90 秒</span>
+        </div>
+
+        <div v-if="historyRevisions.length" class="mt-2.5 flex flex-col gap-1">
+          <p v-for="r in historyRevisions" :key="r.id" class="num flex flex-wrap items-center gap-2 text-[12px] text-ink-3">
+            <Badge :tone="r.status === 'approved' ? 'down' : 'neutral'">{{ revisionStatusText[r.status] || r.status }}</Badge>
+            <span>{{ formatTime(r.createdAt) }}</span>
+            <span v-if="r.gatePassed === false">未过门禁</span>
+            <span v-if="r.note" class="text-ink-2">{{ r.note }}</span>
+          </p>
         </div>
       </section>
 

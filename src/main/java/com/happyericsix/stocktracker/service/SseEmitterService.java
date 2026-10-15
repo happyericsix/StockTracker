@@ -47,9 +47,29 @@ public class SseEmitterService {
     }
 
     /** 注册一条行情长连接（与消息通道分开：事件名不同、推送方不同、但心跳共用）。 */
-    public SseEmitter registerQuotes(Long userId) {
+    /** 焦点标的注册表（2026-10-15）：图表页正在看的票也进 15 秒刷新批——
+     *  SSE 连接可带 ?focus=，谁在看什么就刷什么，图表页的实时价不再只覆盖自选股。 */
+    private final java.util.concurrent.ConcurrentHashMap<Long, String> quoteFocus = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 当前所有 SSE 订阅者正盯着的标的（去重），价格刷新批把它们带上。 */
+    public java.util.Set<String> quoteFocusSymbols() {
+        return new java.util.HashSet<>(quoteFocus.values());
+    }
+
+    public SseEmitter registerQuotes(Long userId, String focusSymbol) {
+        if (focusSymbol != null && !focusSymbol.isBlank()) {
+            quoteFocus.put(userId, focusSymbol.trim().toUpperCase());
+        } else {
+            quoteFocus.remove(userId);
+        }
         SseEmitter emitter = doRegister(userId, quoteRegistry);
-        log.info("SSE quotes connected: userId={}, online={}", userId, quoteRegistry.get(userId).size());
+        // 断开即解除焦点：不解除的话，没人看的票会一直占着刷新批
+        Runnable clearFocus = () -> quoteFocus.remove(userId);
+        emitter.onCompletion(clearFocus);
+        emitter.onTimeout(clearFocus);
+        emitter.onError(e -> clearFocus.run());
+        log.info("SSE quotes connected: userId={}, focus={}, online={}",
+                userId, quoteFocus.get(userId), quoteRegistry.get(userId).size());
         return emitter;
     }
 

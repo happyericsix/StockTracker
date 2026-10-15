@@ -31,7 +31,6 @@ public class QuoteStreamListener {
     private static final Logger log = LoggerFactory.getLogger(QuoteStreamListener.class);
 
     private final SseEmitterService sseService;
-    private final ObjectMapper mapper = new ObjectMapper();
 
     public QuoteStreamListener(SseEmitterService sseService) {
         this.sseService = sseService;
@@ -44,16 +43,27 @@ public class QuoteStreamListener {
             if (prices == null || prices.isEmpty()) {
                 return;
             }
-            ArrayNode array = mapper.createArrayNode();
-            for (RefreshedPrice price : prices) {
-                ObjectNode node = array.addObject();
-                node.put("symbol", price.symbol());
-                node.put("price", price.currentPrice());
-            }
-            sseService.pushQuotes(array.toString());
+            sseService.pushQuotes(toJson(prices));
         } catch (Exception e) {
             // 旁路：推送挂了只是前端少跳一次数，绝不影响刷新与结算主流程
             log.warn("quote push failed: {}", e.getMessage());
         }
     }
+
+    /**
+     * 推送形状的唯一权威定义（{@code [{symbol, price}]}）。
+     * 焦点快车道（FocusQuoteStreamJob，3 秒一发）与这里共用 —— 改协议必须两处一起变，
+     * 收敛成一个方法就是为了让人找不到"只改一处"的机会。
+     */
+    public static String toJson(List<RefreshedPrice> prices) throws Exception {
+        ArrayNode array = MAPPER.createArrayNode();
+        for (RefreshedPrice price : prices) {
+            ObjectNode node = array.addObject();
+            node.put("symbol", price.symbol());
+            node.put("price", price.currentPrice());
+        }
+        return array.toString();
+    }
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 }

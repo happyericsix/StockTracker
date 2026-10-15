@@ -238,6 +238,103 @@ class MemoryLessonServiceTest {
         assertEquals(1, service.searchLessons(1L, null, "backtest", 5).size());
     }
 
+    // ==================== 记忆白盒：原文 / 句级证据 / 分区（2026-10-15） ====================
+
+    @Test
+    void symptomOriginalSentenceIsKeptBesideNormalizedKey() {
+        when(lessonRepo.save(any(MemoryLesson.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(lessonRepo.countByUserIdAndTaskTypeAndSymptom(any(), anyString(), anyString())).thenReturn(1L);
+
+        service.saveLessons(batch(lesson("backtest", "回测，数据不足。", "换更长周期的标的")));
+
+        ArgumentCaptor<MemoryLesson> captor = ArgumentCaptor.forClass(MemoryLesson.class);
+        verify(lessonRepo).save(captor.capture());
+        // 键去标点小写（计数/匹配），原文带标点保留（给人读）——两者不再互相冒充
+        assertEquals("回测数据不足", captor.getValue().getSymptom());
+        assertEquals("回测，数据不足。", captor.getValue().getSymptomText());
+    }
+
+    @Test
+    void perLessonEvidenceIdsOverrideSessionLevelFallback() {
+        when(lessonRepo.save(any(MemoryLesson.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(lessonRepo.countByUserIdAndTaskTypeAndSymptom(any(), anyString(), anyString())).thenReturn(1L);
+
+        MemoryLessonRequest withRefs = lesson("backtest", "数据不足", "换标的");
+        withRefs.setEvidenceEventIds(List.of(77L, 79L));
+        MemoryLessonRequest withoutRefs = lesson("quote", "取不到行情", "换数据源");
+
+        service.saveLessons(batch(withRefs, withoutRefs));
+
+        ArgumentCaptor<MemoryLesson> captor = ArgumentCaptor.forClass(MemoryLesson.class);
+        verify(lessonRepo, times(2)).save(captor.capture());
+        assertEquals("[77,79]", captor.getAllValues().get(0).getEvidenceEventIds());
+        // 没有句级引用的退回整段会话（来源宁可粗，不能断）
+        assertEquals("[11,12]", captor.getAllValues().get(1).getEvidenceEventIds());
+    }
+
+    @Test
+    void weeklyReflectionSessionKeyDerivesStrategyScope() {
+        assertEquals("strategy:5", MemoryLessonService.scopeOf("weekly-reflection:strategy:5"));
+        assertEquals("chat", MemoryLessonService.scopeOf("1:2026-09-16"));
+        assertEquals("chat", MemoryLessonService.scopeOf(null));
+        // 畸形键（非数字策略号）不当策略域处理
+        assertEquals("chat", MemoryLessonService.scopeOf("weekly-reflection:strategy:abc"));
+
+        when(lessonRepo.save(any(MemoryLesson.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(lessonRepo.countByUserIdAndTaskTypeAndSymptom(any(), anyString(), anyString())).thenReturn(1L);
+        MemoryLessonsRequest reflection = batch(lesson("weekly_reflection", "追高被套", "等回踩"));
+        reflection.setSessionKey("weekly-reflection:strategy:5");
+        service.saveLessons(reflection);
+        ArgumentCaptor<MemoryLesson> captor = ArgumentCaptor.forClass(MemoryLesson.class);
+        verify(lessonRepo).save(captor.capture());
+        assertEquals("strategy:5", captor.getValue().getScope());
+    }
+
+    @Test
+    void searchFiltersByStrategyScopeSoStrategiesDoNotCrossRead() {
+        MemoryLesson s1 = stored(1L, "weekly_reflection", "追高被套", MemoryLesson.STATUS_ACTIVE);
+        s1.setScope("strategy:1");
+        MemoryLesson s2 = stored(2L, "weekly_reflection", "割在地板上", MemoryLesson.STATUS_ACTIVE);
+        s2.setScope("strategy:2");
+        MemoryLesson chat = stored(3L, "backtest", "数据不足", MemoryLesson.STATUS_ACTIVE);
+        chat.setScope("chat");
+        when(lessonRepo.findByUserIdOrderByIdDesc(1L)).thenReturn(List.of(s1, s2, chat));
+        when(lessonRepo.countByUserIdAndTaskTypeAndSymptom(any(), anyString(), anyString())).thenReturn(1L);
+
+        // 策略 1 的委员会只看到自己的教训 —— 用户点名要治的"多模拟盘记忆错乱"
+        List<Map<String, Object>> found = service.searchLessons(1L, null, null, "strategy:1", 5);
+        assertEquals(1, found.size());
+        assertEquals(1L, found.get(0).get("id"));
+        assertEquals("strategy:1", found.get(0).get("scope"));
+
+        // 不过滤时全量（记忆页展示用）
+        assertEquals(3, service.searchLessons(1L, null, null, 5).size());
+    }
+
+    @Test
+    void outputExposesOriginalSymptomContextAndEvidence() {
+        MemoryLesson lesson = stored(1L, "backtest", "回测数据不足", MemoryLesson.STATUS_PENDING);
+        lesson.setSymptomText("回测，数据不足。");
+        lesson.setScope("strategy:1");
+        lesson.setContext("{\"标的\":\"600519\"}");
+        lesson.setAttempts("[\"直接重跑\",\"仍然失败\"]");
+        lesson.setEvidenceEventIds("[11,13]");
+        when(lessonRepo.findByUserIdOrderByIdDesc(1L)).thenReturn(List.of(lesson));
+        when(lessonRepo.countByUserIdAndTaskTypeAndSymptom(1L, "backtest", "回测数据不足")).thenReturn(1L);
+
+        List<Map<String, Object>> found = service.listForUser(1L, 10);
+
+        Map<String, Object> item = found.get(0);
+        // 展示用原文，不是规范化键
+        assertEquals("回测，数据不足。", item.get("symptom"));
+        assertEquals("回测，数据不足。", item.get("symptomRaw"));
+        assertEquals("strategy:1", item.get("scope"));
+        assertEquals(Map.of("标的", "600519"), item.get("context"));
+        assertEquals(List.of("直接重跑", "仍然失败"), item.get("attempts"));
+        // Jackson 把小数字解析成 Integer（不是 Long）——断言按内容比
+        assertEquals(List.of(11, 13), item.get("evidenceEventIds"));
+    }
+
     @Test
     void emptyInputsReturnNothing() {
         assertTrue(service.searchLessons(null, "x", null, 5).isEmpty());

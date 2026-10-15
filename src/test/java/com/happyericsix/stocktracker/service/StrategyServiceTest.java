@@ -283,34 +283,20 @@ class StrategyServiceTest {
      * <p>重复设成同一个模式是空操作：多广播一次就会多开一次会（多花一次 LLM 往返），
      * 而"确认一下"不该有任何副作用 —— 生效日也不许刷新（否则分界点往后漂）。
      */
+    /** 2026-10-15：切换接口已下线（决策来源统一为 agent）——调用必须被明确拒绝。 */
     @Test
-    void switchingDecisionModeBroadcastsOnlyOnActualChange() {
+    void switchingDecisionModeIsRejectedForGood() {
         User owner = User.builder().id(1L).username("alice")
                 .password("secret").email("alice@example.com").build();
         Strategy strategy = Strategy.builder()
                 .id(42L).name("MA cross").symbol("600519").configJson("{}")
-                .user(owner).paperEnabled(true).decisionMode("rule").build();
-
+                .user(owner).paperEnabled(true).decisionMode("agent").build();
         when(userRepository.findByUsername("alice")).thenReturn(Optional.of(owner));
         when(strategyRepository.findByIdAndUserId(42L, 1L)).thenReturn(Optional.of(strategy));
-        when(strategyRepository.save(any(Strategy.class)))
-                .thenAnswer(invocation -> invocation.getArgument(0));
 
-        strategyService.switchDecisionMode("alice", 42L, "agent");
-
-        ArgumentCaptor<Object> captor = ArgumentCaptor.forClass(Object.class);
-        verify(eventPublisher, times(1)).publishEvent(captor.capture());
-        DecisionModeSwitchedEvent event = (DecisionModeSwitchedEvent) captor.getValue();
-        assertEquals(42L, event.strategyId());
-        assertEquals("agent", event.mode());
-        assertTrue(event.paperEnabled());
-
-        // 再"切"一次同样的模式：不广播、不刷新生效日
-        strategyService.switchDecisionMode("alice", 42L, "agent");
-        verify(eventPublisher, times(1)).publishEvent(any(Object.class));
-        assertNotNull(strategy.getDecisionModeSince());
-        LocalDate since = strategy.getDecisionModeSince();
-        strategyService.switchDecisionMode("alice", 42L, "agent");
-        assertEquals(since, strategy.getDecisionModeSince());
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> strategyService.switchDecisionMode("alice", 42L, "rule"));
+        assertTrue(ex.getMessage().contains("统一为多角色委员会"));
+        verify(eventPublisher, never()).publishEvent(any(Object.class));
     }
 }

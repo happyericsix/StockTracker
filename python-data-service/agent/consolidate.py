@@ -84,16 +84,20 @@ SUMMARY_SYSTEM_PROMPT = """你是对话记忆整理器。把一段"用户 × 股
   "entities": {"symbols": ["600519"], "strategies": ["20日均线上穿60日"]},
   "facts": [
     {"subject": "user", "predicate": "stop_loss_pct", "object": "5",
-     "fact_type": "constraint", "confidence": 0.9, "time_hint": ""}
+     "fact_type": "constraint", "confidence": 0.9, "time_hint": "", "source_refs": [3]}
   ],
   "lessons": [
     {"task_type": "backtest", "symptom": "回测提示历史数据不足",
      "attempts": ["直接用默认参数重跑", "仍然失败"],
      "resolution": "先取更长周期标的的历史再回测",
      "reusable_rule": "回测前先确认历史条数≥20，不足就先换标的或周期",
-     "confidence": 0.7}
+     "confidence": 0.7, "evidence_refs": [4, 6]}
   ]
 }
+
+source_refs / evidence_refs（记忆可回溯的关键）：这条 fact/lesson 依据的是对话的**哪几行**，
+填行号数组（行号是对话记录里 [n] 的 n）。依据跨多行就都写上；整段对话都不相关时给空数组。
+不要乱引 —— 用户会点开"查看来源"亲手核对。
 
 facts 是"值得跨会话记住的原子事实"，只在用户**明确说过**时才写：
 - subject：关于用户自己写 user；关于某只股票写它的代码（如 600519）；关于某策略写 strategy:名称
@@ -156,8 +160,16 @@ def _clip(text, limit):
     return text if len(text) <= limit else text[:limit] + "…"
 
 
-def _build_dialog(events: list) -> tuple[str, list, list]:
-    """把账本事件渲染成提示词里的对话文本，返回 (文本, 参与的事件 id, 时间戳列表)。
+def _build_dialog(events: list) -> tuple[str, list, list, list]:
+    """把账本事件渲染成提示词里的对话文本。
+
+    返回 (文本, 参与的事件 id, 时间戳列表, 每行对应的事件 id)。
+
+    <h3>行号与 line_ids（2026-10-15 记忆白盒）</h3>
+    每行前面带 `[n]` 序号，且 `line_ids[n-1]` 是**这一行**的事件 id（无 id 的行为 None）。
+    LLM 在输出 facts/lessons 时用 `source_refs` / `evidence_refs` 引用行号，
+    这里按行号精确映射回事件 id —— 让"这条记忆依据的是哪句话"可以从会话级细化到句级。
+    序号与 line_ids 的对齐是回溯正确性的前提：两处任何一处变了，另一处必须跟着变。
 
     <h3>哪些事件**不进**摘要（P4d）</h3>
     摘要会被拿去抽"事实"与"经验"，长期保存。所以进摘要的内容必须满足
@@ -171,6 +183,7 @@ def _build_dialog(events: list) -> tuple[str, list, list]:
     """
     lines: list[str] = []
     used_ids: list = []
+    line_ids: list = []
     timestamps: list[str] = []
 
     for event in events[-MAX_EVENTS:]:
@@ -197,11 +210,15 @@ def _build_dialog(events: list) -> tuple[str, list, list]:
         if occurred:
             timestamps.append(occurred[:19])
 
-        lines.append(f"[{display}] {speaker}{suffix}: {_clip(content, MAX_EVENT_CHARS)}")
-        if event.get("id") is not None:
-            used_ids.append(event.get("id"))
+        # 行号 = 渲染出的第几行（1 起），与 line_ids 严格对齐
+        line_no = len(lines) + 1
+        lines.append(f"[{line_no}] [{display}] {speaker}{suffix}: {_clip(content, MAX_EVENT_CHARS)}")
+        event_id = event.get("id")
+        line_ids.append(event_id)
+        if event_id is not None:
+            used_ids.append(event_id)
 
-    return "\n".join(lines), used_ids, timestamps
+    return "\n".join(lines), used_ids, timestamps, line_ids
 
 
 def _as_str_list(value, limit):
@@ -219,17 +236,17 @@ def consolidate_session(user_id, session_key) -> dict:
     if len(events) < MIN_EVENTS_FOR_RECAP:
         return {"skipped": f"only {len(events)} events"}
 
-    dialog, source_event_ids, timestamps = _build_dialog(events)
+    dialog, source_event_ids, timestamps, line_ids = _build_dialog(events)
     if not dialog.strip():
         return {"skipped": "empty dialog"}
 
     messages = [
         {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
-        {"role": "user", "content": f"会话日期：{session_key}\n\n对话记录：\n{dialog}\n\n只输出 JSON。"},
+        {"role": "user", "content": f"会话日期：{session_key}\n\n对话记录（每行开头 [n] 是行号，引用时用行号）：\n{dialog}\n\n只输出 JSON。"},
     ]
 
     try:
-        choice = llm_service.chat_completion(messages, temperature=0.1, max_tokens=800)
+        choice = llm_service.chat_completion(messages, temperature=0.1, max_tokens=900)
     except Exception as exc:  # noqa: BLE001
         logger.warning("会话摘要 LLM 调用失败 session=%s: %s", session_key, exc)
         return {"error": "llm unavailable"}
@@ -265,8 +282,9 @@ def consolidate_session(user_id, session_key) -> dict:
 
     # 事实层：同一次 LLM 调用里顺带抽出来（不额外花钱），规范化后交给 Java 判定取代关系。
     # 这一步失败不影响摘要已落库 —— 记忆是增强功能，不能因为事实写失败就把摘要也回滚了。
-    fact_results = _save_facts(user_id, session_key, parsed.get("facts"), source_event_ids)
-    lesson_results = _save_lessons(user_id, session_key, parsed.get("lessons"), source_event_ids)
+    # line_ids 把 LLM 引用的行号映射成具体事件 id（记忆白盒：来源到句级，不再只有"整段会话"）。
+    fact_results = _save_facts(user_id, session_key, parsed.get("facts"), source_event_ids, line_ids)
+    lesson_results = _save_lessons(user_id, session_key, parsed.get("lessons"), source_event_ids, line_ids)
 
     # 语料变了，语义索引要失效：否则用户这一轮刚改的口令，下一轮语义召回还用旧向量
     try:
@@ -289,10 +307,11 @@ def consolidate_session(user_id, session_key) -> dict:
     }
 
 
-def _save_lessons(user_id, session_key, raw_lessons, source_event_ids) -> list:
+def _save_lessons(user_id, session_key, raw_lessons, source_event_ids, line_ids=None) -> list:
     """规范化并写入经验（一律 pending 落库）。失败只记日志。"""
     try:
-        normalized = lessons_mod.normalize(raw_lessons, source_event_ids=source_event_ids)
+        normalized = lessons_mod.normalize(raw_lessons, source_event_ids=source_event_ids,
+                                           line_ids=line_ids)
     except Exception as exc:  # noqa: BLE001
         logger.warning("经验规范化失败 session=%s: %s", session_key, exc)
         return []
@@ -314,10 +333,11 @@ def _save_lessons(user_id, session_key, raw_lessons, source_event_ids) -> list:
     return items
 
 
-def _save_facts(user_id, session_key, raw_facts, source_event_ids) -> list:
+def _save_facts(user_id, session_key, raw_facts, source_event_ids, line_ids=None) -> list:
     """规范化并写入事实，返回 Java 侧的处置结果（created / superseded / unchanged）。"""
     try:
-        normalized = facts_mod.normalize(raw_facts, now=_now(), source_event_ids=source_event_ids)
+        normalized = facts_mod.normalize(raw_facts, now=_now(), source_event_ids=source_event_ids,
+                                         line_ids=line_ids)
     except Exception as exc:  # noqa: BLE001
         logger.warning("事实规范化失败 session=%s: %s", session_key, exc)
         return []

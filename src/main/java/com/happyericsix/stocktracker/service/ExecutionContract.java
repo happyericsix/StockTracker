@@ -146,6 +146,9 @@ public final class ExecutionContract {
      */
     public static final String SKIP_PORTFOLIO_HALTED = "portfolio_halted";
 
+    /** 单 bar 成交量参与率不够吃下一手：流动性约束（模拟"大单推价"的冲击成本）。 */
+    public static final String SKIP_VOLUME_CAPPED = "volume_capped";
+
     // ---------- 归一与版本 ----------
     public static final String UNKNOWN_PREFIX = "unknown_";
     public static final int SNAPSHOT_SCHEMA_VERSION = 1;
@@ -201,7 +204,8 @@ public final class ExecutionContract {
             SKIP_AGENT_NO_NEW_INFORMATION, SKIP_ALREADY_TRADED_TODAY,
             SKIP_AWAITING_AUTHORIZATION, SKIP_OUTSIDE_AUTHORIZATION,
             SKIP_AGENT_INTRADAY_DISABLED, SKIP_WATCH_HOLD,
-            SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED, SKIP_PORTFOLIO_HALTED);
+            SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED, SKIP_PORTFOLIO_HALTED,
+            SKIP_VOLUME_CAPPED);
 
     /** 结算类型 → 成交价口径。**唯一的映射处**（Python 侧同名映射）。 */
     public static final Map<String, String> FILL_BASIS_BY_SETTLEMENT = Map.of(
@@ -236,6 +240,9 @@ public final class ExecutionContract {
     public static String normalizeDecisionMode(String raw) {
         String text = raw == null ? "" : raw.trim();
         if (text.isEmpty()) {
+            // 空值按 rule 兼容读取（2026-10-15 之前的存量行/单测夹具语义）。
+            // 产品面已无 rule 模式：新策略在创建时显式写 agent（见 StrategyService），
+            // 存量 rule/null 由数据迁移统一为 agent；内部规则机制保留为降级底座。
             return DECISION_MODE_RULE;
         }
         return normalize(text, DECISION_MODES);

@@ -94,11 +94,18 @@ public class MemoryLessonService {
                     .sessionKey(request.getSessionKey())
                     .taskType(taskType)
                     .symptom(symptom)
+                    // 原文与键分离（记忆白盒）：symptom 是去标点小写的规范化键（计数/匹配用），
+                    // symptomText 保留 LLM 原句给用户读。历史行为 null 时前端回退 symptom。
+                    .symptomText(clip(item.getSymptom(), 200))
+                    .scope(scopeOf(request.getSessionKey()))
                     .context(toJson(item.getContext()))
                     .attempts(toJson(item.getAttempts()))
                     .resolution(clip(item.getResolution(), 1000))
                     .reusableRule(clip(item.getReusableRule(), 500))
-                    .evidenceEventIds(toJsonIds(request.getEvidenceEventIds()))
+                    // 句级证据优先（LLM 引用的行号已在 Python 侧映射成具体事件 id），
+                    // 没有就退回请求级的整段会话 id —— 来源宁可粗，不能断
+                    .evidenceEventIds(toJsonIds(!isEmpty(item.getEvidenceEventIds())
+                            ? item.getEvidenceEventIds() : request.getEvidenceEventIds()))
                     // 一律 pending：经验要经过人审核才会变成"可信做法"，
                     // 否则被污染的一条经验会持续影响后面所有对话（轨迹投毒）
                     .status(MemoryLesson.STATUS_PENDING)
@@ -134,6 +141,26 @@ public class MemoryLessonService {
         return item.getConfidence() == null || item.getConfidence() >= MIN_CONFIDENCE;
     }
 
+    private static boolean isEmpty(List<?> list) {
+        return list == null || list.isEmpty();
+    }
+
+    /**
+     * 记忆分区推导（2026-10-15）：从 sessionKey 前缀判断这条经验属于哪个域。
+     * {@code weekly-reflection:strategy:N} → {@code strategy:N}（该策略独享，
+     * 委员会回读只取本策略 scope，多策略不串味）；其余一律 chat。
+     * sessionKey 是写入链路自带的，不需要调用方多传一个参数 —— 少一个能传错的参数。
+     */
+    static String scopeOf(String sessionKey) {
+        if (sessionKey != null && sessionKey.startsWith("weekly-reflection:strategy:")) {
+            String rest = sessionKey.substring("weekly-reflection:strategy:".length()).trim();
+            if (!rest.isEmpty() && rest.chars().allMatch(Character::isDigit)) {
+                return MemoryLesson.strategyScope(Long.parseLong(rest));
+            }
+        }
+        return MemoryLesson.SCOPE_CHAT;
+    }
+
     /** 审核：pending → active（只有人/回归测试能调这个接口）。 */
     @Transactional
     public boolean activate(Long userId, Long lessonId) {
@@ -164,6 +191,18 @@ public class MemoryLessonService {
      * 复发次数参与排序是有意的：同一个坑踩过三次，比只踩过一次更值得提醒。
      */
     public List<Map<String, Object>> searchLessons(Long userId, String query, String taskType, int limit) {
+        return searchLessons(userId, query, taskType, null, limit);
+    }
+
+    /**
+     * 按当前话题挑出可能用得上的经验（scope 版，2026-10-15 记忆分区）。
+     *
+     * <p>scope 非空时只返回该域的经验 —— 委员会回读传 {@code strategy:N}，
+     * 于是"策略 A 的委员会"永远看不到"策略 B 的教训"（多模拟盘不串味）；
+     * scope=null 表示不过滤（记忆页全量展示用）。
+     */
+    public List<Map<String, Object>> searchLessons(Long userId, String query, String taskType,
+                                                   String scope, int limit) {
         if (userId == null) {
             return List.of();
         }
@@ -176,6 +215,9 @@ public class MemoryLessonService {
             }
             if (taskType != null && !taskType.isBlank()
                     && !taskType.trim().equalsIgnoreCase(lesson.getTaskType())) {
+                continue;
+            }
+            if (scope != null && !scope.isBlank() && !scope.equals(lessonScope(lesson))) {
                 continue;
             }
             latestByKey.putIfAbsent(lesson.lessonKey(), lesson);
@@ -209,6 +251,7 @@ public class MemoryLessonService {
             String lowered = query.toLowerCase(Locale.ROOT);
             String haystack = ((lesson.getTaskType() == null ? "" : lesson.getTaskType()) + " "
                     + (lesson.getSymptom() == null ? "" : lesson.getSymptom()) + " "
+                    + (lesson.getSymptomText() == null ? "" : lesson.getSymptomText()) + " "
                     + (lesson.getReusableRule() == null ? "" : lesson.getReusableRule()) + " "
                     + (lesson.getResolution() == null ? "" : lesson.getResolution()))
                     .toLowerCase(Locale.ROOT);
@@ -234,6 +277,11 @@ public class MemoryLessonService {
         return score;
     }
 
+    /** 实体的 scope（历史行可能为 null，视作 chat —— 与迁移的 DEFAULT 一致）。 */
+    private static String lessonScope(MemoryLesson lesson) {
+        return lesson.getScope() == null ? MemoryLesson.SCOPE_CHAT : lesson.getScope();
+    }
+
     // ==================== 输出 ====================
 
     private Map<String, Object> toMap(MemoryLesson lesson) {
@@ -245,16 +293,36 @@ public class MemoryLessonService {
         // 中文任务类型（"回测""查行情"）：给前端做分类展示，没有它用户看到的是英文键
         item.put("taskTypeLabel",
                 TASK_TYPE_LABELS.getOrDefault(lesson.getTaskType(), lesson.getTaskType()));
-        item.put("symptom", lesson.getSymptom());
+        // 症状原文优先（记忆白盒）：symptom 是规范化键，不是给人读的句子
+        item.put("symptom", lesson.getSymptomText() != null && !lesson.getSymptomText().isBlank()
+                ? lesson.getSymptomText() : lesson.getSymptom());
+        item.put("symptomRaw", lesson.getSymptomText());
+        item.put("context", fromJson(lesson.getContext()));
+        item.put("attempts", fromJson(lesson.getAttempts()));
         item.put("resolution", lesson.getResolution());
         item.put("reusableRule", lesson.getReusableRule());
         item.put("status", lesson.getStatus());
+        item.put("scope", lessonScope(lesson));
         item.put("occurrences", occurrences);
         item.put("confidence", lesson.getConfidence());
         item.put("trust", lesson.getTrust());
         item.put("recordedAt", lesson.getRecordedAt() == null ? null : lesson.getRecordedAt().toString());
+        // 句级来源（记忆白盒）：前端"查看来源"按钮按这些 id 拉原始对话
+        item.put("evidenceEventIds", fromJson(lesson.getEvidenceEventIds()));
         item.put("promotionSuggested", occurrences >= PROMOTION_HINT_OCCURRENCES);
         return item;
+    }
+
+    /** JSON 文本（List/Map 序列化产物）→ 对象；读不懂返回 null（不假装）。 */
+    private Object fromJson(String json) {
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        try {
+            return mapper.readValue(json, Object.class);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     public List<Map<String, Object>> listForUser(Long userId, int limit) {

@@ -73,6 +73,20 @@ public class PaperTrade {
     @Column(name = "trace_id")
     private Long traceId;
 
+    /**
+     * 卖出对冲的批次明细（JSON 数组，2026-10-15）：[{lotId, openedDate, cost, shares}]。
+     * 买入为 null。回答"这笔卖出卖的是哪几笔买入"——先进先出消耗的审计记录。
+     */
+    @Column(name = "matched_lots", columnDefinition = "longtext")
+    private String matchedLots;
+
+    /**
+     * 本笔已实现盈亏（卖出）：Σ(卖出价 − 批次成本) × 消耗股数 − 卖出费用。
+     * 含义是"这一笔卖相对于它对冲的买入批次，落袋了多少"。买入为 null。
+     */
+    @Column(name = "realized_pnl", precision = 18, scale = 2)
+    private BigDecimal realizedPnl;
+
     @Column(nullable = false, updatable = false)
     private LocalDateTime createdAt;
 

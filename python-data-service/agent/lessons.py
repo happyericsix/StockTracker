@@ -40,6 +40,30 @@ MIN_CONFIDENCE = 0.3
 MAX_LESSONS_PER_SESSION = 5
 MAX_SYMPTOM_CHARS = 200
 MAX_FIELD_CHARS = 500
+# 单条经验最多引用几行来源（防 LLM 把整段对话都标成"依据"）
+MAX_EVIDENCE_REFS = 8
+
+
+def _resolve_refs(refs, line_ids, fallback) -> list:
+    """LLM 引用的行号 → 具体事件 id（记忆白盒：来源到句级）。
+
+    行号越界/非整数/对应行无 id 的一律丢弃；解析完为空就退回整段会话的 id
+    （fallback）—— 宁可来源粗一点，也不要一条"没有来源"或"来源是错的"的经验。
+    """
+    if not isinstance(refs, list) or not line_ids:
+        return list(fallback or [])
+    resolved = []
+    for raw in refs:
+        try:
+            idx = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= idx <= len(line_ids) and line_ids[idx - 1] is not None:
+            resolved.append(line_ids[idx - 1])
+    # 去重保序，再封顶
+    seen = set()
+    unique = [i for i in resolved if not (i in seen or seen.add(i))]
+    return unique[:MAX_EVIDENCE_REFS] if unique else list(fallback or [])
 
 
 def canonical_task_type(raw) -> str:
@@ -57,8 +81,12 @@ def canonical_task_type(raw) -> str:
     return lowered[:64] or "general"
 
 
-def normalize(raw_lessons, source_event_ids=None) -> list[dict]:
-    """整理模型给出的经验列表。非法项直接丢弃，不做修补。"""
+def normalize(raw_lessons, source_event_ids=None, line_ids=None) -> list[dict]:
+    """整理模型给出的经验列表。非法项直接丢弃，不做修补。
+
+    line_ids（渲染对话时每行对应的事件 id）在场时，用 LLM 引用的 evidence_refs
+    把每条经验的证据细化到句级；不在场或引用无效时退回整段会话 id。
+    """
     if not isinstance(raw_lessons, list):
         return []
 
@@ -94,7 +122,9 @@ def normalize(raw_lessons, source_event_ids=None) -> list[dict]:
             "provenance": "model",
             # 经验一律 medium：它可能被污染，注入时标注"未经确认"
             "trust": "medium",
-            "evidence_event_ids": list(source_event_ids or []),
+            "evidence_event_ids": _resolve_refs(
+                item.get("evidence_refs") or item.get("evidenceRefs"),
+                line_ids, source_event_ids),
         })
         if len(normalized) >= MAX_LESSONS_PER_SESSION:
             break

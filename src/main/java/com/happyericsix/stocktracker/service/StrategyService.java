@@ -62,10 +62,14 @@ public class StrategyService {
                 .configJson(request.getConfigJson())
                 .user(user)
                 .paperEnabled(false)
+                // 2026-10-15 起不再有"纯 rule 模式"：新策略一律由 agent（多角色委员会）
+                // 做决策；规则 DSL 是策略定义与确定性降级底座，不是可选的决策来源
+                .decisionMode(ExecutionContract.DECISION_MODE_AGENT)
+                .decisionModeSince(LocalDate.now(ZoneId.of("Asia/Shanghai")))
                 .build();
 
         strategy = strategyRepository.save(strategy);
-        log.info("User {} created strategy id={}", username, strategy.getId());
+        log.info("User {} created strategy id={} (decision_mode=agent)", username, strategy.getId());
         return StrategyResponse.from(strategy);
     }
 
@@ -282,22 +286,26 @@ public class StrategyService {
         Strategy strategy = strategyRepository.findByIdAndUserId(id, user.getId())
                 .orElseThrow(() -> new IllegalArgumentException("策略不存在"));
 
+        // 2026-10-15：决策来源已统一为 agent（多角色委员会）。规则引擎保留为策略定义
+        // 与确定性降级底座，不再作为可切换的独立模式——保留历史解释依据比提供一个
+        // 通往旧口径的开关更重要。
+        throw new IllegalArgumentException(
+                "决策来源已统一为多角色委员会（agent），不再支持切换；"
+                        + "规则引擎保留为策略定义与降级底座");
+    }
+    /*
+        旧实现留档（口径变更前的行为）：
         String normalized = ExecutionContract.normalizeDecisionMode(decisionMode);
         String current = ExecutionContract.normalizeDecisionMode(strategy.getDecisionMode());
         if (!normalized.equals(current)) {
             strategy.setDecisionMode(normalized);
             strategy.setDecisionModeSince(LocalDate.now(ZoneId.of("Asia/Shanghai")));
             strategyRepository.save(strategy);
-            log.info("User {} switched strategy id={} decision mode {} -> {}",
-                    username, id, current, normalized);
-            // 广播"换了决策者"：模拟盘侧（监听器）决定要不要立刻开第一次委员会。
-            // 只在真正切换时广播 —— 这里不判断"切到 agent 且在跑"之类的业务条件，
-            // 那是模拟盘的知识，写在这里两边迟早对不上。
             eventPublisher.publishEvent(new DecisionModeSwitchedEvent(
                     strategy.getId(), normalized, Boolean.TRUE.equals(strategy.getPaperEnabled())));
         }
         return StrategyResponse.from(strategy);
-    }
+    */
 
     /** 只记**确实是数字**的字段：非数字（null、"N/A"、字符串）一律跳过。 */
     private static void addMetric(List<MemoryFactRequest> facts, String subject, String predicate,

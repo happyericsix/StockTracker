@@ -33,6 +33,10 @@ def _fake_post(monkeypatch, body):
     def post(url, json=None, headers=None, timeout=None):
         return _Response(body)
 
+    # 2026-10-15：调用侧加了退避重试（_post_with_retry 会读 status_code），
+    # 假响应得长得像真响应——status_code=200、raise_for_status 空操作
+    _Response.status_code = 200
+    _Response.raise_for_status = lambda self: None
     monkeypatch.setattr(llm_service.requests, "post", post)
 
 

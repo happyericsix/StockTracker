@@ -43,6 +43,7 @@ const error = ref('')
 const name = ref('')
 const symbol = ref('')
 const sizePct = ref(100)
+const slippagePct = ref(0.1)
 // 一个 reactive 对象 + 按组遍历，绑定可靠（避免模板里 ref 嵌套解包陷阱）
 const condGroups = reactive({
   entry: { logic: 'all', rows: [] },
@@ -68,6 +69,7 @@ const load = async () => {
     name.value = s.name || ''
     symbol.value = s.symbol || cfg.symbol || ''
     sizePct.value = cfg.position?.size_pct ?? 100
+    slippagePct.value = cfg.risk?.slippage_pct ?? 0.1
     condGroups.entry.logic = cfg.entry?.logic === 'any' ? 'any' : 'all'
     condGroups.exit.logic = cfg.exit?.logic === 'any' ? 'any' : 'all'
     condGroups.entry.rows = cloneRows(cfg.entry?.conditions)
@@ -96,6 +98,8 @@ const buildConfig = () => JSON.stringify({
   ...keepFields,
   symbol: symbol.value,
   name: name.value,
+  // risk 整体来自 keepFields，但滑点有独立输入位——显式覆盖，避免两处打架
+  risk: { ...(keepFields.risk || {}), slippage_pct: Number(slippagePct.value) },
   position: { type: 'percent', size_pct: Number(sizePct.value) },
   entry: { logic: condGroups.entry.logic, conditions: condGroups.entry.rows },
   exit: { logic: condGroups.exit.logic, conditions: condGroups.exit.rows },
@@ -108,6 +112,9 @@ const save = async () => {
   if (!name.value.trim()) { error.value = '策略名称不能为空'; return }
   if (!(Number(sizePct.value) > 0 && Number(sizePct.value) <= 100)) {
     error.value = '仓位必须是 (0, 100] 之间的百分比'; return
+  }
+  if (!(Number(slippagePct.value) >= 0 && Number(slippagePct.value) <= 2)) {
+    error.value = '滑点必须是 [0, 2] 之间的百分数（0.1 = 千分之一）'; return
   }
   if (!condGroups.entry.rows.length) { error.value = '至少保留一条入场条件'; return }
   if (!condGroups.exit.rows.length) { error.value = '至少保留一条出场条件（建议含止损）'; return }
@@ -184,6 +191,24 @@ const save = async () => {
                   </em>
                 </label>
               </div>
+
+              <label class="mt-3 flex flex-col gap-1 text-[12.5px] text-ink-2">
+                  滑点模拟（成交价向不利方向偏移的 %）
+                <input
+                  v-model.number="slippagePct"
+                  type="number"
+                  min="0"
+                  max="2"
+                  step="0.01"
+                  class="num h-[34px] w-[220px] rounded-lg border border-border bg-bg px-2.5 text-[13px] text-ink focus:border-accent focus:outline-none focus:ring-2 focus:ring-[color:var(--ring)]"
+                >
+                <!-- 滑点没有官方值，是撮合近似：说清它模拟什么、怎么选 -->
+                <em class="mt-0.5 text-[12px] not-italic leading-relaxed text-ink-3">
+                  模拟"下单到成交之间价格向不利方向的移动"。流动性好的大盘股 1 跳价差约
+                  0.1～0.2%，0.1 是保守默认；想更贴近盘口可调小、想更保守可调大。
+                  佣金/印花税/过户费不用设——按官方费率表和你档案里的真实佣金自动算。
+                </em>
+              </label>
 
               <section v-for="(group, key) in condGroups" :key="key" class="mt-4.5">
                 <div class="mb-2 flex items-center justify-between gap-3">

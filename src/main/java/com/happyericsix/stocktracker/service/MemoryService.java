@@ -128,6 +128,32 @@ public class MemoryService {
         return LocalDate.now(ZONE).format(SESSION_DATE);
     }
 
+    /**
+     * 按 id 批量取账本事件（记忆白盒 2026-10-15："查看来源"抽屉的数据源）。
+     *
+     * <p>归属过滤在这里做而不是在 controller：漏了这层就是跨用户账本泄露。
+     * 返回顺序按传入 id 的顺序（对话顺序），别人的 id 悄悄丢掉。
+     */
+    public List<MemoryEvent> eventsByIds(Long userId, List<Long> ids) {
+        if (userId == null || ids == null || ids.isEmpty()) {
+            return List.of();
+        }
+        var byId = new java.util.LinkedHashMap<Long, MemoryEvent>();
+        for (MemoryEvent event : eventRepo.findAllById(ids)) {
+            if (userId.equals(event.getUserId())) {
+                byId.put(event.getId(), event);
+            }
+        }
+        List<MemoryEvent> out = new ArrayList<>();
+        for (Long id : ids) {
+            MemoryEvent event = byId.get(id);
+            if (event != null && !out.contains(event)) {
+                out.add(event);
+            }
+        }
+        return out;
+    }
+
     // ==================== 写入（只追加） ====================
 
     /**
@@ -286,6 +312,9 @@ public class MemoryService {
                 item.put("version", episode.getVersion());
                 item.put("summary", episode.getSummary());
                 item.put("keyPoints", readJsonList(episode.getKeyPoints()));
+                // 未定事项（记忆白盒）：LLM 自己标注的"还不确定的事"，让用户看到
+                // 系统知道什么、也知道自己不知道什么 —— 这是信任的一半
+                item.put("openQuestions", readJsonList(episode.getOpenQuestions()));
                 item.put("endedAt", episode.getEndedAt() == null ? null : episode.getEndedAt().toString());
                 episodes.add(item);
             }

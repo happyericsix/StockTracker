@@ -10,11 +10,13 @@ import com.happyericsix.stocktracker.dto.TradeJournalResponse;
 import com.happyericsix.stocktracker.dto.Result;
 import com.happyericsix.stocktracker.dto.StrategyRequest;
 import com.happyericsix.stocktracker.dto.StrategyResponse;
+import com.happyericsix.stocktracker.dto.StrategyRevisionResponse;
 import com.happyericsix.stocktracker.entity.User;
 import com.happyericsix.stocktracker.repository.UserRepository;
 import com.happyericsix.stocktracker.service.ExpectationService;
 import com.happyericsix.stocktracker.service.PaperEquitySeries;
 import com.happyericsix.stocktracker.service.PaperTradingService;
+import com.happyericsix.stocktracker.service.StrategyRevisionService;
 import com.happyericsix.stocktracker.service.StrategyService;
 import com.happyericsix.stocktracker.service.TradeJournalService;
 import jakarta.validation.Valid;
@@ -26,6 +28,7 @@ import tools.jackson.databind.JsonNode;
 
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequiredArgsConstructor
@@ -36,6 +39,7 @@ public class StrategyController {
     private final PaperTradingService paperTradingService;
     private final ExpectationService expectationService;
     private final TradeJournalService tradeJournalService;
+    private final StrategyRevisionService strategyRevisionService;
     private final UserRepository userRepository;
 
     @GetMapping
@@ -128,6 +132,57 @@ public class StrategyController {
             @PathVariable Long id,
             Authentication authentication) {
         return Result.success(paperTradingService.startPaper(authentication.getName(), id));
+    }
+
+    // ==================== 策略修订闭环（P2，2026-10-15）====================
+
+    /** 健康信号（确定性，无 LLM）：提案的触发理由，也供页面常驻展示。 */
+    @GetMapping("/{id}/revision/health")
+    public Result<List<Map<String, Object>>> revisionHealth(
+            @PathVariable Long id,
+            Authentication authentication) {
+        return Result.success(strategyRevisionService.healthSignalsRaw(
+                authentication.getName(), id));
+    }
+
+    /** 生成修订提案（1 次 LLM + 截至当天的时间衰减加权回测门禁）。 */
+    @PostMapping("/{id}/revisions/generate")
+    public Result<StrategyRevisionResponse> generateRevision(
+            @PathVariable Long id,
+            Authentication authentication) {
+        return Result.success(StrategyRevisionResponse.from(
+                strategyRevisionService.generate(authentication.getName(), id)));
+    }
+
+    @GetMapping("/{id}/revisions")
+    public Result<List<StrategyRevisionResponse>> listRevisions(
+            @PathVariable Long id,
+            Authentication authentication) {
+        return Result.success(strategyRevisionService.list(authentication.getName(), id)
+                .stream().map(StrategyRevisionResponse::from).toList());
+    }
+
+    /** 批准：走既有 updateStrategy 路径（schema 校验 + configUpdatedAt 口径打点）。 */
+    @PostMapping("/{id}/revisions/{revisionId}/approve")
+    public Result<StrategyRevisionResponse> approveRevision(
+            @PathVariable Long id,
+            @PathVariable Long revisionId,
+            @RequestBody(required = false) Map<String, String> body,
+            Authentication authentication) {
+        String note = body == null ? null : body.get("note");
+        return Result.success(StrategyRevisionResponse.from(
+                strategyRevisionService.approve(authentication.getName(), id, revisionId, note)));
+    }
+
+    @PostMapping("/{id}/revisions/{revisionId}/reject")
+    public Result<StrategyRevisionResponse> rejectRevision(
+            @PathVariable Long id,
+            @PathVariable Long revisionId,
+            @RequestBody(required = false) Map<String, String> body,
+            Authentication authentication) {
+        String note = body == null ? null : body.get("note");
+        return Result.success(StrategyRevisionResponse.from(
+                strategyRevisionService.reject(authentication.getName(), id, revisionId, note)));
     }
 
     @PostMapping("/{id}/paper/stop")
