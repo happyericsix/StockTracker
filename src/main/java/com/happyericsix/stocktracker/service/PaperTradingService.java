@@ -592,6 +592,14 @@ public class PaperTradingService {
                     row.put("side", trade.getSide() == null ? "" : trade.getSide().toLowerCase());
                     row.put("price", trade.getPrice() == null ? null : Money.price(trade.getPrice()));
                     row.put("shares", trade.getShares() == null ? null : Money.price(trade.getShares()));
+                    if ("sell".equals(trade.getSide() == null ? "" : trade.getSide().toLowerCase())) {
+                        // 路径口径（MAE/MFE）随卖出明细带给周反思：没有这些字段，LLM 想提炼
+                        // "MFE 很大却没拿住" 类教训时根本没有数据依据（口径见 roundTripOf）
+                        Map<String, Object> rt = decisionQualityService.roundTripOf(trade);
+                        if (rt != null) {
+                            row.setAll((ObjectNode) mapper.valueToTree(rt));
+                        }
+                    }
                 });
         payload.set("committee", mapper.valueToTree(
                 committees.size() > 3 ? committees.subList(0, 3) : committees));

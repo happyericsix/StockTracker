@@ -12,7 +12,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.util.ArrayList;
@@ -122,7 +126,46 @@ public class DecisionQualityService {
                 row.put("mode", traceModeOf(trade));
                 row.put("alignedPct", round(aligned * 100.0));
                 row.put("win", aligned > 0);
+                if ("sell".equals(side)) {
+                    // 已了结的往返当时就封口了，不受 5 日对账窗口影响 —— 路径口径随行带上
+                    Map<String, Object> rt = roundTripOf(trade);
+                    if (rt != null) {
+                        row.putAll(rt);
+                    }
+                }
                 recent.add(row);
+            }
+        }
+
+        // 已了结卖出的路径聚合（MAE/MFE）：窗口内全部卖出都算（含对账还 pending 的），
+        // 与明细行同一套口径 —— 聚合与明细对不上，委员会就该不信这个包了。
+        int trips = 0;
+        int pathCount = 0;
+        long roundTripMicro = 0;
+        long mfeMicro = 0;
+        long maeMicro = 0;
+        int exitEarlyCount = 0;
+        int deepAdverseCount = 0;
+        for (PaperTrade trade : trades) {
+            if (trade.getTradeDate() == null || trade.getTradeDate().isBefore(since)) {
+                continue;
+            }
+            Map<String, Object> rt = roundTripOf(trade);
+            if (rt == null || !(rt.get("roundTripPct") instanceof Number rtPct)) {
+                continue;
+            }
+            trips++;
+            roundTripMicro += Math.round(rtPct.doubleValue() * 100.0);
+            if (rt.get("mfePct") instanceof Number mfeV) {
+                pathCount++;
+                mfeMicro += Math.round(mfeV.doubleValue() * 100.0);
+                maeMicro += Math.round(((Number) rt.get("maePct")).doubleValue() * 100.0);
+            }
+            if (Boolean.TRUE.equals(rt.get("exitEarly"))) {
+                exitEarlyCount++;
+            }
+            if (Boolean.TRUE.equals(rt.get("deepAdverse"))) {
+                deepAdverseCount++;
             }
         }
 
@@ -139,15 +182,34 @@ public class DecisionQualityService {
         }
 
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("note", EXPERIENCE_NOTE_PREFIX
+        String note = EXPERIENCE_NOTE_PREFIX
                 + "统计口径：每笔成交 " + DEFAULT_HORIZON + " 个交易日后回看方向对错"
                 + "（买入看涨对、卖出看跌对）；还没走满窗口的不计入。"
-                + "这是历史事实，供决策参考，不是对未来走势的判断。");
+                + "这是历史事实，供决策参考，不是对未来走势的判断。";
+        if (trips > 0) {
+            note += "已了结卖出另附路径口径：maePct/mfePct = 持仓期间日线收盘相对 FIFO 入场"
+                    + "成本的最大不利/有利偏移（%，只用持仓窗口内的 bar，不含盘中极值）；"
+                    + "exitEarly = 曾有 ≥" + EXIT_EARLY_MFE_MIN_PCT + "% 浮盈但落袋不足一半；"
+                    + "deepAdverse = 持仓期曾浮亏 ≥" + Math.abs(DEEP_ADVERSE_MAE_PCT) + "%。";
+        }
+        out.put("note", note);
         out.put("evaluatedTrades", evaluated);
         out.put("winRatePct", round(wins * 100.0 / evaluated));
         out.put("avgAlignedPct", round(alignedMicro / 100.0 / evaluated));
         out.put("pendingTrades", pending);
         out.put("recent", recent);
+        if (trips > 0) {
+            Map<String, Object> roundTrips = new LinkedHashMap<>();
+            roundTrips.put("count", trips);
+            roundTrips.put("avgRoundTripPct", round(roundTripMicro / 100.0 / trips));
+            if (pathCount > 0) {
+                roundTrips.put("avgMfePct", round(mfeMicro / 100.0 / pathCount));
+                roundTrips.put("avgMaePct", round(maeMicro / 100.0 / pathCount));
+            }
+            roundTrips.put("exitEarlyCount", exitEarlyCount);
+            roundTrips.put("deepAdverseCount", deepAdverseCount);
+            out.put("roundTrips", roundTrips);
+        }
         return out;
     }
 
@@ -202,6 +264,144 @@ public class DecisionQualityService {
         out.put("wins", wins);
         if (evaluated > 0) {
             out.put("winRatePct", round(wins * 100.0 / evaluated));
+        }
+        return out;
+    }
+
+    // ==================== 往返路径口径：MAE/MFE（2026-10-15）====================
+
+    /** exitEarly 判定的最低浮盈门槛（%）：MFE 连这条都没到，谈不上"退出太早"。 */
+    private static final double EXIT_EARLY_MFE_MIN_PCT = 2.0;
+
+    /** exitEarly 判定的落袋比例：最好偏移的一半都没拿到，才算"把浮盈还回去"。 */
+    private static final double EXIT_EARLY_KEEP_RATIO = 0.5;
+
+    /** deepAdverse 判定的最深浮亏线（%）：持仓期曾浮亏超过这条线。 */
+    private static final double DEEP_ADVERSE_MAE_PCT = -3.0;
+
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    /**
+     * 一笔**已了结卖出**的往返路径：入场用的是它自己对冲的 FIFO 批次加权成本，
+     * 路径用的是持仓窗口（最早批次 openedDate → 卖出日）内的**日线收盘**。
+     *
+     * <h3>口径（与 realizedPnl/forwardReturn 同一条纪律）</h3>
+     * <ul>
+     *   <li>入场成本 = Σ(批次 cost × 批次 shares) / Σ批次 shares —— 成交价口径、不含费，
+     *       与 {@code PaperTradingService.consumeLotsFifoQuietly} 落毛利 realizedPnl 的基准一致；</li>
+     *   <li>roundTripPct = 卖出价 / 入场成本 − 1（毛收益，与 realizedPnl 完全同口径）；</li>
+     *   <li>maePct / mfePct = 窗口内最低/最高收盘相对入场成本的偏移（%）。**只用窗口内的
+     *       bar**，卖出之后的数据一根都不看 —— 和 forwardReturn 一样，不存在未来函数；</li>
+     *   <li>日线收盘口径（与决策同频），不含盘中极值 —— MAE/MFE 会被低估，宁可保守也不
+     *       把和决策频率对不上的"机会"算进战绩；</li>
+     *   <li>matchedLots 是 2026-10-15 上线的字段：更早的卖出没有批次明细，只能由
+     *       realizedPnl 反推入场价（毛口径恒等式），此时**不给 maePct/mfePct** ——
+     *       窗口起点不知道，宁缺毋滥，绝不拿"当日一个点"冒充路径。</li>
+     * </ul>
+     *
+     * @return 只含算得出的键（算不出就不带，调用方 fail-open）；非卖出或缺关键字段返回 null
+     */
+    public Map<String, Object> roundTripOf(PaperTrade sell) {
+        if (sell == null || sell.getPrice() == null || sell.getTradeDate() == null
+                || sell.getSymbol() == null) {
+            return null;
+        }
+        String side = sell.getSide() == null ? "" : sell.getSide().toLowerCase();
+        if (!"sell".equals(side)) {
+            return null;
+        }
+
+        BigDecimal entry = null;
+        LocalDate openedDate = null;
+        if (sell.getMatchedLots() != null && !sell.getMatchedLots().isBlank()) {
+            try {
+                JsonNode lots = JSON.readTree(sell.getMatchedLots());
+                BigDecimal costShares = BigDecimal.ZERO; // Σ(cost × shares)
+                BigDecimal shareSum = BigDecimal.ZERO;
+                for (JsonNode lot : lots) {
+                    if (lot == null || !lot.isObject()) {
+                        continue;
+                    }
+                    BigDecimal c = new BigDecimal(lot.path("cost").asText("0"));
+                    BigDecimal s = new BigDecimal(lot.path("shares").asText("0"));
+                    if (c.signum() <= 0 || s.signum() <= 0) {
+                        continue;
+                    }
+                    costShares = costShares.add(c.multiply(s));
+                    shareSum = shareSum.add(s);
+                    String opened = lot.path("openedDate").asText("");
+                    if (!opened.isEmpty()) {
+                        LocalDate d = LocalDate.parse(opened);
+                        if (openedDate == null || d.isBefore(openedDate)) {
+                            openedDate = d;
+                        }
+                    }
+                }
+                if (shareSum.signum() > 0) {
+                    entry = costShares.divide(shareSum, 4, RoundingMode.HALF_UP);
+                }
+            } catch (Exception e) {
+                log.debug("matchedLots parse failed for trade {}: {}",
+                        sell.getId(), e.getMessage());
+            }
+        }
+        if (entry == null || entry.signum() <= 0) {
+            // 无批次明细的遗留卖出：毛口径恒等式 realizedPnl = (卖出价 − 入场价) × 股数 反推。
+            // 入场日期不知道 → 没有 MAE/MFE，只有往返收益。
+            if (sell.getRealizedPnl() != null && sell.getShares() != null
+                    && sell.getShares().signum() > 0) {
+                entry = sell.getPrice().subtract(
+                        sell.getRealizedPnl().divide(sell.getShares(), 4, RoundingMode.HALF_UP));
+            }
+            if (entry == null || entry.signum() <= 0) {
+                return null;
+            }
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("entryPrice", round4(entry.doubleValue()));
+        out.put("exitPrice", round4(sell.getPrice().doubleValue()));
+        double roundTrip = sell.getPrice().doubleValue() / entry.doubleValue() - 1.0;
+        out.put("roundTripPct", round(roundTrip * 100.0));
+
+        Double mae = null;
+        Double mfe = null;
+        int bars = 0;
+        if (openedDate != null) {
+            List<CloseOnDate> series = closes.get(sell.getSymbol(), this::loadCloses);
+            if (series != null) {
+                double min = Double.MAX_VALUE;
+                double max = -Double.MAX_VALUE;
+                for (CloseOnDate c : series) {
+                    if (c.date.isBefore(openedDate)) {
+                        continue;
+                    }
+                    if (c.date.isAfter(sell.getTradeDate())) {
+                        break; // 序列按日期升序：越过卖出日即可停，未来的 bar 一根不看
+                    }
+                    min = Math.min(min, c.close);
+                    max = Math.max(max, c.close);
+                    bars++;
+                }
+                if (bars > 0) {
+                    mae = (min / entry.doubleValue() - 1.0) * 100.0;
+                    mfe = (max / entry.doubleValue() - 1.0) * 100.0;
+                }
+            }
+        }
+        if (mae != null && mfe != null) {
+            out.put("heldBars", bars);
+            out.put("maePct", round(mae));
+            out.put("mfePct", round(mfe));
+            boolean exitEarly = mfe >= EXIT_EARLY_MFE_MIN_PCT
+                    && roundTrip * 100.0 < mfe * EXIT_EARLY_KEEP_RATIO;
+            boolean deepAdverse = mae <= DEEP_ADVERSE_MAE_PCT;
+            if (exitEarly) {
+                out.put("exitEarly", true);
+            }
+            if (deepAdverse) {
+                out.put("deepAdverse", true);
+            }
         }
         return out;
     }
@@ -282,6 +482,11 @@ public class DecisionQualityService {
 
     private static double round(double v) {
         return Math.round(v * 100.0) / 100.0;
+    }
+
+    /** 价格口径 4 位小数（与 Money.price 的展示精度对齐）。 */
+    private static double round4(double v) {
+        return Math.round(v * 10000.0) / 10000.0;
     }
 
     private record CloseOnDate(LocalDate date, double close) {}
