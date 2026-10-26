@@ -200,7 +200,7 @@ class PaperTradingServiceWatchTest {
         stubCommon(strategy, account);
         when(strategyClient.evaluateBarRealtime(eq(CONFIG), eq("601988"), isNull()))
                 .thenReturn(ruleResultWithBuyEvent("2026-10-09 10:00:00"));
-        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), isNull(), isNull(), any()))
+        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), isNull(), isNull(), any(), any()))
                 .thenReturn(watchResponse("hold", 0.0));
 
         paperTradingService.evaluateRealtime();
@@ -223,7 +223,7 @@ class PaperTradingServiceWatchTest {
         stubCommon(strategy, account);
         when(strategyClient.evaluateBarRealtime(eq(CONFIG), eq("601988"), isNull()))
                 .thenReturn(ruleResultWithBuyEvent("2026-10-09 10:01:00"));
-        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), isNull(), isNull(), any()))
+        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), isNull(), isNull(), any(), any()))
                 .thenReturn(watchResponse("buy", 0.4));
 
         paperTradingService.evaluateRealtime();
@@ -251,7 +251,7 @@ class PaperTradingServiceWatchTest {
         when(paperAuthorizationRepository.findLatest(10L)).thenReturn(Optional.of(noOpen));
         when(strategyClient.evaluateBarRealtime(eq(CONFIG), eq("601988"), isNull()))
                 .thenReturn(ruleResultWithBuyEvent("2026-10-09 10:02:00"));
-        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), isNull(), isNull(), any()))
+        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), isNull(), isNull(), any(), any()))
                 .thenReturn(watchResponse("buy", 0.5));
 
         paperTradingService.evaluateRealtime();
@@ -275,7 +275,7 @@ class PaperTradingServiceWatchTest {
         stubCommon(strategy, account);
         when(strategyClient.evaluateBarRealtime(eq(CONFIG), eq("601988"), isNull()))
                 .thenReturn(ruleResultWithBuyEvent("2026-10-09 10:03:00"));
-        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), isNull(), isNull(), any()))
+        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), isNull(), isNull(), any(), any()))
                 .thenReturn(mapper.readTree(
                         "{\"valid\":true,\"action\":\"hold\",\"degraded\":true,\"watch_tokens\":0}"));
 
@@ -308,7 +308,7 @@ class PaperTradingServiceWatchTest {
         paperTradingService.evaluateRealtime();
 
         // 预算 0：一次都不问模型，也不许规则替它动手
-        verify(strategyClient, never()).intradayWatch(anyString(), anyString(), any(), any(), any(), any(), any(), any());
+        verify(strategyClient, never()).intradayWatch(anyString(), anyString(), any(), any(), any(), any(), any(), any(), any());
         ArgumentCaptor<PaperTradeTrace> traceCaptor = ArgumentCaptor.forClass(PaperTradeTrace.class);
         verify(paperTraceService).record(traceCaptor.capture());
         assertEquals(ExecutionContract.SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED,
@@ -339,7 +339,7 @@ class PaperTradingServiceWatchTest {
 
         paperTradingService.evaluateRealtime();
 
-        verify(strategyClient, never()).intradayWatch(anyString(), anyString(), any(), any(), any(), any(), any(), any());
+        verify(strategyClient, never()).intradayWatch(anyString(), anyString(), any(), any(), any(), any(), any(), any(), any());
         verify(paperTradeRepository, times(1)).save(any(PaperTrade.class));
     }
 
@@ -356,7 +356,7 @@ class PaperTradingServiceWatchTest {
 
         paperTradingService.evaluateRealtime();
 
-        verify(strategyClient, never()).intradayWatch(anyString(), anyString(), any(), any(), any(), any(), any(), any());
+        verify(strategyClient, never()).intradayWatch(anyString(), anyString(), any(), any(), any(), any(), any(), any(), any());
     }
 
     /** 同一事件类型在冷却窗口内不重复叫醒模型（第二次 evaluateRealtime 不再调盯盘）。 */
@@ -368,13 +368,13 @@ class PaperTradingServiceWatchTest {
         when(strategyClient.evaluateBarRealtime(eq(CONFIG), eq("601988"), isNull()))
                 .thenReturn(ruleResultWithBuyEvent("2026-10-09 10:07:00"))
                 .thenReturn(ruleResultWithBuyEvent("2026-10-09 10:08:00"));
-        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), isNull(), isNull(), any()))
+        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), isNull(), isNull(), any(), any()))
                 .thenReturn(watchResponse("hold", 0.0));
 
         paperTradingService.evaluateRealtime();
         paperTradingService.evaluateRealtime();   // 同类事件 15 分钟内第二次
 
-        verify(strategyClient, times(1)).intradayWatch(anyString(), anyString(), any(), any(), any(), any(), any(), any());
+        verify(strategyClient, times(1)).intradayWatch(anyString(), anyString(), any(), any(), any(), any(), any(), any(), any());
     }
 
     // ==================== news_shock（agent 互通 P3，2026-10-09） ====================
@@ -398,7 +398,7 @@ class PaperTradingServiceWatchTest {
                         "{\"id\":321,\"title\":\"公司被立案调查\",\"direction\":\"利空\","
                                 + "\"impact_level\":\"high\",\"credibility\":82,\"analyzed\":true,"
                                 + "\"plain_summary\":\"证监会立案调查公告。\"}"));
-        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), any(), any(), any()))
+        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), any(), any(), any(), any()))
                 .thenReturn(watchResponse("hold", 0.0));
 
         paperTradingService.evaluateRealtime();
@@ -406,7 +406,7 @@ class PaperTradingServiceWatchTest {
         ArgumentCaptor<JsonNode> eventsCaptor = ArgumentCaptor.forClass(JsonNode.class);
         ArgumentCaptor<JsonNode> alertCaptor = ArgumentCaptor.forClass(JsonNode.class);
         verify(strategyClient).intradayWatch(eq(CONFIG), eq("601988"), eventsCaptor.capture(),
-                isNull(), any(), alertCaptor.capture(), any(), any());
+                isNull(), any(), alertCaptor.capture(), any(), any(), any());
         assertEquals("news_shock", eventsCaptor.getValue().get(0).path("type").asText());
         assertEquals("利空", alertCaptor.getValue().path("direction").asText());
         verify(paperTraceService).record(any(PaperTradeTrace.class));
@@ -428,14 +428,14 @@ class PaperTradingServiceWatchTest {
         when(newsBriefingService.latestShock(eq("601988"), anyInt()))
                 .thenReturn(mapper.readTree(
                         "{\"id\":321,\"title\":\"公司被立案调查\",\"direction\":\"利空\",\"analyzed\":true}"));
-        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), any()))
+        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), any(), any(), any(), any()))
                 .thenReturn(watchResponse("hold", 0.0));
 
         paperTradingService.evaluateRealtime();
         paperTradingService.evaluateRealtime();
 
         verify(strategyClient, times(1))
-                .intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), any(), any(), any());
+                .intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), any(), any(), any(), any());
     }
 
     /**
@@ -462,6 +462,35 @@ class PaperTradingServiceWatchTest {
         verify(paperTraceService).record(captor.capture());
         assertEquals(ExecutionContract.SKIP_ALREADY_TRADED_TODAY, captor.getValue().getSkipReason(),
                 "拦截原因与日线结算共用 already_traded_today 语义");
+    }
+
+    /**
+     * 往返守卫同样约束**盯盘签发的买入**（2026-10-15 收权后盯盘是 agent 盘中唯一的
+     * 下单手）：此前守卫只挂在规则信号路径，盯盘说买就直接成交 —— "当日只一买"
+     * 退化为提示词软约束，震荡日多事件类型连买会重现"互搏型"当日来回。
+     */
+    @Test
+    void roundtripGuardAlsoBlocksWatchSignedBuys() throws Exception {
+        ReflectionTestUtils.setField(paperTradingService, "roundtripGuardEnabled", true);
+        ReflectionTestUtils.setField(paperTradingService, "intradayWatchEnabled", true);
+        Strategy strategy = agentStrategy();
+        PaperAccount account = flatAccount(strategy);
+        stubCommon(strategy, account);
+        when(strategyClient.evaluateBarRealtime(eq(CONFIG), eq("601988"), isNull()))
+                .thenReturn(ruleResultWithBuyEvent("2026-10-09 10:40:00"));
+        when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), isNull(), isNull(), any(), any()))
+                .thenReturn(watchResponse("buy", 0.4));
+        when(paperTradeRepository.existsByStrategyIdAndTradeDate(eq(strategy.getId()), any()))
+                .thenReturn(true);   // 今天已经动过手
+
+        paperTradingService.evaluateRealtime();
+
+        verify(paperTradeRepository, never()).save(any(PaperTrade.class));
+        ArgumentCaptor<PaperTradeTrace> captor = ArgumentCaptor.forClass(PaperTradeTrace.class);
+        verify(paperTraceService).record(captor.capture());
+        assertEquals(ExecutionContract.SKIP_ALREADY_TRADED_TODAY, captor.getValue().getSkipReason(),
+                "盯盘签发的当日第二笔买入同样被 already_traded_today 拦下");
+        assertEquals(ExecutionContract.TRIGGER_WATCH, captor.getValue().getTrigger());
     }
 
     /** 护栏关闭（日内多笔/做T 的合法部署）：同一场景下买入正常执行。 */

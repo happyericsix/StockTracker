@@ -29,10 +29,13 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onDocPointerDo
 </script>
 
 <template>
-  <span ref="rootEl" class="relative inline-flex items-center">
+  <!-- @click.stop（2026-10-18）：ⓘ 常驻在可点击容器里（如 BlockCard 的折叠卡头），
+       点击冒泡到父层会连带触发折叠——"点 ⓘ 却点到下面一层"即此。ⓘ 的点击冒泡
+       没有任何合理用途，在组件根部一刀切断，按钮与提示面板一并修好。 -->
+  <span ref="rootEl" class="relative inline-flex items-center" @click.stop>
     <button
       type="button"
-      class="flex h-[22px] w-[22px] items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-accent-soft hover:text-accent"
+      class="flex h-[22px] w-[22px] items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-accent-soft hover:text-accent max-sm:h-[32px] max-sm:w-[32px]"
       :aria-expanded="open"
       :aria-label="label"
       @click="open = !open"

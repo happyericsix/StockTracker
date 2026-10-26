@@ -12,15 +12,19 @@
  *   ② 我的策略 —— 在跑什么（卡片网格：净值主数字 + 期间收益徽章 + 最近动态一句）
  * 数据聚合只做显示层的求和/求差，口径仍以后端为准。
  */
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+
+const __paperCharts = () => ({ trendChart, donutChart })
+
 import { useRouter } from 'vue-router'
-import { getPaperOverview, startPaper, stopPaper } from '../api/strategy.js'
+import { getPaperOverview, getPaperEquity, startPaper, stopPaper } from '../api/strategy.js'
+import * as echarts from 'echarts'
 import { getPortfolio, getPaperReport } from '../api/paper.js'
 import StrategyEditSheet from '../components/StrategyEditSheet.vue'
 import Badge from '../components/ui/badge.vue'
 import Button from '../components/ui/button.vue'
 import Skeleton from '../components/ui/skeleton.vue'
-import InfoTip from '../components/InfoTip.vue'
+import BlockCard from '../components/ui/block-card.vue'
 import { dirTextClass, dirTone, signed, dateTime } from '../utils/format.js'
 
 const router = useRouter()
@@ -42,7 +46,7 @@ const configUpdatedNote = (item) => {
   return days <= 7 ? `规则 ${days < 1 ? '今天' : days + ' 天前'}调整过，之前的净值口径不同` : null
 }
 
-const errorMessage = (e, fallback) => e?.response?.data?.message || fallback
+const errorMessage = (e, fallback) => e?.friendlyMessage || e?.response?.data?.message || fallback
 
 const load = async () => {
   loading.value = true
@@ -171,9 +175,119 @@ const corrLabel = (rho) => {
 // 「决策日志」（按策略对答案，不按来源分组）；委员会的经验回流
 // （strategyExperience / agentOutcomeSince）在后端照旧工作。
 
+// ---------- 资产走势与结构（显示层聚合：各策略净值按日求和；口径以后端快照为准） ----------
+const equityTrend = ref([])
+const trendChartEl = ref(null)
+const donutChartEl = ref(null)
+let trendChart = null
+let donutChart = null
+
+const cssToken = (name, fallback) =>
+  getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
+
+const loadTrend = async () => {
+  const active = running.value
+  if (!active.length) { equityTrend.value = []; return }
+  const curves = await Promise.all(active.map((item) =>
+    getPaperEquity(item.id, 120).then((res) => {
+      const d = res.data
+      const curve = Array.isArray(d?.equityCurve) ? d.equityCurve
+        : Array.isArray(d?.equity_curve) ? d.equity_curve : []
+      return Array.isArray(curve) ? curve : []
+    }).catch(() => [])
+  ))
+  // 按日期对齐求和：某策略当天没有快照就跳过（不等不补——显示层不做插值）
+  const byDate = new Map()
+  for (const curve of curves) {
+    for (const point of curve) {
+      const d = String(point.date || '').slice(0, 10)
+      const v = Number(point.equity)
+      if (!d || !Number.isFinite(v)) continue
+      byDate.set(d, (byDate.get(d) || 0) + v)
+    }
+  }
+  equityTrend.value = [...byDate.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([date, equity]) => ({ date, equity }))
+  renderTrend()
+  renderDonut()
+}
+
+const renderTrend = () => {
+  if (!trendChartEl.value || equityTrend.value.length < 2) return
+  if (!trendChart) trendChart = echarts.init(trendChartEl.value)
+  const rows = equityTrend.value
+  const values = rows.map((r) => r.equity)
+  let peak = -Infinity
+  const drawdownPct = values.map((v) => {
+    peak = Math.max(peak, v)
+    return peak > 0 ? ((v / peak) - 1) * 100 : 0
+  })
+  trendChart.setOption({
+    grid: { left: 56, right: 10, top: 10, bottom: 20 },
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params) => {
+        const i = params[0].dataIndex
+        return `${rows[i].date}<br/>总净值 <b>${values[i].toLocaleString()}</b><br/>距高点 ${drawdownPct[i].toFixed(2)}%`
+      },
+    },
+    xAxis: { type: 'category', data: rows.map((r) => r.date.slice(5)),
+             axisLabel: { fontSize: 10, color: cssToken('--ink-3', '#8b92a5') } },
+    yAxis: { type: 'value', scale: true,
+             axisLabel: { fontSize: 10, color: cssToken('--ink-3', '#8b92a5') },
+             splitLine: { lineStyle: { color: cssToken('--border', '#e5e7eb') } } },
+    series: [{
+      type: 'line', data: values, smooth: false, symbol: 'none',
+      lineStyle: { width: 1.8, color: cssToken('--accent', '#3b6df6') },
+      areaStyle: { color: cssToken('--accent-soft', '#e8eefc'), opacity: 0.5 },
+      markLine: totalInitial.value ? {
+        symbol: 'none', silent: true,
+        lineStyle: { type: 'dashed', color: cssToken('--ink-3', '#8b92a5'), width: 1 },
+        label: { show: false },
+        data: [{ yAxis: totalInitial.value }],
+      } : undefined,
+    }],
+  })
+}
+
+const DONUT_PALETTE = ['#3b6df6', '#7aa2f7', '#9d7bea', '#e0a458', '#4fb286', '#d98a6d']
+
+/** 环图与图例共用一份数据（色块/名称/金额一处定义，两处渲染永不打架） */
+const donutData = computed(() => [
+  { name: '现金', value: Number(totalCash.value) || 0, color: '#8b92a5' },
+  ...running.value.map((item, i) => ({
+    name: item.name || item.symbol,
+    value: Number(item.positionValue) || 0,
+    color: DONUT_PALETTE[i % DONUT_PALETTE.length],
+  })),
+].filter((d) => d.value > 0))
+
+const renderDonut = () => {
+  if (!donutChartEl.value || !donutData.value.length) return
+  if (!donutChart) donutChart = echarts.init(donutChartEl.value)
+  const data = donutData.value.map((d) => ({
+    name: d.name, value: d.value, itemStyle: { color: d.color },
+  }))
+  donutChart.setOption({
+    tooltip: { trigger: 'item', formatter: '{b}：{c}（{d}%）' },
+    series: [{
+      type: 'pie', radius: ['58%', '82%'], center: ['50%', '50%'],
+      label: { show: false }, data,
+      emphasis: { scaleSize: 4 },
+    }],
+  })
+}
+
+// overview 异步就位后再画一次（首次进页 loadTrend 可能跑在数据前面）
+watch(running, (list) => { if (list.length) loadTrend() })
+
 onMounted(() => {
   load()
   loadPortfolio()
+})
+onBeforeUnmount(() => {
+  if (trendChart) { trendChart.dispose(); trendChart = null }
+  if (donutChart) { donutChart.dispose(); donutChart = null }
 })
 </script>
 
@@ -186,10 +300,14 @@ onMounted(() => {
 
     <p v-if="error" class="mb-3 text-[13px] text-up" role="alert">{{ error }}</p>
 
-    <!-- ① 资产总览：赚没赚。总资产是大数字，当日盈亏定向，其余一行小字 -->
-    <section
+    <!-- ① 区块：资产总览——赚没赚。总资产是大数字，当日盈亏定向，其余一行小字 -->
+    <BlockCard
       v-if="items.length"
-      class="mb-5 rounded-xl border border-border bg-surface p-5"
+      class="mb-4"
+      title="资产总览"
+      collapsible
+      storage-key="paper-overview"
+      body-class="p-5 pt-4"
     >
       <div class="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
         <div>
@@ -237,7 +355,35 @@ onMounted(() => {
           {{ c.a }} × {{ c.b }}：<span class="num text-accent">{{ c.rho }}</span>（{{ corrLabel(c.rho) }}）
         </p>
       </details>
-    </section>
+    </BlockCard>
+
+    <!-- 区块：资产走势与结构（总净值走势 + 资金分布，显示层聚合） -->
+    <BlockCard
+      v-if="equityTrend.length >= 2 || donutData.length"
+      class="mt-3"
+      title="资产走势与结构"
+      hint="总净值=各在跑策略净值按日求和；虚线为初始资金合计。环形图是现金与各策略持仓的当前分布。"
+      collapsible
+      storage-key="paper-trend"
+      body-class="p-4 pt-3"
+    >
+      <div class="grid items-center gap-4 lg:[grid-template-columns:minmax(0,1fr)_250px]">
+        <div>
+          <div v-if="equityTrend.length >= 2" ref="trendChartEl" class="h-[190px] w-full" role="img" aria-label="组合总净值近 120 日走势"></div>
+          <p v-else class="py-8 text-center text-[12.5px] text-ink-3">净值快照不足两天，走势曲线待积累。</p>
+        </div>
+        <div class="flex flex-col gap-2">
+          <div v-if="donutData.length" ref="donutChartEl" class="h-[150px] w-full" role="img" aria-label="资产结构分布"></div>
+          <ul class="space-y-1">
+            <li v-for="d in donutData" :key="d.name" class="flex items-center gap-2 text-[12px]">
+              <span class="h-2 w-2 shrink-0 rounded-full" :style="{ background: d.color }" aria-hidden="true"></span>
+              <span class="min-w-0 flex-1 truncate text-ink-2">{{ d.name }}</span>
+              <span class="num font-medium text-ink">{{ formatMoney(d.value) }}</span>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </BlockCard>
 
     <!-- 加载骨架：拼出资产卡 + 策略卡网格的形状 -->
     <div v-if="loading" class="space-y-4">
@@ -259,17 +405,11 @@ onMounted(() => {
       <Button variant="primary" @click="goStrategies">去策略库创建一条</Button>
     </div>
 
-    <!-- ② 我的策略：在跑什么。卡片网格 = 自选行情页的阅读节奏 -->
-    <section v-if="!loading && items.length">
-      <h2 class="mb-3.5 flex items-baseline gap-2 text-[16px] font-semibold text-ink">
-        我的策略
-        <span v-if="items.length" class="num text-[12px] font-normal text-ink-3">{{ items.length }}</span>
-        <InfoTip
-          label="模式说明"
-          text="智囊：一组 AI 角色开会辩论后决定买卖时机；规则：按你设的条件自动执行。两种模式的买卖都由同一套风控执行。"
-        />
-      </h2>
-
+    <!-- ② 区块：我的策略——在跑什么。卡片网格 = 自选行情页的阅读节奏 -->
+    <BlockCard v-if="!loading && items.length" title="我的策略" collapsible storage-key="paper-strategies" body-class="p-4 pt-3">
+      <template #actions>
+        <span class="num text-[12px] text-ink-3">{{ items.length }} 条 · 运行 {{ running.length }}</span>
+      </template>
       <ul class="grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(260px,1fr))]">
         <li
           v-for="item in items"
@@ -365,7 +505,7 @@ onMounted(() => {
           </details>
         </li>
       </ul>
-    </section>
+    </BlockCard>
 
     <StrategyEditSheet :open="editingId !== null" :strategy-id="editingId" @close="editingId = null" @saved="onEditSaved" />
   </div>

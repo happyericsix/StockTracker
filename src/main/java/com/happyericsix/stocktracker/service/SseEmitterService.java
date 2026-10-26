@@ -93,21 +93,34 @@ public class SseEmitterService {
 
     /** 推送一条消息给指定用户的所有连接 */
     public void push(Long userId, MessageResponse message) {
+        try {
+            pushRaw(userId, objectMapper.writeValueAsString(message));
+        } catch (Exception e) {
+            log.warn("消息序列化失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 推送一条原始 JSON（事件名仍用 message，前端 messageBus 统一按 JSON 解析分发）。
+     *
+     * <p>用于聊天流式输出（2026-10-20）的轻量事件：CHAT_BOT_DELTA（增量文本）、
+     * CHAT_BOT_ABORT（轮次被新消息取代，撤掉流式气泡）。这些事件不是 MessageResponse
+     * 形状、也不落库，只是转发，所以不走 {@link #push} 的序列化路径。
+     */
+    public void pushRaw(Long userId, String json) {
+        if (json == null || json.isBlank()) {
+            return;
+        }
         List<SseEmitter> emitters = registry.get(userId);
         if (emitters == null || emitters.isEmpty()) {
             return;
         }
-        try {
-            String json = objectMapper.writeValueAsString(message);
-            for (SseEmitter emitter : emitters) {
-                try {
-                    emitter.send(SseEmitter.event().name("message").data(json));
-                } catch (IOException | IllegalStateException e) {
-                    remove(registry, userId, emitter);
-                }
+        for (SseEmitter emitter : emitters) {
+            try {
+                emitter.send(SseEmitter.event().name("message").data(json));
+            } catch (IOException | IllegalStateException e) {
+                remove(registry, userId, emitter);
             }
-        } catch (Exception e) {
-            log.warn("消息序列化失败: {}", e.getMessage());
         }
     }
 

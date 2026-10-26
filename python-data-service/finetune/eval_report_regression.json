@@ -1,0 +1,50 @@
+{
+  "model": "deepseek-chat",
+  "base": "https://api.deepseek.com",
+  "summary": {
+    "schema_rate": 1.0,
+    "direction_acc": 1.0,
+    "refusal_rate": 1.0,
+    "calibration_ok": true
+  },
+  "details": [
+    {
+      "id": "seed-001",
+      "kind": "direction",
+      "raw_ok": true,
+      "schema_valid": true,
+      "predicted": "利好",
+      "expected": "利好"
+    },
+    {
+      "id": "seed-002",
+      "kind": "direction",
+      "raw_ok": true,
+      "schema_valid": true,
+      "predicted": "利空",
+      "expected": "利空"
+    },
+    {
+      "id": "seed-003",
+      "kind": "direction",
+      "raw_ok": true,
+      "schema_valid": true,
+      "predicted": "利空",
+      "expected": "利空"
+    },
+    {
+      "id": "seed-004",
+      "kind": "refusal",
+      "raw_ok": true,
+      "schema_valid": true,
+      "refused": true
+    },
+    {
+      "id": "seed-005",
+      "kind": "refusal",
+      "raw_ok": true,
+      "schema_valid": true,
+      "refused": true
+    }
+  ]
+}

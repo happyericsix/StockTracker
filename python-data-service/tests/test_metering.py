@@ -217,7 +217,7 @@ def test_llm_calls_are_metered_with_tokens(monkeypatch):
                     "usage": {"prompt_tokens": 900, "completion_tokens": 100,
                               "total_tokens": 1000}}
 
-    monkeypatch.setattr(llm_service, "_is_available", lambda: True)
+    monkeypatch.setattr(llm_service, "_is_available", lambda providers=None: True)
     monkeypatch.setattr(llm_service.requests, "post", lambda *a, **k: _Resp())
 
     choice = llm_service.chat_completion([{"role": "user", "content": "你好"}])
@@ -238,7 +238,7 @@ def test_llm_failure_is_metered_and_still_raises(monkeypatch):
     def boom(*_args, **_kwargs):
         raise OSError("connection reset")
 
-    monkeypatch.setattr(llm_service, "_is_available", lambda: True)
+    monkeypatch.setattr(llm_service, "_is_available", lambda providers=None: True)
     monkeypatch.setattr(llm_service.requests, "post", boom)
 
     try:
@@ -292,6 +292,37 @@ def test_usage_event_is_skipped_without_identity(monkeypatch):
     ra._queue_usage(None, None, {}, metering.turn_started_at())
 
     assert submitted == []
+
+
+# ==================== 日预算阈值提醒（2026-10-22） ====================
+
+def test_quota_thresholds_fire_once_each_and_surface_in_health(monkeypatch):
+    """70%/90%/100% 各告警一次、不重复；/health 经 snapshot()["quota"] 可见。"""
+    meter = fresh_meter(monkeypatch)
+    monkeypatch.setenv("LLM_DAILY_TOKEN_BUDGET", "1000")
+
+    meter.record_llm(total_tokens=750)
+    quota = meter.snapshot()["quota"]
+    assert quota["budget"] == 1000 and quota["used"] == 750 and quota["pct"] == 75.0
+    assert [a["level"] for a in quota["alerts"]] == ["70%"], "70% 只该告警一次"
+
+    meter.record_llm(total_tokens=100)   # 850：仍在 70%~90% 区间，不该重复
+    assert [a["level"] for a in meter.snapshot()["quota"]["alerts"]] == ["70%"]
+
+    meter.record_llm(total_tokens=100)   # 950：过 90%
+    meter.record_llm(total_tokens=150)   # 1100：过 100%
+    assert [a["level"] for a in meter.snapshot()["quota"]["alerts"]] == ["70%", "90%", "100%"]
+
+
+def test_no_quota_alerts_without_a_budget(monkeypatch):
+    """预算=0（不限）时 pct 为 None、零告警——不能拿终身累计吓人。"""
+    meter = fresh_meter(monkeypatch)
+    monkeypatch.setenv("LLM_DAILY_TOKEN_BUDGET", "0")
+
+    meter.record_llm(total_tokens=999999)
+
+    quota = meter.snapshot()["quota"]
+    assert quota["budget"] == 0 and quota["pct"] is None and quota["alerts"] == []
 
 
 if __name__ == "__main__":

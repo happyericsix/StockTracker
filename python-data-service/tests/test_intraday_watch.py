@@ -260,7 +260,7 @@ def test_decide_llm_failure_is_degraded():
 
 
 def test_decide_unavailable_service_is_degraded(monkeypatch):
-    monkeypatch.setattr(llm_service, "_is_available", lambda: False)
+    monkeypatch.setattr(llm_service, "_is_available", lambda providers=None: False)
     llm = FakeLLM('{"action":"buy","size_fraction":1}')
     out = iw.intraday_decide("sh601988", EVENTS, None, None, BASE_CONFIG,
                              make_minute_bars(), make_day_records(), completion=llm)
@@ -269,7 +269,7 @@ def test_decide_unavailable_service_is_degraded(monkeypatch):
 
 def test_decide_placeholder_response_is_degraded(monkeypatch):
     """chat_completion 不可用时返回占位文本而不抛异常 —— 那也是"没问成"。"""
-    monkeypatch.setattr(llm_service, "_is_available", lambda: True)
+    monkeypatch.setattr(llm_service, "_is_available", lambda providers=None: True)
     llm = FakeLLM("AI 服务暂不可用")
     out = iw.intraday_decide("sh601988", EVENTS, None, None, BASE_CONFIG,
                              make_minute_bars(), make_day_records(), completion=llm)

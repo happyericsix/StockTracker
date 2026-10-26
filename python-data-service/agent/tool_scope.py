@@ -118,6 +118,15 @@ class ToolContext:
     # 放在字段末尾是刻意的：ToolContext 是 frozen dataclass，既有调用点用的是
     # 关键字参数，但把新字段追加在最末尾能保证任何位置参数构造都不会被改变含义。
     role: Optional[str] = None
+    # 聊天轮次号（连发中断）：主 agent 轮开始时由服务端登记，fanout 这类
+    # 会派生子 agent 的长任务把它带下去，让子 agent 在自己的步骤边界
+    # 也能发现"这轮已经被更新的消息超过"，及时停手省 token。
+    epoch: Optional[int] = None
+    # 本轮使用的 LLM 调用（BYOK，2026-10-25）：主 agent 轮开始时由服务端注入
+    # （functools.partial 绑定了用户自己的供应商列表），None = 系统级调用走 env。
+    # fanout 这类"agent 循环里的工具再派生 LLM 调用"的唯一传递通道——不带上它，
+    # 用户级轮次的子调研会静默烧到部署者的全局 key 上。
+    completion: Any = None
 
     def as_dict(self) -> dict:
         """只导出非空的标识字段。
@@ -140,11 +149,16 @@ _CONTEXT: ContextVar[ToolContext] = ContextVar("agent_tool_context", default=_EM
 
 
 def begin(user_id=None, session_key=None, scopes=None, request_id=None,
-          trace_id=None, turn_index=0, approvals=None, budget=None, role=None):
+          trace_id=None, turn_index=0, approvals=None, budget=None, role=None,
+          epoch=None, completion=None):
     """建立本次请求的工具上下文，返回 token（供 reset 用）。
 
     `role` 由**服务端**注入（与 user_id/scopes 同级）：它决定这段过程记进账本时
     是否属于"用户的对话"。模型无权指定自己的角色。
+
+    `epoch` 同样只能由服务端注入（主 agent 的轮次号），供子 agent 继承做取消判断。
+
+    `completion`（BYOK）也只能由服务端注入：本轮绑定的 LLM 调用。
     """
     context = ToolContext(
         user_id=user_id,
@@ -156,6 +170,8 @@ def begin(user_id=None, session_key=None, scopes=None, request_id=None,
         approvals=frozenset(approvals or ()),
         budget=budget or ToolBudget(),
         role=str(role).strip() or None if role else None,
+        epoch=int(epoch) if epoch is not None else None,
+        completion=completion,
     )
     return _CONTEXT.set(context)
 

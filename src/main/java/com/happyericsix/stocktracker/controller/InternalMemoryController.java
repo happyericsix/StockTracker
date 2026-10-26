@@ -95,13 +95,16 @@ public class InternalMemoryController {
             @RequestParam Long userId,
             @RequestParam(required = false) String query,
             @RequestParam(required = false) String taskType,
+            @RequestParam(required = false) String symbol,
             @RequestParam(required = false, defaultValue = "3") int limit,
             @RequestHeader(value = "X-Internal-Token", required = false) String token) {
         if (!authorized(token)) {
             return unauthorized();
         }
+        // symbol（2026-10-16 情境绑定）：聊天正在讨论某只票时，同票策略的教训加权靠前；
+        // 每条教训带 origin 出处（策略名/标的），跨标的教训模型只作思路参考
         return ResponseEntity.ok(Map.of("lessons",
-                memoryLessonService.searchLessons(userId, query, taskType, limit)));
+                memoryLessonService.searchLessons(userId, query, taskType, null, limit, symbol)));
     }
 
     /** 写入经验（一次巩固抽取出来的结果）。一律以 pending 落库，见 MemoryLessonService。 */
@@ -126,6 +129,25 @@ public class InternalMemoryController {
             results.add(item);
         }
         return ResponseEntity.ok(Map.of("results", results, "count", results.size()));
+    }
+
+    /**
+     * 单条经验的全文（反问功能 2026-10-16）：Python 的 render_focus 拿它把教训
+     * 注入聚焦对话上下文。只读 —— agent 侧仍然没有任何教训写接口（防投毒）。
+     */
+    @GetMapping("/lessons/{id}")
+    public ResponseEntity<Map<String, Object>> lesson(
+            @PathVariable Long id,
+            @RequestParam Long userId,
+            @RequestHeader(value = "X-Internal-Token", required = false) String token) {
+        if (!authorized(token)) {
+            return unauthorized();
+        }
+        Map<String, Object> lesson = memoryLessonService.lessonFor(userId, id);
+        if (lesson == null) {
+            return ResponseEntity.status(404).body(Map.of("error", "lesson not found"));
+        }
+        return ResponseEntity.ok(lesson);
     }
 
     /** 批量追加账本事件（工具调用结果入账走这里，避免每个工具一次 HTTP） */

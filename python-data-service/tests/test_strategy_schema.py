@@ -3,7 +3,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent.strategy_schema import validate_strategy_config, extract_strategy_json
+from agent.strategy_schema import (
+    MAX_CONDITIONS_PER_GROUP,
+    extract_strategy_json,
+    strategy_complexity,
+    validate_strategy_config,
+)
 
 VALID = {
     "schema_version": "1.0",
@@ -135,3 +140,62 @@ def test_volume_ratio_accepts_and_rejects():
         _cfg_with_entry({"type": "volume_ratio", "window": 20,
                          "value": 0, "direction": "above"}))
     assert err and "正数" in err
+
+
+# ==================== 条件数上限与复杂度计数（2026-10-16，奥卡姆剃刀落地） ====================
+
+
+def test_condition_count_capped():
+    """每组条件的硬边界：超过上限直接拒，报错必须是中文人话（会透传到编辑面板）。"""
+    conds = [{"type": "price_above_ma", "window": 20}] * (MAX_CONDITIONS_PER_GROUP + 1)
+    cfg, err = validate_strategy_config(_with_conditions(conds))
+    assert cfg is None
+    assert "上限" in err and str(MAX_CONDITIONS_PER_GROUP) in err
+
+
+def test_condition_count_at_cap_accepted():
+    """恰好在上限内的合法配置不受影响。"""
+    conds = [{"type": "price_above_ma", "window": 20}] * MAX_CONDITIONS_PER_GROUP
+    cfg, err = validate_strategy_config(_with_conditions(conds))
+    assert err is None and len(cfg.entry.conditions) == MAX_CONDITIONS_PER_GROUP
+
+
+def test_strategy_complexity_counts_entry_and_exit():
+    # VALID：entry 1 条 + exit 3 条
+    assert strategy_complexity(VALID) == 4
+
+
+def test_strategy_complexity_is_defensive():
+    """喂原始 payload（未过校验）也不许抛异常：读不懂的部分按 0 条计。"""
+    assert strategy_complexity({}) == 0
+    assert strategy_complexity(None) == 0
+    assert strategy_complexity({"entry": "坏结构", "exit": None}) == 0
+    mixed = {"entry": {"conditions": ["不是字典", {"type": "rsi_above", "value": 70}]}}
+    assert strategy_complexity(mixed) == 1
+
+
+# ==================== 估值分位条件（2026-10-16，pe_percentile） ====================
+
+
+def _pe_cond(**over):
+    cond = {"type": "pe_percentile", "window": 250, "direction": "below", "value": 30}
+    cond.update(over)
+    return cond
+
+
+def test_pe_percentile_accepted():
+    cfg, err = validate_strategy_config(_with_conditions([_pe_cond()]))
+    assert err is None and cfg.entry.conditions[0].window == 250
+
+
+def test_pe_percentile_needs_all_three_params():
+    for broken in (_pe_cond(direction=None), _pe_cond(value=None), _pe_cond(window=None)):
+        cfg, err = validate_strategy_config(_with_conditions([broken]))
+        assert cfg is None and ("估值分位" in err or "阈值" in err or "窗口" in err), err
+
+
+def test_pe_percentile_bounds():
+    # 阈值越界 / 窗口太短（分位变噪声）/ 窗口太长
+    for bad in (_pe_cond(value=130), _pe_cond(window=60), _pe_cond(window=99999)):
+        cfg, err = validate_strategy_config(_with_conditions([bad]))
+        assert cfg is None and err

@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from typing import Optional
@@ -51,6 +52,11 @@ class Meter:
         # LLM_DAILY_TOKEN_BUDGET）是**每日**口径，拿进程终身累计去比会让超限一天后
         # 委员会从此不再开会直到重启 —— "每日"就必须按日清零。
         self._llm_daily = {"date": _cn_today(), "tokens": 0}
+        # 日预算阈值提醒（2026-10-22）：70%/90%/100% 各告警一次（当日），
+        # WARNING 日志 + snapshot()["quota"]（/health 可见）。**不做任何拒绝**——
+        # "先能看见，再能限制"仍是这一层的纪律，拒绝逻辑在调用方（委员会/fanout 的预算闸）。
+        self._quota_alerted: set = set()
+        self._quota_alerts: list = []
 
     # ---------- 内部 ----------
 
@@ -162,7 +168,47 @@ class Meter:
         today = _cn_today()
         if self._llm_daily.get("date") != today:
             self._llm_daily = {"date": today, "tokens": 0}
+            self._quota_alerted.clear()   # 新的一天，阈值告警重新武装
         self._llm_daily["tokens"] = self._llm_daily.get("tokens", 0) + tokens
+        self._check_quota_locked()
+
+    def _daily_budget_locked(self) -> int:
+        """LLM_DAILY_TOKEN_BUDGET（委员会/fanout 共用的那条日预算线）；0 = 不设预算。"""
+        try:
+            return max(0, int(os.getenv("LLM_DAILY_TOKEN_BUDGET", "0") or "0"))
+        except ValueError:
+            return 0
+
+    def _check_quota_locked(self) -> None:
+        """日预算阈值提醒：70%/90%/100% 各告警一次（当日）。
+
+        为什么在计量层而不是调用方：预算线是全局口径，结算波峰烧到哪里了应该
+        **无论哪个调用方**都能看见；调用方的预算闸继续负责拒绝，这里只负责提醒。
+        """
+        budget = self._daily_budget_locked()
+        if budget <= 0:
+            return
+        used = int(self._llm_daily.get("tokens", 0))
+        for pct in (0.7, 0.9, 1.0):
+            if used >= budget * pct and pct not in self._quota_alerted:
+                self._quota_alerted.add(pct)
+                self._quota_alerts.append({
+                    "level": f"{int(pct * 100)}%", "used": used, "budget": budget,
+                    "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                })
+                del self._quota_alerts[:-20]   # 有界：只留最近 20 条
+                logger.warning(
+                    "LLM 日预算已用 %d%%（%d/%d tokens）%s",
+                    int(pct * 100), used, budget,
+                    "——已到或越过预算线，后续大规模调用（结算/委员会）会被预算闸拒绝"
+                    if pct >= 1.0 else "——注意控制大规模调用（结算波峰/委员会）")
+
+    def _quota_status_locked(self) -> dict:
+        budget = self._daily_budget_locked()
+        used = int(self._llm_daily.get("tokens", 0))
+        return {"budget": budget, "used": used,
+                "pct": round(used * 100.0 / budget, 1) if budget > 0 else None,
+                "alerts": list(self._quota_alerts[-10:])}
 
     def daily_llm_tokens(self) -> int:
         """今天（Asia/Shanghai）累计的 LLM token 数。
@@ -195,6 +241,7 @@ class Meter:
             if self._llm_daily.get("date") != _cn_today():
                 self._llm_daily = {"date": _cn_today(), "tokens": 0}
             daily = dict(self._llm_daily)
+            quota = self._quota_status_locked()
             totals = {
                 "turns": self._turns,
                 "tool_calls": self._counters.get("tools.calls", 0),
@@ -210,6 +257,7 @@ class Meter:
             "totals": totals,
             "llm": llm,
             "llm_daily": daily,
+            "quota": quota,
             "tools": tools,
             # 外部源的**用量**只有一个来源：从健康状态派生，不在这里重复计数
             "external": _external_rollup(),
@@ -224,6 +272,8 @@ class Meter:
             self._llm = {"calls": 0, "failures": 0, "prompt_tokens": 0,
                          "completion_tokens": 0, "total_tokens": 0, "latency_ms": 0}
             self._llm_daily = {"date": _cn_today(), "tokens": 0}
+            self._quota_alerted.clear()
+            self._quota_alerts.clear()
             self._turns = 0
 
 

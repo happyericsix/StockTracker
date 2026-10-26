@@ -18,6 +18,8 @@ import java.util.List;
  *       （T+1）、有整手与税费约束，PnL 在模拟盘账户里另有口径；</li>
  *   <li>当天既有盘中成交又有日频 skip（already_traded_today）时，这一天按
  *       <b>成交那条</b>记录——"它选择不动"的痕迹仍在，但对答案要对在动作上；</li>
+ *   <li>次日 0.00% 平盘按 <b>miss</b> 计（buy/sell 一视同仁）：方向没对就是对错答案
+ *       ——此前平盘的 sell 记 hit，胜率对卖出方向系统性偏乐观；</li>
  *   <li>行情源取不到日线时判 {@code NO_PRICE}，<b>绝不猜方向</b>。</li>
  * </ul>
  */

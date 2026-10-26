@@ -22,6 +22,10 @@ export const listMemoryLessons = () => request.get('/memory/lessons')
 export const activateLesson = (id) => request.post(`/memory/lessons/${id}/activate`)
 export const retireLesson = (id) => request.post(`/memory/lessons/${id}/retire`)
 
+/** 修订一条经验：非空字段覆盖、空字段继承，落为取代旧行的新版本（保留历史） */
+export const reviseLesson = (id, payload) =>
+  request.post(`/memory/lessons/${id}/revise`, payload)
+
 /** 会话摘要（前情提要）：可以看到助手是怎么总结对话的 */
 export const listMemoryEpisodes = () => request.get('/memory/episodes')
 

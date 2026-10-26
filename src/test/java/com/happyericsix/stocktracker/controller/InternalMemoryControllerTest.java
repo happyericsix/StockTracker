@@ -49,7 +49,7 @@ class InternalMemoryControllerTest {
         assertEquals(401, controller.events(1L, "1:2026-09-16", null).getStatusCode().value());
         assertEquals(401, controller.saveEpisode(new MemoryEpisodeRequest(), null).getStatusCode().value());
         assertEquals(401, controller.facts(1L, "止损", null, null, 8, null).getStatusCode().value());
-        assertEquals(401, controller.lessons(1L, "止损", null, 3, null).getStatusCode().value());
+        assertEquals(401, controller.lessons(1L, "止损", null, null, 3, null).getStatusCode().value());
         assertEquals(401, controller.index(1L, null).getStatusCode().value());
     }
 

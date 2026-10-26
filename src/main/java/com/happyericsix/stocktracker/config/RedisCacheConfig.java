@@ -24,7 +24,9 @@ import java.util.Set;
 @ConditionalOnProperty(name = "spring.cache.type", havingValue = "redis")
 public class RedisCacheConfig {
 
-    public static final Set<String> CACHE_NAMES = Set.of("stocks", "stockOverviews", "stockSearch", "stockIndicators");
+    public static final Set<String> CACHE_NAMES = Set.of(
+            "stocks", "stockOverviews", "stockSearch", "stockIndicators",
+            "stockHistory", "stockMinute");
 
     @Bean
     public com.github.benmanes.caffeine.cache.Cache<Object, Object> caffeineCache() {
@@ -69,11 +71,34 @@ public class RedisCacheConfig {
                         RedisSerializationContext.SerializationPair.fromSerializer(
                                 new JdkSerializationRedisSerializer()));
 
+        // K 线历史 60s / 分钟 K 30s：对齐 Python 侧同名缓存的 TTL（近期日 K 60s、分钟 30s），
+        // Java 这层只为挡 K 线页高频切换的重复拉取与缓存击穿，不产生比下游更陈旧的数据
+        RedisCacheConfiguration historyConfig = RedisCacheConfiguration.defaultCacheConfig()
+                .entryTtl(Duration.ofSeconds(60))
+                .disableCachingNullValues()
+                .serializeKeysWith(
+                        RedisSerializationContext.SerializationPair.fromSerializer(
+                                new StringRedisSerializer()))
+                .serializeValuesWith(
+                        RedisSerializationContext.SerializationPair.fromSerializer(
+                                new JdkSerializationRedisSerializer()));
+        RedisCacheConfiguration minuteConfig = RedisCacheConfiguration.defaultCacheConfig()
+                .entryTtl(Duration.ofSeconds(30))
+                .disableCachingNullValues()
+                .serializeKeysWith(
+                        RedisSerializationContext.SerializationPair.fromSerializer(
+                                new StringRedisSerializer()))
+                .serializeValuesWith(
+                        RedisSerializationContext.SerializationPair.fromSerializer(
+                                new JdkSerializationRedisSerializer()));
+
         return RedisCacheManager.builder(factory)
                 .cacheDefaults(defaultConfig)
                 .withInitialCacheConfigurations(Map.of(
                         "stockSearch", searchConfig,
-                        "stockIndicators", indicatorConfig))
+                        "stockIndicators", indicatorConfig,
+                        "stockHistory", historyConfig,
+                        "stockMinute", minuteConfig))
                 .initialCacheNames(CACHE_NAMES)
                 .build();
     }

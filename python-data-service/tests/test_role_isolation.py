@@ -214,7 +214,7 @@ def test_subagent_events_are_kept_out_of_the_recap():
                meta={"delta": {}, "role": "strategy_critic"}),
     ]
 
-    dialog, used_ids, _ = consolidate._build_dialog(events)
+    dialog, used_ids, _, _line_ids = consolidate._build_dialog(events)
 
     assert "止损改成 5%" in dialog
     # 主 agent 的工具结果保留：它是经验抽取（symptom → resolution）唯一的原料
@@ -230,7 +230,7 @@ def test_main_agent_tool_result_is_still_lesson_material():
     """反向守卫：一刀切排除 tool_result 会让"上次是怎么解决的"失去依据。"""
     events = [_event(1, "tool_result", "backtest_strategy 失败：历史数据不足")]
 
-    dialog, used_ids, _ = consolidate._build_dialog(events)
+    dialog, used_ids, _, _line_ids = consolidate._build_dialog(events)
 
     assert "历史数据不足" in dialog
     assert used_ids == [1]
@@ -240,7 +240,7 @@ def test_unparseable_meta_is_treated_as_main_agent():
     """脏数据不能反过来把摘要整段丢掉：解析不了就按主 agent 处理。"""
     events = [_event(1, "tool_result", "get_quote -> 1 条", meta="{这不是 JSON")]
 
-    dialog, used_ids, _ = consolidate._build_dialog(events)
+    dialog, used_ids, _, _line_ids = consolidate._build_dialog(events)
 
     assert used_ids == [1]
 
@@ -252,7 +252,7 @@ def test_meta_can_already_be_a_dict():
         _event(2, "tool_result", "get_quote -> 1 条", meta={"role": ""}),
     ]
 
-    _, used_ids, _ = consolidate._build_dialog(events)
+    _, used_ids, _, _line_ids = consolidate._build_dialog(events)
 
     assert used_ids == [2]
 

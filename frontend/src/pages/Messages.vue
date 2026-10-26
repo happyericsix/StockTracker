@@ -1,17 +1,17 @@
 <script setup>
 /**
- * 消息中心（口径：只收 ALERT + STRATEGY_SENTINEL，2026-10-10 收窄）。
+ * 消息中心（口径：CENTER_TYPES = 预警 + 策略哨兵/策略信 + 新闻预警，见 messageBus）。
  * 逻辑自旧版原样移植：tab 竞态防护（loadSeq）、本地时间窗口、整卡已读按钮层、
  * SSE 增量 + 断线重连补拉首页、滚动到底自动加载。
  */
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  Bell, Bot, MessageSquare, CandlestickChart, Megaphone, Info,
+  Bell, Bot, MessageSquare, CandlestickChart, Megaphone, Info, Newspaper,
   TrendingUp, TrendingDown, Percent, Sun, Snowflake, Sparkles, ArrowDownRight, ChevronRight,
 } from 'lucide-vue-next'
 import { getMessages, markRead, markAllRead } from '../api/messages.js'
-import { messageBus } from '../composables/messageBus.js'
+import { messageBus, CENTER_TYPES } from '../composables/messageBus.js'
 import Button from '../components/ui/button.vue'
 import Empty from '../components/ui/empty.vue'
 import Skeleton from '../components/ui/skeleton.vue'
@@ -51,6 +51,7 @@ const timeRanges = [
 const typeMeta = (type) => {
   switch (type) {
     case 'ALERT': return { icon: Bell, label: '预警提醒' }
+    case 'NEWS_ALERT': return { icon: Newspaper, label: '新闻预警' }
     case 'CHAT_BOT': return { icon: Bot, label: '智能助手' }
     case 'CHAT_USER': return { icon: MessageSquare, label: '我' }
     case 'PAPER_REPORT': return { icon: CandlestickChart, label: '模拟盘复盘' }
@@ -184,7 +185,8 @@ const loadMore = async () => {
 
 const onBusMessage = (msg) => {
   if (!msg || !msg.id) return
-  if (msg.type !== 'ALERT' && msg.type !== 'STRATEGY_SENTINEL') return
+  // 与列表接口同一口径（CENTER_TYPES），否则 SSE 推来的消息要等刷新才出现
+  if (!CENTER_TYPES.includes(msg.type)) return
   const idx = messages.value.findIndex((m) => m.id === msg.id)
   if (idx >= 0) {
     messages.value[idx] = msg
@@ -207,13 +209,17 @@ const handleRead = async (m) => {
 }
 
 const handleReadAll = async () => {
-  const hadUnread = messages.value.some((m) => !m.read)
-  if (!hadUnread) return
+  // 当前页可能一条未读都没有（未读在更深的分页或被过滤掉），但服务端未读数还在——
+  // 只看列表会漏判，红点点不掉。列表与未读数都清零才真的无事可做。
+  if (!messages.value.some((m) => !m.read) && messageBus.unread <= 0) return
   messages.value.forEach((m) => { m.read = true })
   messageBus.unread = 0
   try {
     await markAllRead()
-  } catch {}
+  } catch {
+    // 失败就向服务端对账，别让本地清零掩盖真实未读
+    messageBus.refreshUnread()
+  }
 }
 
 const onTabChange = () => load()
@@ -291,7 +297,7 @@ onUnmounted(() => {
             v-for="r in timeRanges"
             :key="r.key"
             type="button"
-            class="h-[26px] rounded-full px-3 text-[12px] transition-colors"
+            class="h-[26px] rounded-full px-3 text-[12px] transition-colors max-sm:h-[34px]"
             :class="timeRange === r.key ? 'bg-accent text-on-accent' : 'text-ink-2 hover:bg-surface-2'"
             :aria-pressed="timeRange === r.key"
             @click="timeRange = r.key; onTimeRangeChange()"

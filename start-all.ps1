@@ -1,4 +1,4 @@
-﻿# start-all.ps1 —— 一键启动 Stock Tracker 全栈（开发模式）
+﻿# start-all.ps1 —— 一键启动 StockTracker 全栈（开发模式）
 #
 # 为什么需要这个脚本：原来的 start.ps1 名字像是"启动全部"，其实只启动 Python 数据服务。
 # 而机器人（智能助手）需要三个服务同时在：
@@ -100,7 +100,7 @@ if ($Stop) {
 
 # ============================ 启动 ============================
 Write-Host ''
-Write-Host '  Stock Tracker 全栈启动（开发模式）' -ForegroundColor White
+Write-Host '  StockTracker 全栈启动（开发模式）' -ForegroundColor White
 Write-Host '  ==================================' -ForegroundColor White
 
 # ---------- 1. MySQL（原生） ----------

@@ -32,7 +32,7 @@ def setup_tracking():
         if experiment is None:
             mlflow.create_experiment(
                 EXPERIMENT_NAME,
-                tags={"project": "stock-tracker", "version": "v1"},
+                tags={"project": "StockTracker", "version": "v1"},
             )
             logger.info(f"Created MLflow experiment: {EXPERIMENT_NAME}")
     except Exception as e:

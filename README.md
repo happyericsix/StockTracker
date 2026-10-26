@@ -1,4 +1,6 @@
-# Stock Tracker
+# StockTracker
+
+**中文** | [English](README.en.md)
 
 > **量化平台把"如何发现统计优势"做到极致，StockTracker 把"如何让一个决策可解释、可验证、可纪律化执行"做到极致。**
 
@@ -18,9 +20,9 @@
 
 市面上的 LLM 炒股 agent（[TradingAgents](https://github.com/TauricResearch/TradingAgents)、ai-hedge-fund 等）解决的是"**你想问的时候，它给你一份研究报告**"——用户手动触发，跑完即散。
 
-**Stock Tracker 反过来：它是一个常驻的交易系统。** 策略 7×24 挂在系统里，确定性代码决定"什么时候值得叫醒 AI"，AI 只在被叫醒时做判断，执行与记账全部回到确定性代码。
+**StockTracker 反过来：它是一个常驻的交易系统。** 策略 7×24 挂在系统里，确定性代码决定"什么时候值得叫醒 AI"，AI 只在被叫醒时做判断，执行与记账全部回到确定性代码。
 
-| | 研究工具型 agent | **Stock Tracker** |
+| | 研究工具型 agent | **StockTracker** |
 |---|---|---|
 | 触发 | 用户手动点 | **事件驱动门控**（规则信号/波动异常/持仓过期，零 LLM 成本判断"值不值得开会"） |
 | 生命周期 | 一次会话 | 常驻：日线结算 + 盘中盯盘 + 周反思闭环 |
@@ -130,13 +132,21 @@ Python 3.11 · FastAPI
 
 依赖：Docker（含 compose 插件）。数据源无需注册任何海外 key；LLM 用 [DeepSeek](https://platform.deepseek.com)（OpenAI 兼容协议，可替换为任何兼容端点，包括本地 Ollama）。
 
+> **AI 费用谁出（2026-10-25 起）**：用户触发的 AI——智能助手、交易委员会、盘中盯盘、
+> 复盘反思、记忆巩固——花的是**每个用户自己**在「个人中心 → AI 模型 Key」绑定的 Key
+> （推荐 DeepSeek，注册即得；可再配一条备用 Key，主 Key 限速时自动切换）。`.env` 里的
+> `DEEPSEEK_API_KEY` 只服务新闻解读等系统级任务。未绑定 Key 的用户自动降级为模板回复，
+> 界面会引导去配置。用户 Key 经 AES-GCM 加密落库（需在 `.env` 配 `LLM_AES_KEY`）。
+
 ```bash
-git clone https://github.com/happyericsix/stock-tracker.git
-cd stock-tracker
+git clone https://github.com/happyericsix/StockTracker.git
+cd StockTracker
 
 cp .env.example .env
-# 编辑 .env，三个必填值：
-#   MYSQL_ROOT_PASSWORD / INTERNAL_API_TOKEN（强随机）/ DEEPSEEK_API_KEY
+# 编辑 .env，必填值：
+#   MYSQL_ROOT_PASSWORD / INTERNAL_API_TOKEN（强随机）
+#   LLM_AES_KEY（openssl rand -hex 24，用户 Key 加密用）
+#   DEEPSEEK_API_KEY（可选：只服务新闻解读等系统级任务，不配则无 AI 解读）
 
 docker compose build          # 首次约 10-20 分钟
 docker compose up -d

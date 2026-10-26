@@ -5,6 +5,7 @@ import { Smartphone, ArrowLeft, CandlestickChart } from 'lucide-vue-next'
 import { login, register } from '../api/auth.js'
 import QrLogin from '../components/QrLogin.vue'
 import Button from '../components/ui/button.vue'
+import BeianFooter from '../components/BeianFooter.vue'
 
 const router = useRouter()
 const isLogin = ref(true)
@@ -65,7 +66,7 @@ const onQrSuccess = ({ token }) => {
 
 <template>
   <!-- 墨色底 + 卡面：登录即"走进墨阶"——侧栏的墨色在这里先出场 -->
-  <div class="flex min-h-screen min-h-[100dvh] items-center justify-center bg-sidebar px-4 py-10">
+  <div class="relative flex min-h-screen min-h-[100dvh] items-center justify-center bg-sidebar px-4 py-10">
     <div class="w-full max-w-[400px]">
       <div class="rounded-xl border border-border bg-surface p-7">
         <!-- 页面唯一 h1：品牌名（标题大纲不跳级） -->
@@ -178,5 +179,7 @@ const onQrSuccess = ({ token }) => {
         仅供学习交流，不构成投资建议
       </p>
     </div>
+    <!-- 备案合规：匿名访客的第一屏也必须能看到备案号（footer 组件自带浅色适配） -->
+    <BeianFooter class="absolute inset-x-0 bottom-0 text-sidebar-dim [&_a]:text-sidebar-dim [&_a:hover]:text-white/70" />
   </div>
 </template>

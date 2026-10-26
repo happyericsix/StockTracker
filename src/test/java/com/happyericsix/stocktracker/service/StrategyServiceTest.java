@@ -19,6 +19,7 @@ import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -169,6 +170,114 @@ class StrategyServiceTest {
         strategy.setConfigUpdatedAt(null);
         strategyService.updateStrategy("alice", 42L, new StrategyRequest("再改名", null, null));
         assertEquals(null, strategy.getConfigUpdatedAt());
+    }
+
+    // ==================== 创建路径的守门员（2026-10-15 补） ====================
+
+    /**
+     * 创建与编辑同一道门：坏 config 在创建时就被拒绝。最危险的形态正是符号写反的
+     * 止损 —— stop_loss_pct:+8 在引擎里是"涨幅 ≤ 8%"恒真，而止损走硬通道不等模型，
+     * 落库即入场即卖的碎钞机。
+     */
+    @Test
+    void invalidConfigIsRejectedAtCreation() {
+        User owner = alice();
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(owner));
+        when(strategyClient.validateConfig(any())).thenReturn(
+                mapper.readTree("{\"valid\":false,\"error\":\"stop_loss_pct 的 value 必须为负数\"}"));
+
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> strategyService.createStrategy("alice",
+                        new StrategyRequest("碎钞机", "600519",
+                                "{\"exit\":{\"conditions\":[{\"type\":\"stop_loss_pct\",\"value\":8}]}}")));
+
+        assertTrue(ex.getMessage().contains("必须为负数"), ex.getMessage());
+        verify(strategyRepository, never()).save(any());
+    }
+
+    /** 空 config 也拒绝：schema 要求 entry/exit 必填，空壳策略进了库也只会永远空转。 */
+    @Test
+    void blankConfigIsRejectedAtCreation() {
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(alice()));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> strategyService.createStrategy("alice", new StrategyRequest("空壳", "600519", " ")));
+        verifyNoInteractions(strategyClient);
+    }
+
+    /** 合法创建：校验通过才落库，且 decisionMode 一律 agent（2026-10-15 起无纯 rule 模式）。 */
+    @Test
+    void validCreationIsAgentModeFromDayOne() {
+        User owner = alice();
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(owner));
+        when(strategyClient.validateConfig(any())).thenReturn(mapper.readTree("{\"valid\":true}"));
+        when(strategyRepository.save(any(Strategy.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        var response = strategyService.createStrategy("alice",
+                new StrategyRequest("均线上穿", "601988", "{\"entry\":{},\"exit\":{}}"));
+
+        ArgumentCaptor<Strategy> captor = ArgumentCaptor.forClass(Strategy.class);
+        verify(strategyRepository).save(captor.capture());
+        assertEquals("agent", captor.getValue().getDecisionMode());
+        assertEquals(LocalDate.now(ZoneId.of("Asia/Shanghai")), captor.getValue().getDecisionModeSince());
+        assertNotNull(response);
+    }
+
+    /**
+     * AI 建仓同一道门 + 同一个 agent 起点（2026-10-15）：此前 createFromAgent 漏设
+     * decisionMode → null 按 rule 读，启动后既无首会也无授权；且 AI 输出是 schema
+     * 偏差率最高的一类 config，零校验直接落库。
+     */
+    @Test
+    void agentCreatedStrategyIsAgentModeAndValidated() {
+        User owner = alice();
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(owner));
+        when(strategyClient.validateConfig(any())).thenReturn(mapper.readTree("{\"valid\":true}"));
+        when(strategyRepository.save(any(Strategy.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        tools.jackson.databind.JsonNode strategyJson = mapper.readTree(
+                "{\"name\":\"AI 均线\",\"symbol\":\"600519\","
+                        + "\"entry\":{\"logic\":\"all\",\"conditions\":[{\"type\":\"ma_cross\",\"fast\":5,\"slow\":20,\"direction\":\"above\"}]},"
+                        + "\"exit\":{\"logic\":\"any\",\"conditions\":[{\"type\":\"stop_loss_pct\",\"value\":-8}]}}");
+        strategyService.createFromAgent("alice", strategyJson);
+
+        ArgumentCaptor<Strategy> captor = ArgumentCaptor.forClass(Strategy.class);
+        verify(strategyRepository).save(captor.capture());
+        assertEquals("agent", captor.getValue().getDecisionMode(),
+                "AI 建的策略同样是 agent 委员会决策，不能落成 null 按 rule 读");
+        assertEquals(LocalDate.now(ZoneId.of("Asia/Shanghai")), captor.getValue().getDecisionModeSince());
+        assertEquals("600519", captor.getValue().getSymbol());
+    }
+
+    /** AI 输出的坏 config（止损正数）同样进不了库：错误原因原样抛给聊天链路转达。 */
+    @Test
+    void agentCreatedStrategyWithBadConfigIsRejected() {
+        User owner = alice();
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(owner));
+        when(strategyClient.validateConfig(any())).thenReturn(
+                mapper.readTree("{\"valid\":false,\"error\":\"stop_loss_pct 的 value 必须为负数\"}"));
+
+        tools.jackson.databind.JsonNode strategyJson = mapper.readTree(
+                "{\"name\":\"AI 坏止损\",\"symbol\":\"600519\","
+                        + "\"exit\":{\"conditions\":[{\"type\":\"stop_loss_pct\",\"value\":8}]}}");
+
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> strategyService.createFromAgent("alice", strategyJson));
+        assertTrue(ex.getMessage().contains("AI 生成的策略未通过规则校验"), ex.getMessage());
+        verify(strategyRepository, never()).save(any());
+    }
+
+    /** AI 没给标的代码：连校验都不必问，直接拒绝（空 symbol 的策略取不到任何行情）。 */
+    @Test
+    void agentCreatedStrategyWithoutSymbolIsRejected() {
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(alice()));
+
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> strategyService.createFromAgent("alice",
+                        mapper.readTree("{\"name\":\"无标的\",\"exit\":{}}")));
+        assertTrue(ex.getMessage().contains("symbol"), ex.getMessage());
+        verifyNoInteractions(strategyClient);
+        verify(strategyRepository, never()).save(any());
     }
 
     /**

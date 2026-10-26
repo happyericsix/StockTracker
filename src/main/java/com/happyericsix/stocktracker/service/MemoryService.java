@@ -86,6 +86,13 @@ public class MemoryService {
     static final long CONSOLIDATE_COOLDOWN_MS = 60_000L;
     static final int MAX_COOLDOWN_ENTRIES = 512;
 
+    /**
+     * 巩固节奏的计量口径：只数对话事件。tool_result/usage 同样入账，
+     * 但一轮工具密集的对话能写 12+ 条，混进节奏会让"每条消息都巩固一次"
+     * （2026-10-20 线上实测：9 轮对话 44 条事件，连续三条消息各触发一次 LLM 巩固）。
+     */
+    private static final List<String> CHAT_EVENT_KINDS = List.of("chat_user", "chat_bot");
+
     private final MemoryEventRepository eventRepo;
     private final MemoryEpisodeRepository episodeRepo;
     private final MemoryClient memoryClient;
@@ -95,6 +102,12 @@ public class MemoryService {
 
     /** 会话 → 上次巩固时间（只用于节流，见 maybeConsolidateCurrentSession） */
     private final Map<String, Long> lastConsolidationAt = new java.util.concurrent.ConcurrentHashMap<>();
+    /**
+     * 正在被跨天补总结的会话（在途去重）。冷却表只护会话内路径；补总结没有它的话，
+     * 用户连发两条消息 → 两个异步线程同时看到"这段还没摘要" → 同一段对话并发生成
+     * 两版摘要（2026-10-20 线上实测：同一会话 v1/v2 相隔 1.9 秒，纯浪费的重复 LLM 调用）。
+     */
+    private final java.util.Set<String> inFlightBackfill = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     public MemoryService(MemoryEventRepository eventRepo, MemoryEpisodeRepository episodeRepo,
                          MemoryClient memoryClient, MemoryFactService factService,
@@ -387,11 +400,15 @@ public class MemoryService {
      * 写成 {@code count % 8 == 0} 或 {@code count == 2} 之类的判定在生产里<b>永远不会命中</b>
      * ——单元测试里手写偶数计数反而会"通过"，这正是这类 bug 最难发现的地方。
      *
+     * <p><b>计量只数对话事件</b>（{@link #CHAT_EVENT_KINDS}，一轮问答 = 2 条）：
+     * tool_result/usage 虽然也入账，但一轮能写十几条，算进节奏后阈值阶梯
+     * （+8/版本）追不上事件增速，巩固退化成"每条消息一次"。
+     *
      * <p>阈值随"已有摘要版本数"递增，前两次排得密：
      * <pre>
      *   version 0 → 累计 2 条即巩固（第一轮问答结束就有记忆）
      *   version 1 → 累计 4 条
-     *   version ≥2 → 8 × version 条（即稳定后大约每 8 条一次）
+     *   version ≥2 → 8 × version 条（即稳定后大约每 4 轮问答一次）
      * </pre>
      * 递增思路取自 TencentDB Agent Memory 的 {@code pipeline.enableWarmup} 生产默认值。
      *
@@ -405,7 +422,7 @@ public class MemoryService {
             return;
         }
         try {
-            long count = eventRepo.countByUserIdAndSessionKey(userId, sessionKey);
+            long count = eventRepo.countByUserIdAndSessionKeyAndKindIn(userId, sessionKey, CHAT_EVENT_KINDS);
             if (count <= 0) {
                 return;
             }
@@ -429,7 +446,7 @@ public class MemoryService {
             }
             lastConsolidationAt.put(sessionKey, now);
 
-            log.info("mid-session consolidation user={} session={} events={} version={}",
+            log.info("mid-session consolidation user={} session={} chatEvents={} version={}",
                     userId, sessionKey, count, version);
             memoryClient.consolidate(userId, sessionKey);
         } catch (Exception e) {
@@ -445,7 +462,8 @@ public class MemoryService {
             if (episodeRepo.existsByUserIdAndSessionKey(userId, candidate)) {
                 continue;
             }
-            if (eventRepo.countByUserIdAndSessionKey(userId, candidate) < MIN_EVENTS_FOR_RECAP) {
+            if (eventRepo.countByUserIdAndSessionKeyAndKindIn(userId, candidate, CHAT_EVENT_KINDS)
+                    < MIN_EVENTS_FOR_RECAP) {
                 continue;
             }
             pending.add(candidate);
@@ -478,6 +496,11 @@ public class MemoryService {
         }
 
         for (String candidate : pending) {
+            // 在途去重：摘要落库前，"还没有摘要"对并发线程同时成立——
+            // 不拦的话同一段对话会被并发生成两版摘要（纯烧一次 LLM）。
+            if (!inFlightBackfill.add(candidate)) {
+                continue;
+            }
             try {
                 log.info("consolidating memory session {} for user {}", candidate, userId);
                 memoryClient.consolidate(userId, candidate);
@@ -486,6 +509,8 @@ public class MemoryService {
                 // 继续打只会浪费配额。下一条用户消息会再触发一次。
                 log.warn("记忆巩固失败 user={} session={}: {}", userId, candidate, e.getMessage());
                 break;
+            } finally {
+                inFlightBackfill.remove(candidate);
             }
         }
     }

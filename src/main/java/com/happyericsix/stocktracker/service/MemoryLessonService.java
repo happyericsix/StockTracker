@@ -14,10 +14,12 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -60,8 +62,14 @@ public class MemoryLessonService {
     private final MemoryLessonRepository lessonRepo;
     private final ObjectMapper mapper;
 
-    public MemoryLessonService(MemoryLessonRepository lessonRepo, ObjectMapper mapper) {
+    private final com.happyericsix.stocktracker.repository.StrategyRepository strategyRepository;
+
+    /** origin 解析与同标的加权（2026-10-16 情境绑定）需要反查策略（scope→策略名/标的）。 */
+    public MemoryLessonService(MemoryLessonRepository lessonRepo,
+                               com.happyericsix.stocktracker.repository.StrategyRepository strategyRepository,
+                               ObjectMapper mapper) {
         this.lessonRepo = lessonRepo;
+        this.strategyRepository = strategyRepository;
         this.mapper = mapper;
     }
 
@@ -115,7 +123,9 @@ public class MemoryLessonService {
                     .recordedAt(LocalDateTime.now(ZoneId.of("Asia/Shanghai")))
                     .build());
 
-            long occurrences = lessonRepo.countByUserIdAndTaskTypeAndSymptom(
+            // 复发只数"独立出生"的行（supersedesId 为空）：修订是对既有经验换版本，
+            // 不是同类问题再现，不该推高"值不值得升格 skill"的复发信号
+            long occurrences = lessonRepo.countByUserIdAndTaskTypeAndSymptomAndSupersedesIdIsNull(
                     request.getUserId(), taskType, symptom);
             results.add(new LessonWriteResult(saved.getId(), taskType, symptom, "created", occurrences));
             if (occurrences >= PROMOTION_HINT_OCCURRENCES) {
@@ -182,6 +192,73 @@ public class MemoryLessonService {
                 }).orElse(false);
     }
 
+    /**
+     * 修订一条经验（2026-10-16，方案一）：追加一行新版本指向旧行（取代链，与 L2 事实层同构），
+     * 旧行内容永不 UPDATE。
+     *
+     * <p>字段语义：patch 里非空的字段覆盖，空的继承旧行。symptom 允许改 = 换键，
+     * 链随行——旧行被取代后在检索里消失，新行挂新键。taskType 不允许改
+     * （它是键的另一半，也是周反思回读的过滤条件，改了链与分区语义都断了）。
+     *
+     * <p>status 策略（防投毒纪律的延伸）：provenance=user 继承旧行——人刚改过，
+     * 人就是最高裁决；provenance=agent 一律 pending——agent 的修订同样要过人这一关。
+     *
+     * <p>并发：按 id 行锁取目标（周反思 job 与用户手工编辑可能同时修订同一条），
+     * 不锁会分叉出两条各自指向旧行的新版本。
+     *
+     * @return 新版本的写入结果；目标不存在/不属于该用户/参数残缺返回 null
+     */
+    @Transactional
+    public LessonWriteResult reviseLesson(Long userId, Long lessonId,
+                                          MemoryLessonRequest patch, String provenance) {
+        if (lessonId == null || patch == null) {
+            return null;
+        }
+        MemoryLesson target = lessonRepo.findByIdForUpdate(lessonId);
+        if (target == null || (userId != null && !userId.equals(target.getUserId()))) {
+            return null;
+        }
+        // 分叉防护（A-1）：目标已被新版本取代就拒绝再修——否则同批两条修订（或并发窗口外
+        // 的顺序双写）会各自指向旧行，出现两条"当前版本"并存。要改请改最新版本那行。
+        if (target.getId() != null && lessonRepo.existsBySupersedesId(target.getId())) {
+            log.info("经验修订被拒绝 lesson id={}：已被新版本取代，不允许分叉出第二条链", target.getId());
+            return null;
+        }
+        boolean byAgent = "agent".equals(provenance);
+        String symptom = isBlank(patch.getSymptom())
+                ? target.getSymptom() : normalizeSymptomForStorage(patch.getSymptom());
+        String symptomText = isBlank(patch.getSymptom())
+                ? target.getSymptomText() : clip(patch.getSymptom().trim(), MAX_SYMPTOM_CHARS);
+        MemoryLesson saved = lessonRepo.save(MemoryLesson.builder()
+                .userId(target.getUserId())
+                .sessionKey(target.getSessionKey())
+                .taskType(target.getTaskType())
+                .symptom(symptom)
+                .symptomText(symptomText)
+                .scope(target.getScope())
+                .context(patch.getContext() != null ? toJson(patch.getContext()) : target.getContext())
+                .attempts(patch.getAttempts() != null ? toJson(patch.getAttempts()) : target.getAttempts())
+                .resolution(isBlank(patch.getResolution())
+                        ? target.getResolution() : clip(patch.getResolution(), 1000))
+                .reusableRule(isBlank(patch.getReusableRule())
+                        ? target.getReusableRule() : clip(patch.getReusableRule(), 500))
+                .evidenceEventIds(target.getEvidenceEventIds())
+                .supersedesId(target.getId())
+                .confidence(patch.getConfidence() == null
+                        ? target.getConfidence() : patch.getConfidence())
+                .status(byAgent ? MemoryLesson.STATUS_PENDING : target.getStatus())
+                .provenance(provenance == null ? "user" : provenance)
+                .trust(target.getTrust())
+                .recordedAt(target.getRecordedAt())
+                .build());
+        long occurrences = lessonRepo.countByUserIdAndTaskTypeAndSymptomAndSupersedesIdIsNull(
+                saved.getUserId(), saved.getTaskType(), saved.getSymptom());
+        log.info("经验修订 lesson id={} → id={}（provenance={}，status={}）",
+                target.getId(), saved.getId(), provenance, saved.getStatus());
+        return new LessonWriteResult(saved.getId(), saved.getTaskType(), saved.getSymptom(),
+                "revised", occurrences);
+    }
+
     // ==================== 检索 ====================
 
     /**
@@ -203,14 +280,31 @@ public class MemoryLessonService {
      */
     public List<Map<String, Object>> searchLessons(Long userId, String query, String taskType,
                                                    String scope, int limit) {
+        return searchLessons(userId, query, taskType, scope, limit, null);
+    }
+
+    /**
+     * 情境绑定版（2026-10-16）：`symbol` 非空时，来源标的与之一致的教训加权——
+     * 聊天里正聊某只票，同票策略的教训排在前面。教训不是通用规律：不同股票、
+     * 不同打法学到的东西不能直接迁移，检索层能做的就是"让对口的先浮上来，
+     * 并让每条都带着出处"（origin 见 toMap）。
+     */
+    public List<Map<String, Object>> searchLessons(Long userId, String query, String taskType,
+                                                   String scope, int limit, String symbol) {
         if (userId == null) {
             return List.of();
         }
         int max = limit <= 0 ? 3 : Math.min(limit, 20);
 
+        List<MemoryLesson> rows = lessonRepo.findByUserIdOrderByIdDesc(userId);
+        Set<Long> supersededIds = supersededIdsOf(rows);
         Map<String, MemoryLesson> latestByKey = new LinkedHashMap<>();
-        for (MemoryLesson lesson : lessonRepo.findByUserIdOrderByIdDesc(userId)) {
+        for (MemoryLesson lesson : rows) {
             if (MemoryLesson.STATUS_RETIRED.equals(lesson.getStatus())) {
+                continue;
+            }
+            if (supersededIds.contains(lesson.getId())) {
+                // 被修订取代的旧版本：只留在历史里，不参与"当前经验"的评选
                 continue;
             }
             if (taskType != null && !taskType.isBlank()
@@ -225,16 +319,60 @@ public class MemoryLessonService {
 
         LocalDateTime now = LocalDateTime.now(ZoneId.of("Asia/Shanghai"));
         List<MemoryLesson> candidates = new ArrayList<>(latestByKey.values());
-        candidates.sort((a, b) -> Double.compare(score(b, query, now), score(a, query, now)));
+
+        // 同标的加权必须在**截断之前**（2026-10-16）：先纯分排序再截 top-N 再加权，
+        // 对口教训会在截断时被挤掉，加权就白加了。批量解析来源标的，
+        // 不在比较器里逐行查库（那会把 sort 变成 O(n) 次查询）。
+        String bareQuery = bareSymbol(symbol);
+        Map<Long, String> symbolByLesson = new LinkedHashMap<>();
+        if (!bareQuery.isEmpty()) {
+            for (MemoryLesson lesson : candidates) {
+                String s = strategySymbolOf(lessonScope(lesson));
+                if (s != null) {
+                    symbolByLesson.put(lesson.getId(), s);
+                }
+            }
+        }
+        candidates.sort((a, b) -> Double.compare(
+                score(b, query, now) + (bareQuery.equals(bareSymbol(symbolByLesson.get(b.getId()))) ? 2.5 : 0),
+                score(a, query, now) + (bareQuery.equals(bareSymbol(symbolByLesson.get(a.getId()))) ? 2.5 : 0)));
         if (candidates.size() > max) {
             candidates = candidates.subList(0, max);
         }
 
         List<Map<String, Object>> out = new ArrayList<>();
         for (MemoryLesson lesson : candidates) {
-            out.add(toMap(lesson));
+            out.add(toMap(lesson, supersededIds));
         }
         return out;
+    }
+
+    /** scope=strategy:N → 该策略的标的（策略可能已删，删了返回 null 不猜）。 */
+    private String strategySymbolOf(String scope) {
+        if (strategyRepository == null || scope == null
+                || !scope.startsWith(MemoryLesson.STRATEGY_SCOPE_PREFIX)) {
+            return null;
+        }
+        try {
+            Long id = Long.parseLong(scope.substring(MemoryLesson.STRATEGY_SCOPE_PREFIX.length()));
+            return strategyRepository.findById(id).map(s -> s.getSymbol()).orElse(null);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /** SH600519 / sz000001 / 600519 → 600519；非 6 位数字返回空串（两侧同规才比得上）。 */
+    private static String bareSymbol(String symbol) {
+        if (symbol == null) {
+            return "";
+        }
+        String s = symbol.trim().toUpperCase();
+        if (s.startsWith("SH") || s.startsWith("SZ") || s.startsWith("BJ")) {
+            s = s.substring(2);
+        }
+        // 用字符范围而非 \d 转义：写死 [0-9] 免去转义层级的手滑（这行刚被它咬过一次）
+        boolean sixDigits = s.length() == 6 && s.chars().allMatch(c -> c >= '0' && c <= '9');
+        return sixDigits ? s : "";
     }
 
     double score(MemoryLesson lesson, String query, LocalDateTime now) {
@@ -243,7 +381,7 @@ public class MemoryLessonService {
             // 人工确认过的经验优先于没人看过的
             score += 3;
         }
-        long occurrences = lessonRepo.countByUserIdAndTaskTypeAndSymptom(
+        long occurrences = lessonRepo.countByUserIdAndTaskTypeAndSymptomAndSupersedesIdIsNull(
                 lesson.getUserId(), lesson.getTaskType(), lesson.getSymptom());
         score += Math.min(occurrences, 5) * 0.6;
 
@@ -285,7 +423,12 @@ public class MemoryLessonService {
     // ==================== 输出 ====================
 
     private Map<String, Object> toMap(MemoryLesson lesson) {
-        long occurrences = lessonRepo.countByUserIdAndTaskTypeAndSymptom(
+        return toMap(lesson, Set.of());
+    }
+
+    /** supersededIds 来自同一批行的取代链（"已修订"标记给前端展示用）。 */
+    private Map<String, Object> toMap(MemoryLesson lesson, Set<Long> supersededIds) {
+        long occurrences = lessonRepo.countByUserIdAndTaskTypeAndSymptomAndSupersedesIdIsNull(
                 lesson.getUserId(), lesson.getTaskType(), lesson.getSymptom());
         Map<String, Object> item = new LinkedHashMap<>();
         item.put("id", lesson.getId());
@@ -303,10 +446,33 @@ public class MemoryLessonService {
         item.put("reusableRule", lesson.getReusableRule());
         item.put("status", lesson.getStatus());
         item.put("scope", lessonScope(lesson));
+        // 情境绑定（2026-10-16）：教训带出处下发——跨域检索（聊天）时模型能区分
+        // "同标的的直接参考"与"别处策略的思路启发"；scope 只有编号，人读的是 origin
+        Map<String, Object> origin = new LinkedHashMap<>();
+        origin.put("scope", lessonScope(lesson));
+        if (strategyRepository != null
+                && lessonScope(lesson).startsWith(MemoryLesson.STRATEGY_SCOPE_PREFIX)) {
+            String scopeText = lessonScope(lesson);
+            try {
+                Long strategyId = Long.parseLong(
+                        scopeText.substring(MemoryLesson.STRATEGY_SCOPE_PREFIX.length()));
+                strategyRepository.findById(strategyId).ifPresent(s -> {
+                    origin.put("strategyName", s.getName());
+                    origin.put("symbol", s.getSymbol());
+                });
+            } catch (NumberFormatException ignored) {
+                // scope 形态异常：只带 scope 原文
+            }
+        }
+        item.put("origin", origin);
         item.put("occurrences", occurrences);
         item.put("confidence", lesson.getConfidence());
         item.put("trust", lesson.getTrust());
         item.put("recordedAt", lesson.getRecordedAt() == null ? null : lesson.getRecordedAt().toString());
+        // 取代链（记忆白盒）：本行修订自哪一行、本行是否已被新版本取代
+        item.put("supersedesId", lesson.getSupersedesId());
+        item.put("superseded", supersededIds.contains(lesson.getId()));
+        item.put("provenance", lesson.getProvenance());
         // 句级来源（记忆白盒）：前端"查看来源"按钮按这些 id 拉原始对话
         item.put("evidenceEventIds", fromJson(lesson.getEvidenceEventIds()));
         item.put("promotionSuggested", occurrences >= PROMOTION_HINT_OCCURRENCES);
@@ -330,12 +496,14 @@ public class MemoryLessonService {
             return List.of();
         }
         int max = limit <= 0 ? 50 : Math.min(limit, 200);
+        List<MemoryLesson> rows = lessonRepo.findByUserIdOrderByIdDesc(userId);
+        Set<Long> supersededIds = supersededIdsOf(rows);
         List<Map<String, Object>> out = new ArrayList<>();
-        for (MemoryLesson lesson : lessonRepo.findByUserIdOrderByIdDesc(userId)) {
+        for (MemoryLesson lesson : rows) {
             if (out.size() >= max) {
                 break;
             }
-            out.add(toMap(lesson));
+            out.add(toMap(lesson, supersededIds));
         }
         return out;
     }
@@ -372,11 +540,57 @@ public class MemoryLessonService {
         if (userId == null || isBlank(taskType) || isBlank(symptom)) {
             return List.of();
         }
+        List<MemoryLesson> rows = lessonRepo.findByKey(userId, taskType.trim(), symptom.trim());
+        Set<Long> supersededIds = supersededIdsOf(rows);
         List<Map<String, Object>> out = new ArrayList<>();
-        for (MemoryLesson lesson : lessonRepo.findByKey(userId, taskType.trim(), symptom.trim())) {
-            out.add(toMap(lesson));
+        for (MemoryLesson lesson : rows) {
+            out.add(toMap(lesson, supersededIds));
         }
         return out;
+    }
+
+    /** 从同一用户（或同键）的一批行里收集"被取代的 id"：有行的 supersedesId 指向它即是。 */
+    private static Set<Long> supersededIdsOf(List<MemoryLesson> rows) {
+        Set<Long> superseded = new HashSet<>();
+        for (MemoryLesson lesson : rows) {
+            if (lesson.getSupersedesId() != null) {
+                superseded.add(lesson.getSupersedesId());
+            }
+        }
+        return superseded;
+    }
+
+    /**
+     * 单条经验的全文（反问功能的取料口，2026-10-16）：含 symptom/rule/context/status/
+     * occurrences/证据链，供聚焦对话把这条教训完整摆到 agent 面前。
+     * 若本条已被新版本取代，附上取代它的最新做法（supersededBy*）——agent 必须知道
+     * 自己在为一个历史版本辩护，以及系统现在相信的是什么（A-3）。
+     * 找不到或不属于该用户返回 null。
+     */
+    public Map<String, Object> lessonFor(Long userId, Long lessonId) {
+        if (userId == null || lessonId == null) {
+            return null;
+        }
+        MemoryLesson lesson = lessonRepo.findById(lessonId)
+                .filter(found -> userId.equals(found.getUserId()))
+                .orElse(null);
+        if (lesson == null) {
+            return null;
+        }
+        List<MemoryLesson> rows = lessonRepo.findByUserIdOrderByIdDesc(userId);
+        Map<String, Object> map = toMap(lesson, supersededIdsOf(rows));
+        if (Boolean.TRUE.equals(map.get("superseded"))) {
+            rows.stream()
+                    .filter(row -> lessonId.equals(row.getSupersedesId()))
+                    .max(java.util.Comparator.comparing(MemoryLesson::getId))
+                    .ifPresent(latest -> {
+                        map.put("supersededBySymptom", latest.getSymptomText() != null
+                                && !latest.getSymptomText().isBlank()
+                                ? latest.getSymptomText() : latest.getSymptom());
+                        map.put("supersededByRule", latest.getReusableRule());
+                    });
+        }
+        return map;
     }
 
     // ==================== 工具方法 ====================

@@ -28,4 +28,6 @@ python-data-service/mlflow.db*
 python-data-service/.memory_index/
 python-data-service/.external_offload/
 python-data-service/market_calendar_cache.json
+# 本地评测报告（grid_eval 等）：内含本机绝对路径与评测样本，不属于运行时产物
+python-data-service/reports/
 frontend/dist/

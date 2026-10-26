@@ -300,7 +300,7 @@ def test_an_unavailable_model_service_is_its_own_reason(monkeypatch):
     """模型不可用是**我们这边的故障**，不是市场的结论 —— 必须与 HOLD 分开。"""
     import llm_service
 
-    monkeypatch.setattr(llm_service, "_is_available", lambda: False)
+    monkeypatch.setattr(llm_service, "_is_available", lambda providers=None: False)
     llm = FakeLLM()
     result = tc.decide("600519", AS_OF, make_bars(90), completion=llm)
 

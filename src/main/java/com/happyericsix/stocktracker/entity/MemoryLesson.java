@@ -20,12 +20,18 @@ import java.time.ZoneId;
  * <h3>内容只追加，"审核状态"是例外</h3>
  * 每遇到一次同类问题就追加一行（带这次的证据事件），所以：
  * <ul>
- *   <li>"当前经验" = 同一个 (taskType, symptom) 下最新的那条；</li>
- *   <li>"出现过几次" = 该键的行数（不需要额外计数器，也不会因为并发写丢计数）。</li>
+ *   <li>"当前经验" = 同一个 (taskType, symptom) 下未被取代的最新那条；</li>
+ *   <li>"出现过几次" = 该键下 supersedesId 为空的行数（修订不灌水复发计数）。</li>
  * </ul>
  * 唯一的就地更新是 {@code status}（pending → active → retired）：那是<b>审核元数据</b>，
  * 记录"人有没有确认过这条经验"，不是记忆内容本身，与"内容只追加"不冲突
  * （和 Message.read 是同一类字段）。
+ *
+ * <h3>修订走取代链（与 L2 事实层同构）</h3>
+ * 2026-10-16 起经验允许"修订"：修订 = <b>追加一行新版本并指向旧行</b>
+ * （{@link #supersedesId}），旧行内容永不 UPDATE。读侧以"未被任何行指向"为有效，
+ * 同键取最新有效行。复发（同类问题再现）与修订是两回事：复发计数只数
+ * supersedesId 为空的"独立出生"行。
  *
  * <h3>为什么默认 pending、且必须人工确认才能 active</h3>
  * 经验会被注入到以后的对话里，一旦被污染（外部内容诱导出的"解法"）就会持续生效。
@@ -35,7 +41,8 @@ import java.time.ZoneId;
 @Entity
 @Table(name = "memory_lessons", indexes = {
         @Index(name = "idx_memory_lessons_user_key", columnList = "user_id,task_type,symptom"),
-        @Index(name = "idx_memory_lessons_user_status", columnList = "user_id,status")
+        @Index(name = "idx_memory_lessons_user_status", columnList = "user_id,status"),
+        @Index(name = "idx_memory_lessons_supersedes", columnList = "supersedes_id")
 })
 @Data
 @AllArgsConstructor
@@ -103,6 +110,14 @@ public class MemoryLesson {
     /** 来源账本事件 id，JSON 数组文本 */
     @Column(name = "evidence_event_ids", columnDefinition = "TEXT")
     private String evidenceEventIds;
+
+    /**
+     * 取代链（2026-10-16，与 MemoryFact.supersedesId 同构）：本行修订自哪一行。
+     * null = 独立出生（复发或首次）；非 null = 修订版本，旧行自此只留在历史里。
+     * 历史行为 null，语义恰好正确，不需要回填。
+     */
+    @Column(name = "supersedes_id")
+    private Long supersedesId;
 
     private Double confidence;
 

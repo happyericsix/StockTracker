@@ -27,6 +27,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import app as app_module  # noqa: E402
+import agent.react_agent as react_agent_module  # noqa: E402
 
 client = TestClient(app_module.app)
 
@@ -163,3 +164,107 @@ def test_absent_or_blank_role_means_main_agent(payload_role):
 
     assert r.status_code == 200, r.text
     assert mocked.call_args.kwargs["role"] is None
+
+
+def test_memory_lesson_focus_is_forwarded_to_the_agent():
+    """反问功能（2026-10-16）：聚焦对象必须原样到达 agent。
+
+    focus 在链路上被吞掉的表现是"反问变成普通聊天"——不报错，只是 agent
+    根本不知道用户在质疑哪条经验，答非所问，属于最难查的那类静默失效。
+    """
+    focus = {"type": "memory_lesson", "lesson_id": 41}
+    with patch("agent.react_agent.run_agent", return_value=FAKE_RESULT) as mocked:
+        r = _post({"user_id": "u1", "message": "这条经验的依据是什么？", "focus": focus})
+
+    assert r.status_code == 200, r.text
+    mocked.assert_called_once()
+    assert mocked.call_args.kwargs["focus"] == focus
+
+
+@pytest.mark.parametrize("bad_focus", ["not-a-dict", 42, None, ["memory_lesson"]])
+def test_malformed_focus_degrades_to_none(bad_focus):
+    """focus 结构不合法时不能把请求打挂，退化成无聚焦的普通聊天。"""
+    payload = {"user_id": "u1", "message": "hi"}
+    if bad_focus is not None:
+        payload["focus"] = bad_focus
+
+    with patch("agent.react_agent.run_agent", return_value=FAKE_RESULT) as mocked:
+        r = _post(payload)
+
+    assert r.status_code == 200, r.text
+    mocked.assert_called_once()
+    assert mocked.call_args.kwargs["focus"] is None
+
+
+def test_epoch_is_forwarded_and_recorded():
+    """连发中断契约（2026-10-20）：epoch 必须原样到达 agent，
+    并登记为该用户最新已受理的轮次。
+
+    字段被吞掉的表现是"旧轮次永远跑完"——不报错、只是白烧模型调用，
+    和 history 失忆同属最难查的静默失效。
+    """
+    with patch("agent.react_agent.run_agent", return_value=FAKE_RESULT) as mocked:
+        r = _post({"user_id": "u1", "message": "hi", "epoch": 7})
+
+    assert r.status_code == 200, r.text
+    mocked.assert_called_once()
+    assert mocked.call_args.kwargs["epoch"] == 7
+    assert react_agent_module._EPOCHS.get("u1") == 7, "端点受理时必须登记轮次"
+
+
+@pytest.mark.parametrize("bad_epoch", ["7", 1.5, True, [], {}])
+def test_malformed_epoch_degrades_to_none(bad_epoch):
+    """epoch 形状不合法（字符串/浮点/布尔/容器）不能打挂请求，退化为不启用中断。"""
+    with patch("agent.react_agent.run_agent", return_value=FAKE_RESULT) as mocked:
+        r = _post({"user_id": "u1", "message": "hi", "epoch": bad_epoch})
+
+    assert r.status_code == 200, r.text
+    mocked.assert_called_once()
+    assert mocked.call_args.kwargs["epoch"] is None
+
+
+# ===== 流式端点（2026-10-20 前端流式输出）=====
+
+def _post_stream(payload):
+    return client.post("/api/v1/agent/chat/stream", json=payload, headers=HEADERS)
+
+
+def _parse_sse(text):
+    import json as _json
+    events = []
+    for line in text.splitlines():
+        if line.startswith("data:"):
+            events.append(_json.loads(line[len("data:"):].strip()))
+    return events
+
+
+def test_stream_endpoint_emits_deltas_then_result():
+    """流式契约：delta 事件逐段在前，result 终态在最后（Java 侧以 result 落库）。"""
+    def fake_run(user_id, message, **kwargs):
+        cb = kwargs.get("on_delta")
+        cb("你")
+        cb("好")
+        return FAKE_RESULT
+
+    with patch("agent.react_agent.run_agent", side_effect=fake_run):
+        r = _post_stream({"user_id": "u1", "message": "hi", "epoch": 5})
+
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("text/event-stream")
+    events = _parse_sse(r.text)
+    assert {"type": "delta", "text": "你"} in events
+    assert {"type": "delta", "text": "好"} in events
+    assert events[-1] == {"type": "result", "result": FAKE_RESULT}, "终态事件必须是最后一个"
+    # epoch 登记在流式端点同样生效（连发中断契约不分流式/非流式）
+    assert react_agent_module._EPOCHS.get("u1") == 5
+
+
+def test_stream_endpoint_missing_fields_emit_empty_result():
+    """缺字段时不能打挂流，也不能调 agent：一个空 result 事件收尾。"""
+    with patch("agent.react_agent.run_agent", return_value=FAKE_RESULT) as mocked:
+        r = _post_stream({"message": "没有用户标识"})
+
+    assert r.status_code == 200, r.text
+    assert _parse_sse(r.text) == [
+        {"type": "result", "result": {"replies": [], "strategy_json": None}}]
+    mocked.assert_not_called()

@@ -110,8 +110,13 @@ def index_corpus(user_id) -> dict:
     return _get("/api/v1/internal/memory/index", {"userId": user_id})
 
 
-def search_lessons(user_id, query=None, task_type=None, limit=3) -> list:
-    """检索经验（"这类问题上次是怎么解决的"）。"""
+def search_lessons(user_id, query=None, task_type=None, limit=3, symbol=None) -> list:
+    """检索经验（"这类问题上次是怎么解决的"）。
+
+    `symbol`（2026-10-16 情境绑定）：聊天正在讨论某只票时传入——Java 侧会给
+    来源标的相同的教训加权。教训是情境绑定的（某策略某只票跑出来的），
+    跨标的教训只作思路参考：每条返回带 origin 出处，由提示词纪律约束用法。
+    """
     if not user_id:
         return []
     params = {"userId": user_id, "limit": limit}
@@ -119,9 +124,23 @@ def search_lessons(user_id, query=None, task_type=None, limit=3) -> list:
         params["query"] = query
     if task_type:
         params["taskType"] = task_type
+    if symbol:
+        params["symbol"] = symbol
     payload = _get("/api/v1/internal/memory/lessons", params)
     lessons = payload.get("lessons")
     return lessons if isinstance(lessons, list) else []
+
+
+def get_lesson(user_id, lesson_id) -> dict:
+    """单条经验全文（反问功能 2026-10-16）：把这条教训完整摆到聚焦对话面前。
+
+    只读——agent 侧没有任何教训写接口（防投毒），取不到返回 {}，
+    调用方（render_focus）降级为普通聊天。
+    """
+    if not user_id or not lesson_id:
+        return {}
+    payload = _get(f"/api/v1/internal/memory/lessons/{lesson_id}", {"userId": user_id})
+    return payload if isinstance(payload, dict) and payload.get("id") else {}
 
 
 def save_lessons(user_id, session_key, lessons, evidence_event_ids=None) -> dict:

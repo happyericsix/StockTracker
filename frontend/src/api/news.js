@@ -108,3 +108,6 @@ export const getNewsTopics = (days = 7, symbol = '') =>
 
 /** 事件线详情：线本体 + 成员资讯（时间倒序，形状与 events 同一套卡片）。 */
 export const getTopicDetail = (id) => request.get(`/news/topics/${id}`)
+
+/** 个股人气榜 TopN（东财，5 分钟缓存；热榜视图）。软失败：热榜缺席不挡资讯雷达。 */
+export const getHotRank = (limit = 20) => request.get('/news/hot-rank', { params: { limit } })

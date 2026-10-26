@@ -10,6 +10,7 @@ import com.happyericsix.stocktracker.dto.PaperOverviewResponse;
 import com.happyericsix.stocktracker.dto.PaperTradeResponse;
 import com.happyericsix.stocktracker.dto.PaperTradeTraceResponse;
 import com.happyericsix.stocktracker.dto.StockHistoryResponse;
+import com.happyericsix.stocktracker.entity.MemoryLesson;
 import com.happyericsix.stocktracker.entity.PaperAccount;
 import com.happyericsix.stocktracker.entity.PaperAuthorization;
 import com.happyericsix.stocktracker.entity.PaperEquitySnapshot;
@@ -44,9 +45,12 @@ import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
@@ -209,7 +213,11 @@ public class PaperTradingService {
         this.marketRulesService = marketRulesService;
         this.stockDataGateway = stockDataGateway;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
-        this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        // REQUIRED（非 REQUIRES_NEW）：无环境事务时自己开一个（与此前行为一致）；
+        // 有环境事务时**合并** —— evaluateStrategy 尾部把"成交落库 + 净值快照"包在
+        // 同一个事务里（B5，2026-10-15），applyBarResult 内层的 execute 必须加入它，
+        // 快照写失败才能连成交一起回滚。REQUIRES_NEW 会让内层独立提交、原子性失效。
+        this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRED);
     }
 
     /**
@@ -269,6 +277,7 @@ public class PaperTradingService {
                 afterSettlement(strategy, settled, today);
             } catch (Exception e) {
                 log.error("Paper settlement failed for strategy id={}", strategy.getId(), e);
+                recordSettlementCallFailure(strategy, today, ExecutionContract.TRIGGER_CRON, e);
             }
         }
     }
@@ -326,13 +335,13 @@ public class PaperTradingService {
      * 结算就是再花一次委员会的钱（一次约 2 万 token），而它今天已经说过话了。
      * 成功后照常走报告与哨兵（与 15:30 主路径同一份 {@link #afterSettlement}）。
      *
-     * <p>终轮（17:10 / 手动补跑）之后仍失败的策略，推一条系统级告警 ——
+     * <p>终轮（20:10 / 手动补跑）之后仍失败的策略，推一条系统级告警 ——
      * 2026-10-09 事故的教训：那一天三次结算全失败、净值永久缺格，唯一的"通知"
      * 却是一条抢跑的假日报。失败到最后一刻必须是用户能收到的那句真话。
      *
-     * @param finalAttemptOfDay 是否当天最后一次尝试（17:10 那一轮与手动补跑传 true）：
+     * @param finalAttemptOfDay 是否当天最后一次尝试（20:10 那一轮与手动补跑传 true）：
      *                          中间态结论（还是没有 bar）到这一刻就是定论，允许发报告。
-     *                          16:10 的中间轮传 false —— bar 可能只是还没发布，别抢跑。
+     *                          16:10 / 17:10 的中间轮传 false —— bar 可能只是还没发布，别抢跑。
      * @return 给任务心跳的一句话摘要（补跑几只、几只仍失败）
      */
     public String retryFailedDailySettlements(boolean finalAttemptOfDay) {
@@ -359,12 +368,45 @@ public class PaperTradingService {
             } catch (Exception e) {
                 log.error("Settlement retry failed for strategy id={}", strategy.getId(), e);
                 stillFailing.add(strategy);   // 抛异常也是"今天没结算成"，同样要被看见
+                recordSettlementCallFailure(strategy, today, ExecutionContract.TRIGGER_CRON, e);
             }
         }
         if (finalAttemptOfDay && !stillFailing.isEmpty()) {
             alertSettlementFailed(stillFailing, today);
         }
         return String.format("补跑 %d 只策略，其中 %d 只当天仍未结算", retried, stillFailing.size());
+    }
+
+    /**
+     * 引擎调用抛异常（连接拒绝 / 超时 / 非 2xx）时的兜底痕迹。
+     *
+     * <p>没有它，Python 整宕的那天只有 error 日志、没有任何日线痕迹 —— 补跑筛选
+     * （{@code failedToday} 判当天痕迹）判不到这类失败，三轮补跑都不会碰它，
+     * 这一天的结算就静默缺失。落一条 data_unavailable 痕迹把它拉回既有的补跑轨道；
+     * 错误详情经 {@link #errorSnapshot} 进痕迹快照，不用翻两边容器日志。
+     * 自带 try/catch：记录失败这件事本身绝不允许再影响结算主循环。
+     *
+     * <p>已知取舍：异常若发生在部分持久化之后，这里会覆盖当天已有的痕迹行
+     * （dedupe 同键整行覆盖）——安全，因为重跑有幂等守卫
+     * （成交守卫 {@code existsByStrategyIdAndTradeDate}、痕迹 dedupe 键），重跑一遍即收敛。
+     */
+    private void recordSettlementCallFailure(Strategy strategy, LocalDate today, String trigger, Exception e) {
+        try {
+            PaperAccount account = paperAccountRepository.findByStrategyId(strategy.getId())
+                    .orElseGet(PaperAccount::new);
+            ObjectNode detail = mapper.createObjectNode();
+            detail.put("type", e.getClass().getSimpleName());
+            detail.put("message", clipText(e.getMessage(), 200));
+            ObjectNode result = mapper.createObjectNode();
+            result.put("error", "引擎调用失败：" + e.getClass().getSimpleName()
+                    + (e.getMessage() == null ? "" : " " + clipText(e.getMessage(), 180)));
+            result.set("error_detail", detail);
+            traceOnly(strategy, account, ExecutionContract.SETTLEMENT_DAILY,
+                    trigger, today, null, result, ExecutionContract.SKIP_DATA_UNAVAILABLE);
+        } catch (Exception suppressed) {
+            log.warn("Failed to record settlement call failure for strategy id={}: {}",
+                    strategy.getId(), suppressed.getMessage());
+        }
     }
 
     /**
@@ -387,10 +429,10 @@ public class PaperTradingService {
                         .sum();
                 String content = String.format(
                         "【结算未完成】%s · %s · %s\n"
-                                + "今天的日线结算最终没有完成：到最后一轮重试（17:10）数据源仍未提供当日 K 线，"
+                                + "今天的日线结算最终没有完成：到最后一轮重试（20:10）数据源仍未提供当日 K 线，"
                                 + "共尝试 %d 次。\n"
                                 + "影响：今天的净值曲线会缺一格，委员会未能开会，授权沿用上一次。\n"
-                                + "下一交易日 15:30 会自动重试；这通常是数据源当晚发布延迟，"
+                                + "下一交易日 15:30 会自动重试；这通常是数据源当晚发布延迟或限时服务，"
                                 + "持续多天出现才需要排查。",
                         strategy.getName(), strategy.getSymbol(), today, attempts);
                 messageService.saveReport(strategy.getUser(), StrategyHealthWatchService.TYPE_STRATEGY_SENTINEL,
@@ -493,9 +535,13 @@ public class PaperTradingService {
         }
         try {
             Long userId = strategy.getUser().getId();
+            // scope 过滤（2026-10-16 修复）：与 attachRecentLessons 同一口径——
+            // 退役判定只能用本策略的战绩体检本策略的教训，不过滤时
+            // A 策略的教训会被 B 策略的战绩误杀
             List<Map<String, Object>> lessons = memoryLessonService.searchLessons(
                     userId, strategy.getName() + " " + strategy.getSymbol(),
-                    WEEKLY_REFLECTION_TASK_TYPE, 5);
+                    WEEKLY_REFLECTION_TASK_TYPE,
+                    MemoryLesson.strategyScope(strategy.getId()), 5);
             for (Map<String, Object> lesson : lessons) {
                 Long id = longOf(lesson.get("id"));
                 LocalDateTime recordedAt = parseRecordedAt(lesson.get("recordedAt"));
@@ -604,9 +650,39 @@ public class PaperTradingService {
         payload.set("committee", mapper.valueToTree(
                 committees.size() > 3 ? committees.subList(0, 3) : committees));
 
+        // 质疑回路（方案一 2026-10-16）：把本策略现存的旧教训一并喂给反思 LLM，
+        // 让它拿本周材料对照旧教训，提出修订/停用建议。fedIds 是防幻觉白名单——
+        // 响应里出现喂入集合之外的 lesson_id 一律当幻觉丢弃。
+        List<Map<String, Object>> priorLessons = List.of();
+        if (memoryLessonService != null) {
+            try {
+                priorLessons = memoryLessonService.searchLessons(
+                        strategy.getUser().getId(),
+                        strategy.getName() + " " + strategy.getSymbol(),
+                        WEEKLY_REFLECTION_TASK_TYPE,
+                        MemoryLesson.strategyScope(strategy.getId()), 5);
+            } catch (Exception e) {
+                log.info("旧教训取数失败 strategy id={}（按无旧教训反思）：{}",
+                        strategy.getId(), e.toString());
+            }
+        }
+        if (!priorLessons.isEmpty()) {
+            ArrayNode prior = payload.putArray("prior_lessons");
+            for (Map<String, Object> lesson : priorLessons) {
+                ObjectNode row = prior.addObject();
+                row.put("id", longOf(lesson.get("id")) == null ? 0 : longOf(lesson.get("id")));
+                row.put("symptom", String.valueOf(lesson.getOrDefault("symptom", "")));
+                row.put("reusable_rule", String.valueOf(lesson.getOrDefault("reusableRule", "")));
+                row.put("status", String.valueOf(lesson.getOrDefault("status", "")));
+                Object occurrences = lesson.get("occurrences");
+                row.put("occurrences", occurrences instanceof Number n ? n.intValue() : 1);
+                row.put("recorded_at", String.valueOf(lesson.getOrDefault("recordedAt", "")));
+            }
+        }
+
         JsonNode response;
         try {
-            response = strategyClient.weeklyReflection(payload);
+            response = strategyClient.weeklyReflection(payload, strategy.getUser().getId());
         } catch (Exception e) {
             log.info("周反思调用失败 strategy id={}（不影响复盘）：{}", strategy.getId(), e.toString());
             return;
@@ -616,38 +692,272 @@ public class PaperTradingService {
                     response == null ? "无响应" : response.path("warnings").toString());
             return;
         }
+        int dispositions = applyReflectionDispositions(strategy, response, priorLessons);
+
         JsonNode lessons = response.path("lessons");
-        if (!lessons.isArray() || lessons.isEmpty()) {
+        if ((!lessons.isArray() || lessons.isEmpty()) && dispositions == 0) {
             log.info("周反思完成 strategy id={}：本周无可提炼教训（宁缺毋滥是合法结果）", strategy.getId());
             return;
         }
         if (memoryLessonService == null) {
             return;
         }
-        MemoryLessonsRequest request = new MemoryLessonsRequest();
-        request.setUserId(strategy.getUser().getId());
-        request.setSessionKey("weekly-reflection:strategy:" + strategy.getId());
-        List<MemoryLessonRequest> items = new ArrayList<>();
-        for (JsonNode lesson : lessons) {
-            MemoryLessonRequest item = new MemoryLessonRequest();
-            item.setTaskType(WEEKLY_REFLECTION_TASK_TYPE);
-            item.setSymptom(lesson.path("symptom").asText(""));
-            item.setContext(lesson.path("context").asText(""));
-            item.setResolution(lesson.path("resolution").asText(""));
-            item.setReusableRule(lesson.path("reusable_rule").asText(""));
-            item.setConfidence(lesson.path("confidence").isNumber()
-                    ? lesson.path("confidence").asDouble() : null);
-            item.setProvenance("agent");
-            items.add(item);
+        if (lessons.isArray() && !lessons.isEmpty()) {
+            MemoryLessonsRequest request = new MemoryLessonsRequest();
+            request.setUserId(strategy.getUser().getId());
+            request.setSessionKey("weekly-reflection:strategy:" + strategy.getId());
+            List<MemoryLessonRequest> items = new ArrayList<>();
+            for (JsonNode lesson : lessons) {
+                MemoryLessonRequest item = new MemoryLessonRequest();
+                item.setTaskType(WEEKLY_REFLECTION_TASK_TYPE);
+                item.setSymptom(lesson.path("symptom").asText(""));
+                item.setContext(lesson.path("context").asText(""));
+                item.setResolution(lesson.path("resolution").asText(""));
+                item.setReusableRule(lesson.path("reusable_rule").asText(""));
+                item.setConfidence(lesson.path("confidence").isNumber()
+                        ? lesson.path("confidence").asDouble() : null);
+                item.setProvenance("agent");
+                items.add(item);
+            }
+            request.setLessons(items);
+            try {
+                memoryLessonService.saveLessons(request);
+                log.info("周反思落库 strategy id={}：{} 条教训", strategy.getId(), items.size());
+            } catch (Exception e) {
+                log.info("周反思教训落库失败 strategy id={}（不影响复盘）：{}",
+                        strategy.getId(), e.toString());
+            }
         }
-        request.setLessons(items);
+    }
+
+    // ==================== 单笔大亏即时反思（2026-10-18 二轮，mini-reflection） ====================
+    // 与周反思的分工：周反思每周五面向"模式"；本反思在深亏了结的**当天**结算后触发、
+    // 面向"这一笔"——教训到位时间从"最迟下周五"压到"当天收盘后"，下一交易日的
+    // 委员会（experience.lessons / trading_lessons 两条回流路都会读到）就能用上。
+    // 大亏判定是确定性代码（往返收益 ≤ 阈值），LLM 只做定性半环；taskType 沿用
+    // weekly_reflection，让 attachRecentLessons 的既有回流路径原样覆盖这类教训。
+
+    /** 往返收益（roundTripPct，%）低到这个数才算"大亏"、值得即时反思。 */
+    private static final double TRADE_REFLECTION_LOSS_PCT = -5.0;
+    /** 进程内去重：同策略同一天最多反思一次（DB 侧还有 symptom 去重兜底）。 */
+    private final Set<String> tradeReflectionDone = ConcurrentHashMap.newKeySet();
+
+    private void tradeReflectionQuietly(Strategy strategy, LocalDate today) {
+        if (!isAgentMode(strategy) || strategy.getUser() == null
+                || strategyClient == null || decisionQualityService == null) {
+            return;
+        }
         try {
+            // 当天已了结的卖出里找往返最差的一笔深亏（可能多笔同日了结，只反思最痛的）
+            PaperTrade worst = null;
+            Map<String, Object> worstRt = null;
+            for (PaperTrade trade : paperTradeRepository
+                    .findByStrategyIdOrderByTradeDateDescCreatedAtDesc(strategy.getId())) {
+                if (trade.getTradeDate() == null || !today.equals(trade.getTradeDate())) {
+                    continue;
+                }
+                if (!"sell".equals(trade.getSide() == null ? "" : trade.getSide().toLowerCase())) {
+                    continue;
+                }
+                Map<String, Object> rt = decisionQualityService.roundTripOf(trade);
+                if (rt == null || !(rt.get("roundTripPct") instanceof Number pct)) {
+                    continue;
+                }
+                if (pct.doubleValue() > TRADE_REFLECTION_LOSS_PCT) {
+                    continue;
+                }
+                if (worst == null || pct.doubleValue()
+                        < ((Number) worstRt.get("roundTripPct")).doubleValue()) {
+                    worst = trade;
+                    worstRt = rt;
+                }
+            }
+            if (worst == null) {
+                return;
+            }
+            if (!tradeReflectionDone.add(strategy.getId() + ":" + today)) {
+                return;
+            }
+
+            ObjectNode payload = mapper.createObjectNode();
+            ObjectNode meta = payload.putObject("strategy");
+            meta.put("name", strategy.getName());
+            meta.put("symbol", strategy.getSymbol());
+            meta.put("decisionMode", ExecutionContract.normalizeDecisionMode(strategy.getDecisionMode()));
+            ObjectNode tradeNode = payload.putObject("trade");
+            tradeNode.put("date", worst.getTradeDate().toString());
+            tradeNode.put("side", "sell");
+            tradeNode.put("price", worst.getPrice() == null ? null : Money.price(worst.getPrice()));
+            tradeNode.put("shares", worst.getShares() == null ? null : Money.price(worst.getShares()));
+            tradeNode.setAll((ObjectNode) mapper.valueToTree(worstRt));
+            JsonNode experience = strategyExperienceQuietly(strategy);
+            if (experience != null) {
+                payload.set("experience", experience);
+            }
+            // 当天的委员会过程摘录（有就带；盯盘触发的卖出当天可能没开过全委会）
+            for (PaperTradeTrace trace : paperTraceService.listRecent(strategy.getId(), 5)) {
+                if (trace.getTradeDate() != null && today.equals(trace.getTradeDate())) {
+                    ObjectNode compact = compactCommitteeOf(trace);
+                    if (compact != null) {
+                        payload.set("committee", compact);
+                        break;
+                    }
+                }
+            }
+
+            JsonNode response = strategyClient.tradeReflection(payload, strategy.getUser().getId());
+            if (response == null || !response.path("ok").asBoolean(false)) {
+                return;
+            }
+            JsonNode lessons = response.path("lessons");
+            if (!lessons.isArray() || lessons.isEmpty() || memoryLessonService == null) {
+                return;
+            }
+            MemoryLessonsRequest request = new MemoryLessonsRequest();
+            request.setUserId(strategy.getUser().getId());
+            request.setSessionKey("trade-reflection:strategy:" + strategy.getId());
+            List<MemoryLessonRequest> items = new ArrayList<>();
+            for (JsonNode lesson : lessons) {
+                MemoryLessonRequest item = new MemoryLessonRequest();
+                item.setTaskType(WEEKLY_REFLECTION_TASK_TYPE);
+                item.setSymptom(lesson.path("symptom").asText(""));
+                item.setContext(lesson.path("context").asText(""));
+                item.setResolution(lesson.path("resolution").asText(""));
+                item.setReusableRule(lesson.path("reusable_rule").asText(""));
+                item.setConfidence(lesson.path("confidence").isNumber()
+                        ? lesson.path("confidence").asDouble() : null);
+                item.setProvenance("agent");
+                items.add(item);
+            }
+            request.setLessons(items);
             memoryLessonService.saveLessons(request);
-            log.info("周反思落库 strategy id={}：{} 条教训", strategy.getId(), items.size());
+            log.info("单笔反思落库 strategy id={} on {}：{} 条教训（往返 {}%）",
+                    strategy.getId(), today, items.size(), worstRt.get("roundTripPct"));
         } catch (Exception e) {
-            log.info("周反思教训落库失败 strategy id={}（不影响复盘）：{}",
-                    strategy.getId(), e.toString());
+            log.info("单笔反思失败 strategy id={}（不影响结算）：{}", strategy.getId(), e.toString());
         }
+    }
+
+    /** 周反思单次最多修订/停用的旧教训条数（与 Python 侧 WEEKLY_REFLECTION_MAX 对齐）。 */
+    private static final int LESSON_DISPOSITION_MAX = 3;
+
+    /**
+     * 周反思的质疑回路（方案一 2026-10-16）：把 LLM 对照旧教训后的处置意见落库。
+     *
+     * <p>双层闸门：① lesson_id 只认本次喂入的 prior_lessons 集合（防幻觉，集合外丢弃留痕）；
+     * ② 修订一律落 pending（agent 的修订也要过人这一关，防投毒纪律不变），
+     * 停用直接生效（与胜率自动退役同先例：方向只减不增），理由写日志。
+     *
+     * @return 实际生效的处置条数（修订 + 停用）
+     */
+    private int applyReflectionDispositions(Strategy strategy, JsonNode response,
+                                            List<Map<String, Object>> priorLessons) {
+        if (memoryLessonService == null || priorLessons.isEmpty() || strategy.getUser() == null) {
+            return 0;
+        }
+        Long userId = strategy.getUser().getId();
+        Set<Long> fedIds = new HashSet<>();
+        for (Map<String, Object> lesson : priorLessons) {
+            Long id = longOf(lesson.get("id"));
+            if (id != null) {
+                fedIds.add(id);
+            }
+        }
+        // 先解析停用指令（A-2）：同一 id 同时被"修订+停用"时停用优先——
+        // 先改后停会让 retire 只翻旧行 status、新 pending 版本照活，证伪意图落空。
+        Set<Long> retireIds = new HashSet<>();
+        Map<Long, String> retireReasons = new HashMap<>();
+        JsonNode retirements = response.path("retirements");
+        if (retirements.isArray()) {
+            int seen = 0;
+            for (JsonNode retirement : retirements) {
+                if (seen >= LESSON_DISPOSITION_MAX) {
+                    break;
+                }
+                Long id = retirement.path("lesson_id").isNumber()
+                        ? retirement.path("lesson_id").asLong() : null;
+                if (id == null || !fedIds.contains(id)) {
+                    log.info("周反思停用指令被丢弃 strategy id={}（lesson_id={} 不在本次喂入集合，疑似幻觉）",
+                            strategy.getId(), retirement.path("lesson_id").asText(""));
+                    continue;
+                }
+                if (retireIds.add(id)) {
+                    retireReasons.put(id, retirement.path("reason").asText(""));
+                    seen++;
+                }
+            }
+        }
+        int applied = 0;
+        JsonNode revisions = response.path("revisions");
+        if (revisions.isArray()) {
+            int processed = 0;
+            for (JsonNode revision : revisions) {
+                if (processed >= LESSON_DISPOSITION_MAX) {
+                    break;
+                }
+                Long id = revision.path("lesson_id").isNumber()
+                        ? revision.path("lesson_id").asLong() : null;
+                if (id == null || !fedIds.contains(id)) {
+                    log.info("周反思修订指令被丢弃 strategy id={}（lesson_id={} 不在本次喂入集合，疑似幻觉）",
+                            strategy.getId(), revision.path("lesson_id").asText(""));
+                    continue;
+                }
+                if (retireIds.contains(id)) {
+                    log.info("周反思修订指令被丢弃 strategy id={} lesson id={}：同一教训同时被修订与停用，停用优先",
+                            strategy.getId(), id);
+                    continue;
+                }
+                MemoryLessonRequest patch = new MemoryLessonRequest();
+                if (!revision.path("symptom").asText("").isBlank()) {
+                    patch.setSymptom(revision.path("symptom").asText(""));
+                }
+                if (!revision.path("context").asText("").isBlank()) {
+                    patch.setContext(revision.path("context").asText(""));
+                }
+                if (!revision.path("resolution").asText("").isBlank()) {
+                    patch.setResolution(revision.path("resolution").asText(""));
+                }
+                if (!revision.path("reusable_rule").asText("").isBlank()) {
+                    patch.setReusableRule(revision.path("reusable_rule").asText(""));
+                }
+                if (revision.path("confidence").isNumber()) {
+                    patch.setConfidence(revision.path("confidence").asDouble());
+                }
+                boolean hasContent = patch.getSymptom() != null || patch.getResolution() != null
+                        || patch.getReusableRule() != null || patch.getContext() != null
+                        || patch.getConfidence() != null;
+                if (!hasContent) {
+                    continue;   // 没有实际改动的"修订"只是噪声，不落库
+                }
+                try {
+                    if (memoryLessonService.reviseLesson(userId, id, patch, "agent") != null) {
+                        applied++;
+                        processed++;
+                        log.info("周反思修订生效 strategy id={} lesson id={}（理由：{}）",
+                                strategy.getId(), id,
+                                revision.path("reason").asText("").isEmpty()
+                                        ? "未给出" : revision.path("reason").asText(""));
+                    }
+                } catch (Exception e) {
+                    log.info("周反思修订失败 strategy id={} lesson id={}：{}",
+                            strategy.getId(), id, e.toString());
+                }
+            }
+        }
+        for (Long id : retireIds) {
+            try {
+                if (memoryLessonService.retire(userId, id)) {
+                    applied++;
+                    log.info("周反思停用生效 strategy id={} lesson id={}（理由：{}）——旧教训被本周材料证伪",
+                            strategy.getId(), id,
+                            retireReasons.getOrDefault(id, "").isEmpty() ? "未给出" : retireReasons.get(id));
+                }
+            } catch (Exception e) {
+                log.info("周反思停用失败 strategy id={} lesson id={}：{}",
+                        strategy.getId(), id, e.toString());
+            }
+        }
+        return applied;
     }
 
     /**
@@ -929,7 +1239,9 @@ public class PaperTradingService {
             JsonNode portfolio = portfolioContextQuietly(strategy, account);
             result = strategyClient.agentDecide(strategy.getConfigJson(), strategy.getSymbol(),
                     today.toString(), position, lastBriefingDate(strategy.getId()),
-                    newsBriefing, experience, portfolio);
+                    newsBriefing, experience, portfolio,
+                    strategy.getUser() != null ? strategy.getUser().getId() : null,
+                    strategy.getId());
         } else {
             result = strategyClient.evaluateBar(strategy.getConfigJson(), strategy.getSymbol(),
                     today.toString(), position);
@@ -961,11 +1273,33 @@ public class PaperTradingService {
             saveAuthorization(strategy, result);
         }
 
-        PaperAccount settled = applyBarResult(strategy, account, result, today, null,
-                ExecutionContract.SETTLEMENT_DAILY, trigger,
-                alreadyTradedToday, null);
-        recordEquitySnapshot(strategy, settled, result, today);
-        recordPaperFacts(strategy, settled, today);
+        // 三层夹取的最后一层在日线也要在场（此前 sizeCap=null，委员会日线买入可以
+        // 越过自己划的 max_position_pct，而同一天盘中却被同一道边界夹住 —— 两条路
+        // 对"边界"的态度不一致）。授权持续有效：本次决策带了就用刚落库的这行，
+        // 没带沿用上一次，与盘中 findLatest 同一语义；只收紧不放宽。
+        BigDecimal dailySizeCap = isAgentMode(strategy)
+                ? paperAuthorizationRepository.findLatest(strategy.getId())
+                        .map(PaperAuthorization::getMaxPositionPct).orElse(null)
+                : null;
+
+        // 成交与净值快照**同笔落库**（2026-10-15 起兑现下方 recordEquitySnapshot javadoc
+        // 的承诺）：此前快照在 applyBarResult 的短事务提交之后独立执行，进程在两段之间
+        // 崩溃、或快照写失败，会留下"成交已落、曲线缺格"的不一致 —— 而结算重试只认
+        // no_bar/data_unavailable 的痕迹，这一格永远补不上。现在包进同一个
+        // TransactionTemplate（REQUIRED 传播：applyBarResult 内层的 execute 会合并
+        // 进本事务），快照写失败整笔回滚，那天要么完整、要么没有。此刻 Python 决策
+        // 早已返回，事务内只剩纯落库，不存在占连接等网络的问题。
+        // recordPaperFacts 与预期回填仍在事务外（fail-open 旁路，失败不影响结算）。
+        final JsonNode txResult = result;
+        final PaperAccount txAccount = account;
+        account = transactionTemplate.execute(status -> {
+            PaperAccount settled = applyBarResult(strategy, txAccount, txResult, today, null,
+                    ExecutionContract.SETTLEMENT_DAILY, trigger,
+                    alreadyTradedToday, dailySizeCap);
+            recordEquitySnapshot(strategy, settled, txResult, today);
+            return settled;
+        });
+        recordPaperFacts(strategy, account, today);
         // 到期就回填预期（复用同一批净值快照，不额外查库）。
         // 旁路：写不进去只是少一次回填，绝不影响结算（与 recordPaperFacts 同一条纪律）。
         if (expectationService != null) {
@@ -974,16 +1308,22 @@ public class PaperTradingService {
                     paperEquitySnapshotRepository.findByStrategyIdOrderByTradeDateAsc(strategy.getId()),
                     today);
         }
-        return settled;
+        // 单笔大亏即时反思（2026-10-18 二轮）：当天有深亏了结才触发（内部自判），
+        // 事务外旁路——失败只是少一条教训，绝不影响已落库的结算。
+        tradeReflectionQuietly(strategy, today);
+        return account;
     }
 
     /**
-     * 记一行每日净值快照 —— 只记**日线结算**，且与账户更新在**同一个事务**里。
+     * 记一行每日净值快照 —— 只记**日线结算**，且与账户更新在**同一个事务**里
+     * （事务边界由 {@code evaluateStrategy} 尾部的 TransactionTemplate 划出，
+     * 本方法在其中被调用；2026-10-15 前它独立执行，与这里的承诺不符）。
      *
      * <h3>为什么必须在同一个事务</h3>
      * 净值曲线是时序查询的唯一真相源，客观事实链是它的"记忆语义"副本。
      * 两者若各写各的，"曲线上的净值"与"记忆里的净值"迟早会不一致，
-     * 而这种不一致最难查：两边都看起来对。所以：账户、快照、事实在同一笔里落。
+     * 而这种不一致最难查：两边都看起来对。所以：**账户与快照**在同一笔里落
+     * （客观事实是 fail-open 旁路，刻意不在本事务里 —— 记忆写不进去不许回滚结算）。
      *
      * <h3>为什么结算被跳过时不写</h3>
      * 休市/取数失败那天账户一个字段都没动，补一行"净值不变"是把**没结算**画成**没变化**。
@@ -1209,7 +1549,7 @@ public class PaperTradingService {
                     barTime, strategy.getId());
             return account;
         }
-        if (LocalDateTime.now().isBefore(barEnd)) {
+        if (CnTime.now().isBefore(barEnd)) {
             log.debug("Realtime bar {} not finished yet for strategy id={}", barTime, strategy.getId());
             return account;
         }
@@ -1379,7 +1719,9 @@ public class PaperTradingService {
             JsonNode experience = strategyExperienceQuietly(strategy);
             watch = strategyClient.intradayWatch(strategy.getConfigJson(), strategy.getSymbol(),
                     events, buildPosition(account), authorizationNode(authorization),
-                    newsAlert, experience, todayContextNode(strategy));
+                    newsAlert, experience, todayContextNode(strategy),
+                    // 教训检索（2026-10-18 二轮）：盯盘侧也读复盘教训（软参考，fail-open）
+                    strategy.getUser() != null ? strategy.getUser().getId() : null);
         } catch (Exception e) {
             log.warn("Intraday watch call failed for strategy id={}: {}", strategy.getId(), e.getMessage());
             // 问没问成：留痕说明"模型不可用，本节不动"——不再回落规则自动执行（2026-10-15）：
@@ -1453,6 +1795,16 @@ public class PaperTradingService {
                             ExecutionContract.TRIGGER_WATCH, CnTime.today(), barTime, result,
                             ExecutionContract.SKIP_PORTFOLIO_HALTED);
                 }
+                // 往返守卫与规则路径同一道闸（2026-10-15 收权后盯盘是 agent 盘中唯一的
+                // 下单手，这里不拦的话"当日只一买"就只剩提示词软约束）：agent 模式当日
+                // 已有成交，再买入一律挡下 —— 卖出/减仓不在此列（守卫只拦买入，
+                // 卖旧批次本来就是合法的降风险动作）。
+                if ("buy".equals(action) && roundtripGuardEnabled && isAgentMode(strategy)
+                        && paperTradeRepository.existsByStrategyIdAndTradeDate(strategy.getId(), CnTime.today())) {
+                    return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                            ExecutionContract.TRIGGER_WATCH, CnTime.today(), barTime, result,
+                            ExecutionContract.SKIP_ALREADY_TRADED_TODAY);
+                }
                 // 合成执行响应：signal/size_fraction 来自盯盘，价格/指纹/快照沿用同一根 bar。
                 // 下面的 applyBarResult 会照旧走完整执行纪律（整手/佣金/T+1/三层仓位夹取）。
                 ObjectNode synth = mapper.createObjectNode();
@@ -1517,6 +1869,7 @@ public class PaperTradingService {
                 return null;
             }
             ObjectNode node = mapper.valueToTree(experience);
+            attachOwnerContext(strategy, node);
             attachRecentLessons(strategy, node);
             return node;
         } catch (Exception e) {
@@ -1524,6 +1877,69 @@ public class PaperTradingService {
                     strategy.getId(), e.toString());
             return null;
         }
+    }
+
+    /**
+     * 经验包的主人上下文（记忆三层模型 2026-10-15）：委员会此前只看得到自己的战绩与教训，
+     * 不知道"用户是谁、对这只票说过什么"。这里注入两层，各带层级标注——
+     *
+     * <ul>
+     *   <li><b>L1 用户全局层</b>（persona，≤6 条，确定性派生）：风险偏好/资金/风格，
+     *       所有委员会共享的背景板，只读；</li>
+     *   <li><b>L2 标的共享层</b>（subject=本策略标的，≤6 条）：用户对**这只票**说过的话
+     *       （关注理由/持仓成本/特殊态度），跨策略共享，优先于全局层。</li>
+     * </ul>
+     *
+     * 刻意不注入别的策略的任何记忆（串味防线）；也不注入策略自己的 run_summary——
+     * 委员会的行情与持仓材料里已有当期口径。
+     */
+    private void attachOwnerContext(Strategy strategy, ObjectNode experience) {
+        if (memoryFactService == null || strategy.getUser() == null) {
+            return;
+        }
+        try {
+            Long userId = strategy.getUser().getId();
+            List<Map<String, Object>> profile = memoryFactService.persona(userId);
+            List<Map<String, Object>> symbolNotes = strategy.getSymbol() == null ? List.of()
+                    : memoryFactService.searchFacts(userId, null, strategy.getSymbol(), null, 6);
+            boolean hasProfile = profile != null && !profile.isEmpty();
+            boolean hasNotes = symbolNotes != null && !symbolNotes.isEmpty();
+            if (!hasProfile && !hasNotes) {
+                return;
+            }
+            ObjectNode owner = experience.putObject("owner");
+            if (hasProfile) {
+                ArrayNode rows = owner.putArray("globalProfile");
+                for (Map<String, Object> fact : profile) {
+                    rows.add(factLine(fact));
+                }
+                owner.put("globalProfileNote",
+                        "主人的全局偏好（只读背景。标的层例外与策略授权边界优先于它）。");
+            }
+            if (hasNotes) {
+                ArrayNode rows = owner.putArray("symbolNotes");
+                for (Map<String, Object> fact : symbolNotes) {
+                    rows.add(factLine(fact));
+                }
+                owner.put("symbolNotesNote",
+                        "主人对这只票说过的话（标的层，优先于全局偏好——例如全局爱短线、"
+                                + "这只票当底仓长拿时，以这里为准）。");
+            }
+        } catch (Exception e) {
+            log.debug("主人上下文注入失败 strategy id={}（经验包照常）：{}",
+                    strategy.getId(), e.toString());
+        }
+    }
+
+    /** 事实行 → 一句话（标签优先，回退原始键值；委员会读句子比读嵌套 JSON 稳） */
+    private static String factLine(Map<String, Object> fact) {
+        String name = String.valueOf(fact.getOrDefault("predicateLabel",
+                fact.getOrDefault("predicate", "")));
+        String value = String.valueOf(fact.getOrDefault("objectLabel",
+                fact.getOrDefault("object", "")));
+        String when = fact.get("recordedAt") == null ? ""
+                : "（" + String.valueOf(fact.get("recordedAt")).substring(0, 10) + "）";
+        return name + "：" + value + when;
     }
 
     /** 经验包 v2 的定性半环：最近 2 条周反思教训（active 优先，打分交给教训服务）。 */
@@ -2059,7 +2475,7 @@ public class PaperTradingService {
             account.setLastPrice(price);
             // 刻意**不**覆盖 lastSignal：那应当是当天真正做出的那个信号（盘中成交时写的），
             // 而不是这一节用来估值的规则端点返回值。
-            account.setLastEvalAt(LocalDateTime.now());
+            account.setLastEvalAt(CnTime.now());
             fillAccountAfter(trace, account);
             paperTraceService.record(trace);
             account = paperAccountRepository.save(account);
@@ -2221,7 +2637,7 @@ public class PaperTradingService {
         updateEquityAndHighWatermark(account, price);
         account.setLastPrice(price);
         account.setLastSignal(signal);
-        account.setLastEvalAt(LocalDateTime.now());
+        account.setLastEvalAt(CnTime.now());
 
         // 成交落库（痕迹 → 成交 → 账户 → 策略）必须在**同一个短事务**里：
         // 之前三段各自独立提交，崩溃发生在"成交已落、账户未落"之间时，重跑同一根 bar
@@ -2286,7 +2702,7 @@ public class PaperTradingService {
             return;
         }
         try {
-            String hourBucket = LocalDateTime.now()
+            String hourBucket = CnTime.now()
                     .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHH"));
             String content = String.format(
                     "【LLM 服务降级】%s · %s\n"
@@ -2418,6 +2834,13 @@ public class PaperTradingService {
                                      String trigger, LocalDate tradeDate, String barTime,
                                      JsonNode result) {
         JsonNode snapshot = result == null ? null : result.get("snapshot");
+        // 取数失败时 Python 只回 error 信封、没有 snapshot：合成一个最小快照把
+        // error / error_detail 带进痕迹（合成快照的先例：公司行动痕迹）。
+        // 否则失败那天的 snapshot_json 是 NULL，排查只能翻两边的容器日志；
+        // 补跑成功后痕迹的 dedupe 整行覆盖会自然换成成功快照。
+        if ((snapshot == null || snapshot.isNull()) && result != null && result.has("error")) {
+            snapshot = errorSnapshot(result.get("error"), result.get("error_detail"));
+        }
         JsonNode fingerprint = result == null ? null : result.get("fingerprint");
         JsonNode bar = snapshot == null ? null : snapshot.get("bar");
 
@@ -2463,6 +2886,23 @@ public class PaperTradingService {
         }
         fillAccountBefore(trace, account);
         return trace;
+    }
+
+    /**
+     * 失败信封的最小合成快照：结构对齐真实快照（`schema_version` + `extra`），
+     * 错误文本与机器可读的 `error_detail`（Python 端定义）都进 `extra` ——
+     * 快照是痕迹里唯一放证据的地方，别再造第二列。
+     */
+    private JsonNode errorSnapshot(JsonNode error, JsonNode errorDetail) {
+        ObjectNode extra = mapper.createObjectNode();
+        extra.set("error", error == null ? mapper.nullNode() : error);
+        if (errorDetail != null && !errorDetail.isNull()) {
+            extra.set("error_detail", errorDetail);
+        }
+        ObjectNode snapshot = mapper.createObjectNode();
+        snapshot.put("schema_version", 1);
+        snapshot.set("extra", extra);
+        return snapshot;
     }
 
     /** 账户的**结算前**状态：痕迹要能回答"这一笔是从什么状态变成什么状态"。 */
@@ -2827,7 +3267,7 @@ public class PaperTradingService {
             BigDecimal turnover = buy.getAmount();
             BigDecimal fee = commissionFee(turnover, commission)
                     .add(Money.amount(turnover.multiply(transferFee)));
-            LocalDateTime now = LocalDateTime.now();
+            LocalDateTime now = CnTime.now();
             lotRepository.save(PaperPositionLot.builder()
                     .user(strategy.getUser())
                     .strategy(strategy)
@@ -2873,7 +3313,7 @@ public class PaperTradingService {
                     }
                     BigDecimal take = lot.getRemainingShares().min(need);
                     lot.setRemainingShares(Money.price(lot.getRemainingShares().subtract(take)));
-                    lot.setUpdatedAt(LocalDateTime.now());
+                    lot.setUpdatedAt(CnTime.now());
                     lotRepository.save(lot);
                     gross = gross.add(sell.getPrice().subtract(lot.getPrice()).multiply(take));
                     matched.addObject()
@@ -3117,7 +3557,7 @@ public class PaperTradingService {
                     BigDecimal adjPrice = lot.getPrice().subtract(div.cashPerShare())
                             .divide(ratio, 4, RoundingMode.HALF_UP);
                     lot.setPrice(adjPrice.signum() > 0 ? Money.price(adjPrice) : zeroPrice());
-                    lot.setUpdatedAt(LocalDateTime.now());
+                    lot.setUpdatedAt(CnTime.now());
                     lotRepository.save(lot);
                 }
             }

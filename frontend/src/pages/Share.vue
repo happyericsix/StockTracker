@@ -8,6 +8,7 @@ import { useRoute } from 'vue-router'
 import { CandlestickChart } from 'lucide-vue-next'
 import { getSharedStrategy } from '../api/strategy.js'
 import Badge from '../components/ui/badge.vue'
+import BeianFooter from '../components/BeianFooter.vue'
 import { dirTextClass } from '../utils/format.js'
 
 const route = useRoute()
@@ -116,5 +117,7 @@ onMounted(async () => {
         <p class="mt-2 text-center text-[12px] text-ink-3">数据来自 Stock Tracker 模拟盘，仅供交流，不构成投资建议。</p>
       </template>
     </main>
+    <!-- 备案合规：分享页在鉴权壳外，也要展示备案号 -->
+    <BeianFooter />
   </div>
 </template>

@@ -17,6 +17,11 @@ CONDITION_TYPES = {
     #   bias_pct：乖离率过滤（防追高）——"上穿 MA60 且乖离 ≤5%"的写法从此存在；
     #   volume_ratio：量比（放量/缩量确认）——当日量 / 过去 N 日均量与阈值比较。
     "bias_pct", "volume_ratio",
+    # 2026-10-16 补：估值分位过滤。证据学依据（LSEG 2025 / CFA Institute 2025 综述）：
+    # 估值对长周期收益有预测力、对短择时弱——所以它的 DSL 形态是**状态过滤**
+    # （"只在偏便宜时允许入场"/"偏贵时离场"），不是入场事件。数据原语：
+    # akshare_client.get_valuation_history（东财 stock_value_em 日线，as-of 可回测）。
+    "pe_percentile",
 }
 
 class Condition(BaseModel):
@@ -61,6 +66,14 @@ class Condition(BaseModel):
                 raise ValueError("量比条件需要天数、倍数阈值和方向（above=放量 / below=缩量）")
             if self.value <= 0:
                 raise ValueError("volume_ratio 的阈值必须为正数（如 1.2 表示 1.2 倍）")
+        elif t == "pe_percentile":
+            if self.direction is None:
+                raise ValueError("估值分位过滤需要方向（above=分位高于阈值即偏贵 / below=低于阈值即偏便宜）")
+            if self.value is None or not (0 <= self.value <= 100):
+                raise ValueError("pe_percentile 的阈值需在 0-100（如 30 表示 30% 历史分位）")
+            if self.window is None or not (250 <= self.window <= 2500):
+                raise ValueError("pe_percentile 的观察窗口需在 250-2500 个交易日"
+                                 "（1250≈5 年；窗口太短的分位只是噪声）")
         # 风控参数的符号约定（引擎按"收益率与 value 直接比较"实现，符号写反不是风格问题）：
         #   stop_loss_pct：收益率 ≤ value 触发 → value 必须为负（-8 = 亏 8% 止损）。
         #     写成 +8 会让条件恒成立（除非跌 8% 以上），入场即卖。
@@ -79,9 +92,15 @@ class Condition(BaseModel):
                 raise ValueError("均线天数至少为 2（为 1 时均线就是价格本身，条件失去意义）")
         return self
 
+#: 每组（entry/exit）条件数上限。奥卡姆剃刀的硬边界：条件词表本身是封闭集，
+#: 但条数不设限的话"叠加过滤条件"仍是无代价的——门禁的复杂度罚金管方向，
+#: 这里管天花板（6 条对任何说得清逻辑的策略都够用了）。
+MAX_CONDITIONS_PER_GROUP = 6
+
 class RuleGroup(BaseModel):
     logic: Literal["all", "any"] = "all"
-    conditions: list[Condition] = Field(min_length=1)
+    conditions: list[Condition] = Field(min_length=1,
+                                        max_length=MAX_CONDITIONS_PER_GROUP)
 
 class PositionRule(BaseModel):
     type: Literal["full", "percent"] = "full"
@@ -157,6 +176,11 @@ def _humanize_validation_error(e: ValidationError) -> str:
         # 看的类型标记，去掉后才是我们写的那句人话。
         if raw.startswith("Value error,"):
             raw = raw[len("Value error,"):].strip()
+        # 条数上限的框架消息带实际条数（数字不定，没法走查表），单独翻
+        m = re.match(r"List should have at most (\d+) items", raw)
+        if m:
+            raw = (f"条件数量超过上限（最多 {m.group(1)} 条）——"
+                   "每多一条条件都多一分过拟合风险，请精简或拆成两条策略")
         msg = _FRAMEWORK_MSG_ZH.get(raw, raw)
         lines.append(f"{_humanize_loc(err.get('loc', ()))}：{msg}")
     if len(e.errors()) > 3:
@@ -181,4 +205,21 @@ def extract_strategy_json(text: str) -> Optional[dict]:
         return obj if isinstance(obj, dict) else None
     except json.JSONDecodeError:
         return None
+
+
+def strategy_complexity(cfg: dict) -> int:
+    """策略复杂度 = entry + exit 的条件条数（BIC 口径下的"自由度"代理）。
+
+    只数**结构**（多了一条规则），不数规则内部的参数微调（fast/slow/value 改值
+    不改变自由度的边际增量——那种搜索噪声由留出段反证负责）。防御式解析：
+    传进来的多是未过校验的原始 payload，任何一块读不懂就按 0 计，绝不抛异常。
+    """
+    total = 0
+    for section in ("entry", "exit"):
+        group = (cfg or {}).get(section)
+        if isinstance(group, dict):
+            conds = group.get("conditions")
+            if isinstance(conds, list):
+                total += sum(1 for c in conds if isinstance(c, dict))
+    return total
 

@@ -83,6 +83,12 @@ request.interceptors.response.use(
         ? '请求超时，请稍后重试'
         : '网络连接失败，请检查网络后重试'
     }
+    // nginx 限流（429）：高频切换页面（K 线页一次切换并发拉约 6 个接口）会触发。
+    // 不翻成人话，页面兜底文案只会说"加载失败"，用户不知道其实是点太快了。
+    // errorMessage() 优先读 friendlyMessage。
+    if (error.response?.status === 429) {
+      error.friendlyMessage = '操作太频繁，请稍候再试'
+    }
     if (error.response?.status === 401) {
       localStorage.removeItem('token')
       // 主动断开 SSE：否则旧 EventSource 要等下一次 onerror 才关，

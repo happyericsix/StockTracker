@@ -7,6 +7,7 @@ import { ref, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Bot } from 'lucide-vue-next'
 import { sendChat, getChatHistory } from '../api/messages.js'
+import { getLlmConfig } from '../api/user.js'
 import { messageBus } from '../composables/messageBus.js'
 import { renderMarkdown } from '../utils/markdown.js'
 import Button from '../components/ui/button.vue'
@@ -20,7 +21,8 @@ const error = ref('')
 const notice = ref('')
 const composing = ref(false)
 const listEl = ref(null)
-const pendingLocalId = ref(null)
+// BYOK：未绑定自己的 Key 时 AI 功能会降级为模板回复——进门就说清并给出路
+const llmMissing = ref(false)
 let unsubscribe = null
 let unsubscribeReconnect = null
 let typingTimer = null
@@ -74,26 +76,81 @@ const loadHistory = async () => {
     const res = await getChatHistory()
     const list = res.data || []
     messages.value = Array.isArray(list) ? list : []
+    // 历史里只有落库的终态消息：任何本地流式气泡都不该活过这次整表替换
+    streamingId.value = null
     await scrollToBottom()
   } catch {
     // 后端未就绪时静默，聊天记录为空
   }
 }
 
+/** 当前流式输出的 streamId（同一用户同一时刻只有一轮在流，后端轮次门保证） */
+const streamingId = ref(null)
+
+/** 撤掉流式气泡：终态消息落库推送、或轮次被新消息取代（CHAT_BOT_ABORT）时调用 */
+const removeStreamingBubble = () => {
+  if (!streamingId.value) return
+  const idx = messages.value.findIndex((m) => m.id === streamingId.value)
+  streamingId.value = null
+  if (idx !== -1) messages.value.splice(idx, 1)
+}
+
+/** 流式增量（2026-10-20）：边生成边往气泡里追加，打字机效果 */
+const onStreamDelta = (msg) => {
+  if (!msg.streamId || !msg.content) return
+  typing.value = false
+  // 流式期间同样要有"断流 90 秒"兜底：增量还在来就不断续命
+  startTypingWatch()
+  if (streamingId.value === msg.streamId) {
+    const target = messages.value.find((m) => m.id === msg.streamId)
+    if (target) {
+      target.content += msg.content
+      scrollToBottom()
+      return
+    }
+  }
+  // 新一轮的流开始了：理论上旧气泡已被 ABORT 清掉，这里兜底再清一次
+  removeStreamingBubble()
+  streamingId.value = msg.streamId
+  messages.value.push({
+    id: msg.streamId,
+    type: 'CHAT_BOT',
+    content: msg.content,
+    createdAt: new Date().toISOString(),
+    read: true,
+    streaming: true,
+  })
+  scrollToBottom()
+}
+
 const onBusMessage = (msg) => {
-  if (!msg || !msg.id) return
+  if (!msg) return
+  if (msg.type === 'CHAT_BOT_DELTA') {
+    onStreamDelta(msg)
+    return
+  }
+  if (msg.type === 'CHAT_BOT_ABORT') {
+    // 轮次被新消息取代：半截气泡整体撤掉（内容没落库，留着只会误导）
+    if (msg.streamId === streamingId.value) removeStreamingBubble()
+    return
+  }
+  if (!msg.id) return
   if (msg.type === 'CHAT_BOT') {
     typing.value = false
     clearTypingWatch()
     notice.value = ''
+    // 终态消息是权威内容（可能与流式半截不完全一致），落库版本替换流式气泡
+    removeStreamingBubble()
   }
   if (msg.type === 'CHAT_BOT' || msg.type === 'CHAT_USER') {
-    // 乐观气泡 id 与数据库 id 永不相等，按内容定位替换
-    if (msg.type === 'CHAT_USER' && pendingLocalId.value) {
-      const pendingIndex = messages.value.findIndex((m) => m.id === pendingLocalId.value)
-      if (pendingIndex !== -1 && messages.value[pendingIndex].content === msg.content) {
+    // 用户消息：SSE 回显与乐观气泡是同一条 —— 按内容定位换 id（乐观气泡 id 与
+    // 数据库 id 永不相等）。连发多条时回显顺序不定，必须扫全部待合并气泡：
+    // 旧实现只盯"最后一条 pending"，第二条发出后第一条的回显就匹配不上，气泡显示两遍。
+    if (msg.type === 'CHAT_USER') {
+      const pendingIndex = messages.value.findIndex(
+        (m) => String(m.id).startsWith('local-') && m.content === msg.content)
+      if (pendingIndex !== -1) {
         messages.value.splice(pendingIndex, 1, msg)
-        pendingLocalId.value = null
         scrollToBottom()
         return
       }
@@ -163,7 +220,6 @@ const send = async () => {
     createdAt: new Date().toISOString(),
     read: true,
   }
-  pendingLocalId.value = tempMsg.id
   messages.value.push(tempMsg)
   scrollToBottom()
   typing.value = true
@@ -173,7 +229,6 @@ const send = async () => {
   try {
     await sendChat(text)
   } catch {
-    pendingLocalId.value = null
     typing.value = false
     clearTypingWatch()
     error.value = '发送失败，请稍后重试'
@@ -191,6 +246,10 @@ onMounted(() => {
   messageBus.connect()
   unsubscribe = messageBus.subscribe(onBusMessage)
   unsubscribeReconnect = messageBus.subscribeReconnect(onReconnect)
+  // 查询 Key 状态失败（如旧后端）不显示横幅，避免误报
+  getLlmConfig().then((res) => {
+    llmMissing.value = res.data?.enabled === true && !res.data?.configured
+  }).catch(() => {})
 })
 
 onUnmounted(() => {
@@ -212,6 +271,13 @@ onUnmounted(() => {
         <div class="text-[12px] text-ink-3">在线 · 行情分析中</div>
       </div>
     </header>
+
+    <!-- BYOK：没绑自己的 Key 时 AI 回复会降级为模板，进门就给出路 -->
+    <p v-if="llmMissing" class="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-[12.5px] text-warn" role="status">
+      <span class="min-w-0 flex-1">还没绑定你自己的 AI Key——智能助手与交易委员会会降级为模板回复。</span>
+      <button type="button" class="shrink-0 rounded-md border border-warn/50 px-2 py-0.5 text-warn transition-colors hover:bg-warn/10"
+        @click="router.push('/profile')">去个人中心配置</button>
+    </p>
 
     <div ref="listEl" class="flex flex-1 flex-col gap-3.5 overflow-y-auto overscroll-contain px-1 pb-2">
       <div v-if="messages.length === 0 && !typing" class="mt-12 flex flex-col items-center gap-2 text-center">
@@ -239,6 +305,7 @@ onUnmounted(() => {
             <div
               v-if="m.type !== 'CHAT_USER'"
               class="md-body rounded-xl rounded-tl-sm border border-border bg-surface px-3.5 py-2.5 text-[13.5px] leading-relaxed text-ink"
+              :class="m.streaming ? 'is-streaming' : ''"
               v-html="renderMarkdown(m.content)"
             ></div>
             <div
@@ -294,6 +361,13 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* 流式输出中的气泡：末尾一个呼吸的光标，告诉用户"还在生成" */
+.is-streaming::after {
+  content: '▍';
+  margin-left: 1px;
+  color: var(--ink-3);
+  animation: typing 1.1s infinite ease-in-out;
+}
 .typing-dot {
   width: 6px;
   height: 6px;

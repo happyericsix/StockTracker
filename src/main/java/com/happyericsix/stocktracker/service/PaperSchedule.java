@@ -92,8 +92,11 @@ public final class PaperSchedule {
         if (next == null) {
             return "";
         }
+        // 补跑说明也钉在这里：用户看到"最后一次评估停在好几天前"时，第一反应是
+        // 系统挂了；一句话讲清"失败会补跑到几点"，比让他去翻 job_runs 便宜得多。
         return "下一次评估：" + format(next.at()) + "（" + next.note()
-                + "；按工作日近似，节假日会空跑一次并留下原因）";
+                + "；按工作日近似，节假日会空跑一次并留下原因；"
+                + "当日结算失败会在 16:10 / 17:10 / 20:10 自动补跑）";
     }
 
     public static String format(LocalDateTime at) {

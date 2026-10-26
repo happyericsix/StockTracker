@@ -106,6 +106,16 @@ DATASETS = {
         "eastmoney.financial", "eastmoney", "财务摘要", 86400, "1 天（按报告期披露）"),
     "news.search": DatasetSpec(
         "news.search", "news", "多源资讯搜索", 600, "10 分钟（与资讯雷达页同源）"),
+    # 新闻知识工具（2026-10-15 注入面修复）：读雷达**落库后**的原文/专题/简报。
+    # 内容源自第三方报道（正文与摘要都能夹带指令），必须过外部边界声明；
+    # 但读取走本地库，单独 provider —— 不与 news.search 共享熔断，
+    # 搜索上游挂了不该连本地知识工具一起摘掉。
+    "news.archive": DatasetSpec(
+        "news.archive", "news.knowledge", "新闻原文归档", 600, "10 分钟（随雷达落库更新）"),
+    "news.topics": DatasetSpec(
+        "news.topics", "news.knowledge", "事件专题线", 600, "10 分钟（随聚类任务更新）"),
+    "news.briefing": DatasetSpec(
+        "news.briefing", "news.knowledge", "个股信息面简报", 600, "10 分钟（由事件与专题合成）"),
 }
 
 
@@ -328,6 +338,18 @@ class ExternalSourceRegistry:
 
     def count_offload(self) -> None:
         self._offloads += 1
+
+    def declare_dataset(self, spec: DatasetSpec) -> None:
+        """运行时登记一个数据集（MCP 挂载用）。
+
+        模块级 `DATASETS` 是声明表，而本实例在构造时**快照**了它——运行时新增的
+        数据集若只改模块表，实例仍然看不见（TTL 回落 60s、熔断按不到位的
+        provider 粒度记）。所以登记必须两处同步：声明表给"下一个实例"与
+        validate 用，实例视图给本次运行用。
+        """
+        DATASETS[spec.name] = spec
+        PROVIDERS.setdefault(spec.provider, spec.provider)
+        self._datasets[spec.name] = spec
 
     # ---------- 观测 ----------
 

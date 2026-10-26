@@ -57,4 +57,13 @@ public class User {
     @jakarta.persistence.Column(precision = 8, scale = 5)
     private java.math.BigDecimal commissionPct;
 
+    /**
+     * 是否已读完新手引导（首次登录的全屏使用说明）。**三态**是刻意的：
+     * null = 本功能上线前就存在的老账号——不打扰，视为已读（否则升级当晚
+     * 所有人被一个关不掉的全屏层拦住，连 e2e 探针账号都会被挡在门外）；
+     * false = 新注册账号，首次进入弹引导；
+     * true = 已翻到最后一页并点了「开始使用」。
+     */
+    private Boolean onboardingCompleted;
+
 }

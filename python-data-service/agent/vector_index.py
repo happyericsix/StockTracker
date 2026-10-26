@@ -170,7 +170,7 @@ class ChromaVectorIndex:
     """落盘的 Chroma 索引（`VECTOR_BACKEND=chroma`）。
 
     <h3>只当"向量仓库"用，不让它碰 embedding</h3>
-    collection 用 `embedding_function=None` 创建，向量全部由我们自己算（走智谱/OpenAI 兼容接口，
+    collection 用 `embedding_function=None` 创建，向量全部由我们自己算（走 OpenAI 兼容接口，
     并且有本地缓存）。这样换 embedding 供应商不需要动索引代码，也不会出现
     "Chroma 偷偷调了别的模型" 这种难查的问题。
 

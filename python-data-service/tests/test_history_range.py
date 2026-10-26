@@ -286,6 +286,75 @@ def test_an_empty_page_does_not_wipe_the_other_pages(monkeypatch):
     assert all(bar["date"] for bar in bars)
 
 
+# ==================== 4. 同源退避重试（2026-10-19/20 事故） ====================
+#
+# 连续两天 15:30 结算时段腾讯 ifzq 拒服 100+ 分钟，单次请求直接判死、当天结算
+# data_unavailable。这里钉住三级语义：网络类异常要重试、重试用尽返回 None
+# （失败交给调用方落痕）、"正常返回但为空"不重试（空是源的正常回答）。
+
+
+def _patch_flaky_source(monkeypatch, plan, seen):
+    """plan：第 n 次调用（从 1 起）的处置——'conn' 抛连接错、'value' 抛解析错、
+    否则按该值当 payload 返回。重试退避清零，测试不等真实 sleep。"""
+    monkeypatch.setattr(akshare_client, "KLINE_RETRY_BACKOFF_S", 0.0)
+    calls = {"n": 0}
+
+    def flaky_get(url, params=None, headers=None, timeout=None):
+        calls["n"] += 1
+        seen.append((params or {}).get("param", ""))
+        action = plan[min(calls["n"], len(plan)) - 1]
+        if action == "conn":
+            raise akshare_client.requests.ConnectionError("connection refused")
+        if action == "value":
+            raise ValueError("expecting value: line 1 column 1 (char 0)")
+        return _Response(action)
+
+    monkeypatch.setattr(akshare_client.requests, "get", flaky_get)
+    monkeypatch.setattr(akshare_client, "resolve_symbol", lambda symbol: "sh600519")
+    monkeypatch.setattr(akshare_client, "normalize_symbol", lambda symbol: "sh600519")
+    akshare_client._history_cache.clear()
+
+
+def test_a_network_error_is_retried_and_then_succeeds(monkeypatch):
+    """第一次连接被拒、第二次成功：get_history 照常返回——正是事故那天缺的一级兜底。"""
+    seen = []
+    _patch_flaky_source(monkeypatch, ["conn", _payload(["2026-01-02"])], seen)
+
+    bars = get_history("600519")
+
+    assert bars and bars[0]["date"] == "2026-01-02"
+    assert len(seen) == 2, "失败一次后应当重试一次"
+
+
+def test_a_json_parse_failure_is_also_retried(monkeypatch):
+    """限流页/HTML 插页回来的是解析不了的 body（ValueError 分支），同样要重试。"""
+    seen = []
+    _patch_flaky_source(monkeypatch, ["value", _payload(["2026-01-02"])], seen)
+
+    bars = get_history("600519")
+
+    assert bars and bars[0]["date"] == "2026-01-02"
+    assert len(seen) == 2
+
+
+def test_all_attempts_failing_returns_none(monkeypatch):
+    """重试用尽仍失败：返回 None，由调用方按 data_unavailable 落痕——不是抛异常。"""
+    seen = []
+    _patch_flaky_source(monkeypatch, ["conn", "conn", "conn"], seen)
+
+    assert get_history("600519") is None
+    assert len(seen) == akshare_client.KLINE_RETRY_ATTEMPTS
+
+
+def test_an_empty_answer_is_not_retried(monkeypatch):
+    """200 但为空是源的正常回答（新股/超出源头历史）：重试只会加倍延迟。"""
+    seen = []
+    _patch_flaky_source(monkeypatch, [_payload([])], seen)
+
+    assert get_history("600519") is None
+    assert len(seen) == 1, "空响应不该重试"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

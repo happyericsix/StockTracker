@@ -1,5 +1,6 @@
 package com.happyericsix.stocktracker.client;
 
+import com.happyericsix.stocktracker.service.UserLlmConfigService;
 import tools.jackson.databind.JsonNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -9,6 +10,7 @@ import org.springframework.web.reactive.function.client.WebClient;
 
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -27,14 +29,17 @@ public class MemoryClient {
     private static final Logger log = LoggerFactory.getLogger(MemoryClient.class);
 
     private final WebClient webClient;
+    private final UserLlmConfigService userLlmConfigService;
 
     public MemoryClient(@Value("${akshare.api.base-url:http://localhost:8000}") String baseUrl,
-                        @Value("${internal.api-token:}") String internalToken) {
+                        @Value("${internal.api-token:}") String internalToken,
+                        UserLlmConfigService userLlmConfigService) {
         WebClient.Builder builder = WebClient.builder().baseUrl(baseUrl);
         if (internalToken != null && !internalToken.isBlank()) {
             builder.defaultHeader("X-Internal-Token", internalToken);
         }
         this.webClient = builder.build();
+        this.userLlmConfigService = userLlmConfigService;
     }
 
     /** 让 Python 把某个会话总结成"前情提要"并写回 Java。总结是 LLM 调用，给足 60s。 */
@@ -42,6 +47,10 @@ public class MemoryClient {
         Map<String, Object> body = new HashMap<>();
         body.put("user_id", userId);
         body.put("session_key", sessionKey);
+        // BYOK（2026-10-25）：巩固记的是这个用户的账，Key 也用他自己的（未配置 →
+        // Python 侧按 llm_providers=[] 降级跳过这次摘要，绝不烧全局 key）
+        List<Map<String, Object>> providers = userLlmConfigService.providersFor(userId);
+        body.put("llm_providers", providers != null ? providers : List.of());
         try {
             return webClient.post()
                     .uri("/api/v1/memory/consolidate")

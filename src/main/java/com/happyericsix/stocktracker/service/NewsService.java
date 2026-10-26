@@ -196,6 +196,7 @@ public class NewsService {
     /** 只为综合解读取一次最新行情（判断"信息面与股价表现是否一致"），不参与资讯落库。 */
     private final AkshareStockClient stockClient;
     private final TransactionTemplate transactionTemplate;
+    private final NewsAlertService newsAlertService;
     /**
      * 后台补数据（兜底抓取 + 分批解读）用的执行器。
      *
@@ -218,6 +219,7 @@ public class NewsService {
                        UserRepository userRepository,
                        NewsClient newsClient,
                        AkshareStockClient stockClient,
+                       NewsAlertService newsAlertService,
                        PlatformTransactionManager transactionManager,
                        @Qualifier("newsEnrichmentExecutor") Executor newsEnrichmentExecutor) {
         this.newsEventRepository = newsEventRepository;
@@ -226,6 +228,7 @@ public class NewsService {
         this.userRepository = userRepository;
         this.newsClient = newsClient;
         this.stockClient = stockClient;
+        this.newsAlertService = newsAlertService;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.newsEnrichmentExecutor = newsEnrichmentExecutor;
     }
@@ -1029,6 +1032,39 @@ public class NewsService {
      * 这个是分钟级节拍，必须轻 —— 窗口 1 天（{@code _in_window} 是 24 小时口径，
      * 跨夜条目不会被日界切掉），去重落库同一套 {@link #upsert}，纯 HTTP、零 LLM 成本。
      */
+    /**
+     * 自选股研报定向补拉（2026-10-16）：研报是**按 symbol 拉取**的源，wire 轮询
+     * （无 symbol）永远拉不到它——没人打开个股页它就停在几周前（实测最新一条
+     * 落后 17 天）。每次全量刷新时对全体用户自选各拉近 30 天研报：量小
+     * （自选数 × 上限条数），却让"个股页研报频道"始终新鲜。fail-open。
+     */
+    public int refreshReportsForFavorites() {
+        try {
+            java.util.LinkedHashSet<String> symbols = new java.util.LinkedHashSet<>();
+            for (User user : userRepository.findAll()) {
+                for (FavoriteStock favorite : favoriteStockRepository.findByUserId(user.getId())) {
+                    String symbol = favorite.getStockSymbol();
+                    if (symbol != null && !symbol.isBlank()) {
+                        symbols.add(symbol.trim());
+                    }
+                    if (symbols.size() >= 30) break;   // 防御性上限：自选再多也别把刷新拖成爬虫
+                }
+            }
+            int total = 0;
+            for (String symbol : symbols) {
+                JsonNode result = newsClient.fetch(symbol, "", List.of(3), 30, false);   // 3=研报（与 python news_client.LEVEL_REPORT 同值）
+                total += upsert(itemsOf(result));
+            }
+            if (total > 0) {
+                log.info("自选股研报补拉入库 {} 条（{} 只）", total, symbols.size());
+            }
+            return total;
+        } catch (Exception e) {
+            log.info("自选研报补拉失败（fail-open）: {}", e.toString());
+            return 0;
+        }
+    }
+
     public String refreshWire() {
         JsonNode response = newsClient.fetch("", "", WIRE_TYPES, 1, false, false);
         if (!NewsClient.isOk(response)) {
@@ -1157,6 +1193,8 @@ public class NewsService {
         if (pending.isEmpty() || analyzedItems == null || !analyzedItems.isArray()) {
             return 0;
         }
+        // final 引用在 lambda 里可变内容不可变指向：预警候选在事务内收集、事务外消费
+        final List<NewsEvent> alertable = new java.util.ArrayList<>();
         Integer applied = transactionTemplate.execute(status -> {
             int count = 0;
             // 顺序契约：Python 保证"输出与输入同序同长"（analyze_events 的 docstring），
@@ -1202,10 +1240,20 @@ public class NewsService {
                 event.setOpportunities(writeJson(stringList(row.get("opportunities"))));
                 newsEventRepository.save(event);
                 saveRelatedRels(event, related);
+                alertable.add(event);
                 count++;
             }
             return count;
         });
+        // 新闻预警在事务外：命中自选股的高影响事件写消息/推手机（saveReport 是
+        // REQUIRES_NEW、推送走网络，都不该被夹在数据事务里；失败也只记日志）
+        for (NewsEvent event : alertable) {
+            try {
+                newsAlertService.notifyWatchers(event);
+            } catch (Exception e) {
+                log.debug("news alert skipped event={}: {}", event.getId(), e.getMessage());
+            }
+        }
         return applied == null ? 0 : applied;
     }
 

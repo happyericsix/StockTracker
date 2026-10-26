@@ -17,11 +17,13 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -30,6 +32,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.when;
 
 /**
@@ -65,7 +68,8 @@ class AgentDecisionPersistenceTest {
     @Autowired
     private PaperTradeTraceRepository traceRepository;
 
-    @Autowired
+    /** spy 包住真仓储：只有 B5 用例桩 save 抛异常，其余用例原样穿透。 */
+    @MockitoSpyBean
     private PaperEquitySnapshotRepository snapshotRepository;
 
     @MockitoBean
@@ -126,7 +130,7 @@ class AgentDecisionPersistenceTest {
                 + "\"roles\":[{\"role\":\"bull\",\"label\":\"bull-researcher\","
                 + "\"sha256\":\"deadbeef0001\",\"excerpt\":\"均线多头排列\"}]}";
         when(strategyClient.agentDecide(anyString(), eq("600519"), anyString(), isNull(), any(),
-                any(), any(), any()))
+                any(), any(), any(), any(), any()))
                 .thenReturn(mapper.readTree(
                         "{\"valid\":true,\"decision\":\"buy\",\"signal\":\"buy\",\"size_fraction\":0.5,"
                                 + "\"price\":10.0,\"matched_conditions\":[],\"fill_basis\":\"close\","
@@ -176,6 +180,95 @@ class AgentDecisionPersistenceTest {
         PaperAccount account = paperAccountRepository.findByStrategyId(strategy.getId()).orElseThrow();
         assertTrue(account.getShares().compareTo(BigDecimal.ZERO) > 0);
         assertTrue(account.getCash().compareTo(account.getInitialCapital()) < 0);
+    }
+
+    /**
+     * 日线结算同样受授权 max_position_pct 夹取（2026-10-15 前日线 sizeCap=null，
+     * 委员会自己当天的买入可以越过自己划的边界，而同一天盘中却被同一道边界夹住）。
+     *
+     * <p>委员会说 buy size_fraction=0.5，但同时授权 max_position_pct=0.3：
+     * 三层夹取的最后一层必须在场 —— 10 万资金 @10 元应买 3000 股，不是 5000 股。
+     */
+    @Test
+    void anAgentBuyIsClampedByItsOwnAuthorizationOnTheDailyPath() throws Exception {
+        Strategy strategy = agentStrategy();
+        String today = LocalDate.now().toString();
+
+        when(strategyClient.agentDecide(anyString(), eq("600519"), anyString(), isNull(), any(),
+                any(), any(), any(), any(), any()))
+                .thenReturn(mapper.readTree(
+                        "{\"valid\":true,\"decision\":\"buy\",\"signal\":\"buy\",\"size_fraction\":0.5,"
+                                + "\"price\":10.0,\"matched_conditions\":[],\"fill_basis\":\"close\","
+                                + "\"authorization\":{\"intraday_execution\":true,"
+                                + "\"allow_open\":true,\"allow_close\":true,\"max_position_pct\":0.3},"
+                                + "\"fingerprint\":{\"fill_basis\":\"close\",\"adjust_mode\":\"qfq\","
+                                + "\"money_policy_version\":1,\"engine_version\":\"abc123\","
+                                + "\"decision_mode\":\"agent\"},"
+                                + "\"committee\":{\"llm_calls\":8,\"total_tokens\":30000,"
+                                + "\"roles\":[{\"role\":\"risk_judge\",\"label\":\"风控裁决\"}]},"
+                                // volume 放大：25% 参与上限（本例=25万股）不能先于授权钳制生效，
+                                // 这条用例量的是授权那一层
+                                + "\"snapshot\":{\"schema_version\":1,"
+                                + "\"bar\":{\"date\":\"" + today + "\",\"open\":10.0,\"high\":10.5,"
+                                + "\"low\":9.8,\"close\":10.0,\"volume\":1000000},"
+                                + "\"indicators\":{\"ma_20\":9.8},"
+                                + "\"params\":{\"decision_mode\":\"agent\"},"
+                                + "\"extra\":{\"committee\":{\"llm_calls\":8,\"total_tokens\":30000}}}}"));
+
+        paperTradingService.evaluateDaily();
+
+        List<PaperTrade> trades = paperTradeRepository.findByStrategyIdOrderByTradeDateDescCreatedAtDesc(
+                strategy.getId());
+        assertEquals(1, trades.size());
+        // 0.3 × 10 万 / 10 元 = 3000 股；费用预留会让整手再向下让一步（实测 2900）。
+        // 若授权层缺席（旧行为 sizeCap=null），size_fraction=0.5 会买到 ~4900+ 股。
+        BigDecimal shares = trades.get(0).getShares();
+        assertTrue(shares.compareTo(new BigDecimal("2900")) >= 0
+                        && shares.compareTo(new BigDecimal("3000")) <= 0,
+                "size_fraction=0.5 必须被授权 max_position_pct=0.3 夹住（预期 2900~3000 股），实际 "
+                        + shares);
+    }
+
+    /**
+     * 快照写失败 → **整笔回滚**（B5，2026-10-15：成交与净值快照同笔落库）。
+     *
+     * <h3>这条用例防的事故形态</h3>
+     * 此前快照在成交事务提交之后独立执行：快照失败会留下"成交已落、曲线缺一格"的
+     * 不一致 —— 而结算重试只认 no_bar/data_unavailable 的痕迹，这一格永远补不上。
+     * 现在两者同一事务：要么完整、要么没有（evaluateDaily 会吞掉异常并留错误日志，
+     * 所以断言的是"没有任何东西落库"，不是异常本身）。
+     */
+    @Test
+    void snapshotFailureRollsBackTheWholeDailySettlement() throws Exception {
+        Strategy strategy = agentStrategy();
+        String today = LocalDate.now().toString();
+
+        when(strategyClient.agentDecide(anyString(), eq("600519"), anyString(), isNull(), any(),
+                any(), any(), any(), any(), any()))
+                .thenReturn(mapper.readTree(
+                        "{\"valid\":true,\"decision\":\"buy\",\"signal\":\"buy\",\"size_fraction\":0.5,"
+                                + "\"price\":10.0,\"matched_conditions\":[],\"fill_basis\":\"close\","
+                                + "\"fingerprint\":{\"fill_basis\":\"close\",\"adjust_mode\":\"qfq\","
+                                + "\"money_policy_version\":1,\"engine_version\":\"abc123\","
+                                + "\"decision_mode\":\"agent\"},"
+                                + "\"snapshot\":{\"schema_version\":1,"
+                                + "\"bar\":{\"date\":\"" + today + "\",\"open\":10.0,\"high\":10.5,"
+                                + "\"low\":9.8,\"close\":10.0,\"volume\":1000000},"
+                                + "\"indicators\":{\"ma_20\":9.8},\"params\":{},\"extra\":{}}}"));
+        doThrow(new RuntimeException("snapshot write failed"))
+                .when(snapshotRepository).save(any(PaperEquitySnapshot.class));
+
+        paperTradingService.evaluateDaily();   // 异常被逐策略 catch 吞掉 —— 看的是库里的状态
+
+        assertEquals(0, paperTradeRepository
+                        .findByStrategyIdOrderByTradeDateDescCreatedAtDesc(strategy.getId()).size(),
+                "快照失败时成交必须一并回滚：要么完整、要么没有");
+        assertEquals(Optional.empty(),
+                snapshotRepository.findByStrategyIdAndTradeDate(strategy.getId(), LocalDate.now()),
+                "快照本身也不能存在（写失败的那次不能留下半行）");
+        PaperAccount after = paperAccountRepository.findByStrategyId(strategy.getId()).orElseThrow();
+        assertEquals(0, BigDecimal.ZERO.compareTo(after.getShares()),
+                "账户不能留下买了半截的状态");
     }
 
     /**
@@ -262,7 +355,7 @@ class AgentDecisionPersistenceTest {
         String today = LocalDate.now().toString();
 
         when(strategyClient.agentDecide(anyString(), eq("600519"), anyString(), isNull(), any(),
-                any(), any(), any()))
+                any(), any(), any(), any(), any()))
                 .thenReturn(mapper.readTree(
                         "{\"valid\":true,\"decision\":\"skip\",\"signal\":\"hold\","
                                 + "\"size_fraction\":0.0,\"skip_reason\":\"rule_not_met\","

@@ -93,6 +93,7 @@ python-data-service/lagrange/Lagrange.OneBot/bin/Release/
 _backup_*/
 
 ### Runtime logs ###
+/logs/
 *.out.log
 *.err.log
 
@@ -113,6 +114,7 @@ napcat/
 .superpowers/
 
 ### Generated eval reports ###
+python-data-service/reports/
 # 跑一次评测就重写一次，跟踪它等于每次跑批都产生一个 diff ——
 # 那种噪声会把真正的改动淹掉（`git rm --cached` 之后文件仍在本地，只是不再是提交候选）。
 python-data-service/tests/*/report.json
@@ -125,3 +127,5 @@ deploy-out/
 
 # Playwright 测试产物
 frontend/test-results/
+.token
+promptfooconfig.local.yaml

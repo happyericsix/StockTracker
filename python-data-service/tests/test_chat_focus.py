@@ -94,7 +94,8 @@ def test_chat_endpoint_passes_focus_through(monkeypatch):
     seen = {}
 
     def fake_run(user_id, message, history=None, session_id=None, memory_user_id=None,
-                 tool_mode=None, scopes=None, role=None, focus=None):
+                 tool_mode=None, scopes=None, role=None, focus=None, epoch=None,
+                 completion=None, completion_stream=None):
         seen["focus"] = focus
         return {"replies": ["ok"], "strategy_json": None}
 
@@ -110,7 +111,8 @@ def test_chat_endpoint_ignores_non_dict_focus(monkeypatch):
     seen = {}
 
     def fake_run(user_id, message, history=None, session_id=None, memory_user_id=None,
-                 tool_mode=None, scopes=None, role=None, focus=None):
+                 tool_mode=None, scopes=None, role=None, focus=None, epoch=None,
+                 completion=None, completion_stream=None):
         seen["focus"] = focus
         return {"replies": ["ok"], "strategy_json": None}
 

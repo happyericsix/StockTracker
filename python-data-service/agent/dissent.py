@@ -29,8 +29,13 @@ OVERBOUGHT_RSI = 70.0
 VOLUME_DIVERGENCE_RATIO = 0.7
 #: 决策日"放量下跌"的量能倍数（对 20 日均量）。
 DISTRIBUTION_VOLUME_RATIO = 1.5
-#: 简报最多条数：它是下限保障不是清单大全，超过 6 条模型反而会略读。
-MAX_FACTS = 6
+#: 估值反方事实的分位门槛（PE-TTM 近 5 年分位 ≥ 它才点名）。三色估值表的通行
+#: 口径是 70/30（蛋卷/理杏仁），但空方简报是"高确信反方事实"的下限——取 80：
+#: 70-80 之间的"偏贵"留给委员会裁量，80 以上才值得由代码钉进事实清单。
+RICH_VALUATION_PCT = 80.0
+#: 简报最多条数：它是下限保障不是清单大全，超过 7 条模型反而会略读。
+#: （2026-10-16 6→7：补估值事实后趋势/量能/估值三类各留余量）
+MAX_FACTS = 7
 
 
 def _f(value: Any) -> float | None:
@@ -87,6 +92,15 @@ def bear_case_facts(evidence: dict) -> list[dict]:
     if rsi is not None and rsi >= OVERBOUGHT_RSI:
         facts.append({"fact": "overbought",
                       "detail": f"RSI {rsi} 已过 {OVERBOUGHT_RSI:.0f}（短线过热，追多的赔率变差）"})
+
+    # ---- ⑤b 估值分位过高：贵不是卖出指令，但它是"此刻追多"的反方事实 ----
+    # 证据包里的 valuation_context 由生产端点注入（market_context.py，5 年分位）；
+    # 缺席（取数失败/沙盘未带）时这条事实静默跳过——不拿缺席当便宜
+    pe_pct = _f((evidence.get("valuation_context") or {}).get("pe_percentile_5y"))
+    if pe_pct is not None and pe_pct >= RICH_VALUATION_PCT:
+        facts.append({"fact": "rich_valuation",
+                      "detail": f"PE-TTM 处于近 5 年 {pe_pct:.0f}% 分位（历史高位区，"
+                                "此刻追多用的是未来几年的收益空间换现在的赔率）"})
 
     # ---- ⑥ 价升量缩（需要至少 20 根 bar 才判） ----
     if len(bars) >= 20 and last_close is not None:

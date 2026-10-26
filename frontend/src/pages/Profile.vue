@@ -5,10 +5,12 @@
  */
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { getProfile, changePassword, updateProfile, testPush, getPushLog } from '../api/user.js'
+import { getProfile, changePassword, updateProfile, testPush, getPushLog,
+  getLlmConfig, saveLlmConfig, testLlmConfig, clearLlmConfig } from '../api/user.js'
 import { getLlmUsage } from '../api/paper.js'
 import { messageBus } from '../composables/messageBus.js'
 import QrLogin from '../components/QrLogin.vue'
+import UsageGuide from '../components/UsageGuide.vue'
 import Badge from '../components/ui/badge.vue'
 import Button from '../components/ui/button.vue'
 import { getStatus, unbind, syncFavorites } from '../api/ths.js'
@@ -16,6 +18,9 @@ import { getStatus, unbind, syncFavorites } from '../api/ths.js'
 const router = useRouter()
 const profile = ref({ username: '' })
 const loading = ref(false)
+
+// ---- 使用说明（长期入口：分块自选重温，不需要像首登那样翻完） ----
+const guideOpen = ref(false)
 
 // ---- 同花顺绑定 ----
 const thsBound = ref(null)      // null=未知，避免闪一下
@@ -264,11 +269,109 @@ const llmDailySeries = () => {
   return rows.map((r) => ({ ...r, heightPct: Math.round(((Number(r.llmTokens) || 0) / max) * 100) }))
 }
 
+// ---- AI 模型 Key（BYOK）：聊天/委员会/盯盘/反思都花这里配置的 Key ----
+const llmCfg = ref(null)               // 服务器返回的脱敏状态
+const llmKeyMsg = ref('')
+const llmKeyBusy = ref(false)
+const llmKeyTest = ref(null)           // 最近一次测试结果 [{slot, ok, latencyMs, model, error?}]
+// 主槽预设选择：'deepseek' = 官方端点（只填 Key）；'custom' = 任意 OpenAI 兼容端点
+const llmPrimaryPreset = ref('deepseek')
+const llmForm = ref({
+  primary: { apiKey: '', baseUrl: '', model: '', chatPath: '' },
+  fallback: { apiKey: '', baseUrl: '', model: '', chatPath: '' },
+})
+const llmShowFallback = ref(false)
+
+const loadLlmConfig = async () => {
+  try {
+    const res = await getLlmConfig()
+    llmCfg.value = res.data || null
+    // 已存自定义主槽时把选择器拨到 custom，预设则回 deepseek
+    llmPrimaryPreset.value = llmCfg.value?.primary?.baseUrl ? 'custom' : 'deepseek'
+    llmShowFallback.value = !!llmCfg.value?.fallback
+  } catch {
+    llmCfg.value = null
+  }
+}
+
+// 组装保存/测试用的表单 payload：Key 留空不带上（后端语义 = 保留已存 Key）
+const buildLlmPayload = () => {
+  const primary = { ...llmForm.value.primary }
+  if (llmPrimaryPreset.value === 'deepseek') {
+    primary.baseUrl = ''
+    primary.model = ''
+    primary.chatPath = ''
+  }
+  const payload = { primary }
+  if (llmShowFallback.value) payload.fallback = { ...llmForm.value.fallback }
+  return payload
+}
+
+const handleSaveLlmKey = async () => {
+  llmKeyMsg.value = ''
+  llmKeyBusy.value = true
+  try {
+    const res = await saveLlmConfig(buildLlmPayload())
+    llmCfg.value = res.data || llmCfg.value
+    llmForm.value = {
+      primary: { apiKey: '', baseUrl: '', model: '', chatPath: '' },
+      fallback: { apiKey: '', baseUrl: '', model: '', chatPath: '' },
+    }
+    llmKeyTest.value = null
+    llmKeyMsg.value = 'Key 配置已保存'
+  } catch (e) {
+    llmKeyMsg.value = e.response?.data?.message || e.businessMessage || '保存失败，请检查填写内容'
+  } finally {
+    llmKeyBusy.value = false
+  }
+}
+
+const handleTestLlmKey = async () => {
+  llmKeyMsg.value = ''
+  llmKeyBusy.value = true
+  try {
+    // 表单里有输入就测表单值（保存前先验证抄没抄对）；全空则复测已存配置
+    const form = buildLlmPayload()
+    const hasInput = form.primary.apiKey || form.fallback?.apiKey
+      || llmPrimaryPreset.value === 'custom' && (form.primary.baseUrl || form.primary.model)
+      || form.fallback && (form.fallback.baseUrl || form.fallback.model)
+    const res = await testLlmConfig(hasInput ? form : null)
+    llmKeyTest.value = res.data?.results || []
+    llmKeyMsg.value = res.data?.allOk ? '测试通过，两个槽位都通了' : '有槽位没通，看下方结果'
+    if (!hasInput) await loadLlmConfig()
+  } catch (e) {
+    llmKeyMsg.value = e.response?.data?.message || e.businessMessage || '测试请求失败'
+  } finally {
+    llmKeyBusy.value = false
+  }
+}
+
+const handleClearLlmKey = async () => {
+  if (!confirm('确定清除全部 AI Key 配置吗？\n清除后智能助手、交易委员会等 AI 功能会降级，直到重新配置。')) return
+  llmKeyBusy.value = true
+  try {
+    await clearLlmConfig()
+    llmCfg.value = null
+    llmKeyTest.value = null
+    llmKeyMsg.value = '已清除'
+    llmShowFallback.value = false
+    llmPrimaryPreset.value = 'deepseek'
+  } catch (e) {
+    llmKeyMsg.value = e.response?.data?.message || '清除失败，请稍后重试'
+  } finally {
+    llmKeyBusy.value = false
+  }
+}
+
+const llmSlotTestResult = (slot) => (llmKeyTest.value || []).find((r) => r.slot === slot)
+const llmTimeFmt = (iso) => iso ? String(iso).replace('T', ' ').slice(0, 16) : ''
+
 onMounted(() => {
   fetchProfile()
   loadThsStatus()
   loadLlmUsage()
   loadPushLogs()
+  loadLlmConfig()
 })
 </script>
 
@@ -388,6 +491,133 @@ onMounted(() => {
       </p>
     </section>
 
+    <!-- AI 模型 Key（BYOK）：智能助手/交易委员会/盯盘/反思都从这里扣额度 -->
+    <section class="mb-4 rounded-xl border border-border bg-surface p-5">
+      <h2 class="text-[15px] font-semibold text-ink">AI 模型 Key（自带额度）</h2>
+      <p class="mb-3.5 mt-1 text-[12.5px] leading-relaxed text-ink-3">
+        智能助手、交易委员会、盘中盯盘、复盘反思用的都是<b>你自己的</b>大模型额度——
+        在 <a class="text-accent underline" href="https://platform.deepseek.com" target="_blank" rel="noopener">DeepSeek 开放平台</a>
+        注册并充值即可获得 API Key（新用户有免费额度）。Key 加密存储，不回显、不外传。
+      </p>
+
+      <!-- 服务器未启用 Key 保管（LLM_AES_KEY 未配置）：明示而不是让保存悄悄失败 -->
+      <p v-if="llmCfg && llmCfg.enabled === false" class="rounded-lg bg-up-soft px-3 py-2 text-[12.5px] text-up" role="alert">
+        服务器未启用 Key 保管功能（缺 LLM_AES_KEY 配置），请联系部署者后再配置。
+      </p>
+
+      <template v-else>
+        <div class="flex flex-col gap-3">
+          <!-- 主槽 -->
+          <div class="flex flex-col gap-2.5 rounded-lg border border-border bg-bg p-3.5">
+            <div class="flex items-center justify-between">
+              <span class="text-[12.5px] font-semibold text-ink">主 Key</span>
+              <span v-if="llmCfg?.primary" class="text-[11.5px] text-ink-3">
+                已保存 {{ llmCfg.primary.maskedKey }}<template v-if="llmCfg.primary.preset">（DeepSeek 官方）</template>
+              </span>
+            </div>
+            <label class="flex flex-col gap-1">
+              <span class="text-[12px] text-ink-2">供应商</span>
+              <select v-model="llmPrimaryPreset"
+                class="h-[34px] rounded-lg border border-border bg-bg px-2.5 text-[13px] text-ink focus:border-accent focus:outline-none">
+                <option value="deepseek">DeepSeek 官方（推荐，只填 Key）</option>
+                <option value="custom">自定义 OpenAI 兼容端点（硅基流动/Moonshot/智谱…）</option>
+              </select>
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-[12px] text-ink-2">API Key{{ llmCfg?.primary ? '（留空 = 不改已存 Key）' : '' }}</span>
+              <input v-model.trim="llmForm.primary.apiKey" type="password" autocomplete="new-password"
+                :placeholder="llmCfg?.primary ? '已保存，不在页面回显' : 'sk-...'"
+                class="h-[34px] w-full rounded-lg border border-border bg-bg px-3 font-mono text-[12.5px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none focus:ring-2 focus:ring-[color:var(--ring)]">
+            </label>
+            <template v-if="llmPrimaryPreset === 'custom'">
+              <label class="flex flex-col gap-1">
+                <span class="text-[12px] text-ink-2">Base URL（如 https://api.siliconflow.cn）</span>
+                <input v-model.trim="llmForm.primary.baseUrl" type="text" autocomplete="off" placeholder="https://api.siliconflow.cn"
+                  class="h-[34px] w-full rounded-lg border border-border bg-bg px-3 font-mono text-[12.5px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none focus:ring-2 focus:ring-[color:var(--ring)]">
+              </label>
+              <label class="flex flex-col gap-1">
+                <span class="text-[12px] text-ink-2">模型名（该端点提供的，如 Qwen/Qwen2.5-72B-Instruct）</span>
+                <input v-model.trim="llmForm.primary.model" type="text" autocomplete="off" placeholder="Qwen/Qwen2.5-72B-Instruct"
+                  class="h-[34px] w-full rounded-lg border border-border bg-bg px-3 font-mono text-[12.5px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none focus:ring-2 focus:ring-[color:var(--ring)]">
+              </label>
+              <details class="text-[12px] text-ink-2">
+                <summary class="cursor-pointer select-none">高级：接口路径（智谱等端点需要）</summary>
+                <label class="mt-1.5 flex flex-col gap-1">
+                  <span class="text-[12px] text-ink-3">chat/completions 路径，默认 /v1/chat/completions；智谱配 /chat/completions（Base URL 填到 /api/paas/v4）</span>
+                  <input v-model.trim="llmForm.primary.chatPath" type="text" autocomplete="off" placeholder="/v1/chat/completions"
+                    class="h-[34px] w-full rounded-lg border border-border bg-bg px-3 font-mono text-[12.5px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none">
+                </label>
+              </details>
+            </template>
+          </div>
+
+          <!-- 备用槽（可选）：主 Key 限速/过载时自动切过来，恢复后切回 -->
+          <div class="rounded-lg border border-border bg-bg p-3.5">
+            <label class="flex cursor-pointer items-center gap-2">
+              <input type="checkbox" v-model="llmShowFallback" class="accent-[color:var(--accent)]">
+              <span class="text-[12.5px] font-semibold text-ink">备用 Key（可选，推荐）</span>
+              <span v-if="llmCfg?.fallback" class="text-[11.5px] text-ink-3">已保存 {{ llmCfg.fallback.maskedKey }}</span>
+            </label>
+            <div v-if="llmShowFallback" class="mt-2.5 flex flex-col gap-2.5">
+              <p class="text-[12px] leading-relaxed text-ink-3">
+                主 Key 持续限速/过载时自动切到这家（10 分钟冷却，恢复后切回）。
+                任意 OpenAI 兼容端点，三样都要填齐。
+              </p>
+              <label class="flex flex-col gap-1">
+                <span class="text-[12px] text-ink-2">Base URL</span>
+                <input v-model.trim="llmForm.fallback.baseUrl" type="text" autocomplete="off" placeholder="https://api.siliconflow.cn"
+                  class="h-[34px] w-full rounded-lg border border-border bg-bg px-3 font-mono text-[12.5px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none focus:ring-2 focus:ring-[color:var(--ring)]">
+              </label>
+              <label class="flex flex-col gap-1">
+                <span class="text-[12px] text-ink-2">API Key{{ llmCfg?.fallback ? '（留空 = 不改已存 Key）' : '' }}</span>
+                <input v-model.trim="llmForm.fallback.apiKey" type="password" autocomplete="new-password"
+                  :placeholder="llmCfg?.fallback ? '已保存，不在页面回显' : 'sk-...'"
+                  class="h-[34px] w-full rounded-lg border border-border bg-bg px-3 font-mono text-[12.5px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none focus:ring-2 focus:ring-[color:var(--ring)]">
+              </label>
+              <label class="flex flex-col gap-1">
+                <span class="text-[12px] text-ink-2">模型名</span>
+                <input v-model.trim="llmForm.fallback.model" type="text" autocomplete="off" placeholder="Qwen/Qwen2.5-72B-Instruct"
+                  class="h-[34px] w-full rounded-lg border border-border bg-bg px-3 font-mono text-[12.5px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none focus:ring-2 focus:ring-[color:var(--ring)]">
+              </label>
+              <details class="text-[12px] text-ink-2">
+                <summary class="cursor-pointer select-none">高级：接口路径</summary>
+                <label class="mt-1.5 flex flex-col gap-1">
+                  <span class="text-[12px] text-ink-3">默认 /v1/chat/completions；智谱配 /chat/completions（Base URL 填到 /api/paas/v4）</span>
+                  <input v-model.trim="llmForm.fallback.chatPath" type="text" autocomplete="off" placeholder="/v1/chat/completions"
+                    class="h-[34px] w-full rounded-lg border border-border bg-bg px-3 font-mono text-[12.5px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none focus:ring-2 focus:ring-[color:var(--ring)]">
+                </label>
+              </details>
+            </div>
+          </div>
+
+          <div class="flex flex-wrap gap-2">
+            <Button size="sm" variant="primary" :loading="llmKeyBusy" @click="handleSaveLlmKey">保存</Button>
+            <Button size="sm" :disabled="llmKeyBusy" @click="handleTestLlmKey">测试连通性</Button>
+            <Button v-if="llmCfg?.configured" size="sm" variant="ghost" class="text-up hover:bg-up-soft" :disabled="llmKeyBusy" @click="handleClearLlmKey">清除全部</Button>
+          </div>
+          <p v-if="llmKeyMsg" class="text-[12.5px] text-accent" role="status">{{ llmKeyMsg }}</p>
+
+          <!-- 最近一次测试结果：每个槽位一行（通了显示延迟，没通显示原因） -->
+          <div v-if="llmKeyTest?.length" class="border-t border-border pt-2.5">
+            <div v-for="r in llmKeyTest" :key="r.slot" class="flex items-baseline gap-2 text-[12.5px]">
+              <span class="shrink-0 font-medium" :class="r.ok ? 'text-down' : 'text-up'">
+                {{ r.slot === 'primary' ? '主' : '备' }}{{ r.ok ? ' ✓ ' + r.latencyMs + 'ms' : ' ✗' }}
+              </span>
+              <span class="shrink-0 text-ink-3">{{ r.model }}</span>
+              <span v-if="!r.ok && r.error" class="min-w-0 flex-1 truncate text-ink-2" :title="r.error">{{ r.error }}</span>
+            </div>
+          </div>
+
+          <!-- 服务器记录的最近一次测试（复测已存配置时更新） -->
+          <p v-if="llmCfg?.lastTestedAt" class="text-[12px] text-ink-3">
+            上次测试：{{ llmTimeFmt(llmCfg.lastTestedAt) }}
+            {{ llmCfg.lastTestOk ? '· 通过' : '· 未通过' }}
+            <template v-if="llmCfg.lastError">（{{ llmCfg.lastError }}）</template>
+          </p>
+        </div>
+      </template>
+    </section>
+
     <!-- 同花顺绑定 -->
     <section class="mb-4 rounded-xl border border-border bg-surface p-5">
       <h2 class="mb-3 text-[15px] font-semibold text-ink">同花顺账号</h2>
@@ -447,9 +677,20 @@ onMounted(() => {
       </form>
     </section>
 
+    <!-- 使用说明 / 关于：首登引导的长期入口（分块自选，随时可关） -->
+    <section class="mb-4 rounded-xl border border-border bg-surface p-5">
+      <h2 class="mb-1.5 text-[15px] font-semibold text-ink">使用说明 / 关于</h2>
+      <p class="mb-3.5 text-[12.5px] text-ink-2">
+        分块重温产品的内容与机制：行情与资讯、AI 助手与记忆、策略两种模式、模拟盘口径与边界。
+      </p>
+      <Button size="sm" @click="guideOpen = true">打开使用说明</Button>
+    </section>
+
     <!-- 退出登录：危险但非破坏性（只清本地 token），用描边而非实心红 -->
     <section class="mb-4 rounded-xl border border-border bg-surface p-5">
       <Button variant="danger" block @click="handleLogout">退出登录</Button>
     </section>
+
+    <UsageGuide :open="guideOpen" mode="browse" @close="guideOpen = false" />
   </div>
 </template>

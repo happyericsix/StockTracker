@@ -16,3 +16,10 @@ chromadb>=0.4.22
 
 # PDF 研报正文抽取（article_fetcher，2026-10-05：pdf.dfcfw.com 的研报全是 PDF）
 pypdf>=4.0.0
+
+# MCP 客户端（agent/mcp_client.py，2026-10-20）：官方 SDK，全异步——
+# mcp_client 用后台事件循环线程桥接到本服务的同步线程模型
+mcp>=2.0.0
+# MCP fetch 服务器（官方 Python 参考实现）：stdio 子进程方式跑在容器内，
+# 给 agent 补上"抓网页转 markdown"的开放资料能力（见 .env 的 MCP_FETCH_* 配置）
+mcp-server-fetch

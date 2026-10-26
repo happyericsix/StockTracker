@@ -44,6 +44,14 @@ public class StrategyRevisionService {
     private static final int JOURNAL_MIN_EVALUATED = 5;
     private static final BigDecimal JOURNAL_HIT_RATE_WARN = new BigDecimal("40");
 
+    /**
+     * 多重检验预算（2026-10-15 过拟合实验后新增）：滚动 30 天内每条策略最多生成
+     * 3 次提案。实验结论：弱基准下随机参数 84% 能"跑赢"门禁主判据 —— 每点一次
+     * "生成"都是对同一窗口的一次抽样，反复重抽必然撞上过闸（过拟合），必须限量。
+     */
+    private static final int GENERATION_BUDGET_PER_30D = 3;
+    private static final java.time.Duration GENERATION_BUDGET_WINDOW = java.time.Duration.ofDays(30);
+
     private final StrategyRepository strategyRepository;
     private final StrategyRevisionRepository revisionRepository;
     private final UserRepository userRepository;
@@ -122,14 +130,17 @@ public class StrategyRevisionService {
                 if (summary.returnPct().signum() < 0
                         && summary.maxDrawdownPct().abs().compareTo(new BigDecimal("10")) >= 0) {
                     signals.add(signal("equity_drawdown", "warn", String.format(
-                            "净值 %s%%、最大回撤 %s%%（%s ~ %s）",
+                            "运行至今收益 %s%%，但期间从高点最深回落达 %s%%（%s ~ %s）",
                             summary.returnPct(), summary.maxDrawdownPct(),
                             summary.firstDate(), summary.lastDate())));
                 } else {
+                    // 超额算不出来（基准数据缺失）就不显示，别把 null 吐给用户
+                    String excessNote = summary.excessVsBuyAndHoldPct() == null ? ""
+                            : String.format("，与一直持有不操作相比 %s%%",
+                                    summary.excessVsBuyAndHoldPct());
                     signals.add(signal("equity", "ok", String.format(
-                            "净值 %s%%、最大回撤 %s%%、对买入持有超额 %s%%",
-                            summary.returnPct(), summary.maxDrawdownPct(),
-                            summary.excessVsBuyAndHoldPct())));
+                            "运行至今收益 %s%%，期间从高点最深回落 %s%%%s",
+                            summary.returnPct(), summary.maxDrawdownPct(), excessNote)));
                 }
             }
         } catch (Exception e) {
@@ -174,6 +185,17 @@ public class StrategyRevisionService {
                 .ifPresent(r -> { throw new IllegalArgumentException(
                         "已有一条待审批提案：先处理它（批准/拒绝），再生成新的"); });
 
+        // 多重检验预算：同一窗口反复"生成→挑过闸"等价于对回测噪声反复抽样
+        LocalDateTime since = LocalDateTime.now().minus(GENERATION_BUDGET_WINDOW);
+        long attempts = revisionRepository.countByStrategyIdAndStatusNotAndCreatedAtAfter(
+                strategyId, StrategyRevision.STATUS_SUPERSEDED, since);
+        if (attempts >= GENERATION_BUDGET_PER_30D) {
+            throw new IllegalArgumentException(String.format(
+                    "近 30 天已生成 %d 次修订提案（上限 %d 次）—— 反复重抽参数是在拟合噪声，"
+                    + "先让策略积累实际运行样本，预算 %d 天后重置",
+                    attempts, GENERATION_BUDGET_PER_30D, GENERATION_BUDGET_WINDOW.toDays()));
+        }
+
         ObjectNode payload = mapper.createObjectNode();
         payload.put("strategy_id", strategyId);
         payload.set("config", readTree(strategy.getConfigJson()));
@@ -186,7 +208,9 @@ public class StrategyRevisionService {
         healthSignals(username, strategyId).forEach(signals::add);
         attachContext(payload, strategyId);
 
-        JsonNode result = strategyClient.strategyRevision(payload);
+        // BYOK：提案花的是这个用户的 Key（未配置 → ok=false，不生成待审批记录）
+        JsonNode result = strategyClient.strategyRevision(payload,
+                strategy.getUser() != null ? strategy.getUser().getId() : null);
         if (result == null || !result.path("ok").asBoolean(false)) {
             String error = result == null ? "提案服务无响应"
                     : result.path("error").asText("提案生成失败");

@@ -88,6 +88,43 @@ public class AkshareStockClient {
         }
     }
 
+    // ==================== 估值分位（K 线页副图，2026-10-16） ====================
+
+    /** PE-TTM 与滚动 5 年分位日线序列。失败返回 null（控制器回「暂不可用」，副图隐藏）。 */
+    public tools.jackson.databind.JsonNode getValuationHistory(String symbol) {
+        try {
+            return webClient.get()
+                    .uri(uri -> uri.path("/api/v1/valuation/{symbol}")
+                            .build(symbol))
+                    .retrieve()
+                    .bodyToMono(tools.jackson.databind.JsonNode.class)
+                    .timeout(REQUEST_TIMEOUT)
+                    .block();
+        } catch (Exception e) {
+            log.warn("valuation history 调用失败 symbol={}: {}", symbol, e.getMessage());
+            return null;
+        }
+    }
+
+    // ==================== 个股资金流（K 线页主力资金卡，2026-10-19） ====================
+
+    /** 个股主力资金流日线（腾讯源）。失败返回 null（控制器回「暂不可用」，卡片隐藏）。
+     *  Python 侧有 2 分钟 TTL + 负缓存，这里不叠加缓存：K 线页每票每打开最多一次。 */
+    public tools.jackson.databind.JsonNode getStockFundFlow(String symbol) {
+        try {
+            return webClient.get()
+                    .uri(uri -> uri.path("/api/v1/fund-flow/{symbol}")
+                            .build(symbol))
+                    .retrieve()
+                    .bodyToMono(tools.jackson.databind.JsonNode.class)
+                    .timeout(REQUEST_TIMEOUT)
+                    .block();
+        } catch (Exception e) {
+            log.warn("stock fund-flow 调用失败 symbol={}: {}", symbol, e.getMessage());
+            return null;
+        }
+    }
+
     // ==================== 实时行情 ====================
 
     public StockQuoteResponse getStockQuote(String symbol) {
@@ -172,6 +209,13 @@ public class AkshareStockClient {
     // ==================== 历史 K 线 ====================
 
     /**
+     * 历史 K 线。
+     *
+     * <p>失败（HTTP 错误/超时/网络异常）返回 {@code null} 而不是空响应：
+     * 空的 timeSeries 会被调用方（前端）当成"这只票就是没有数据"，
+     * 而真相是"这次没取到"。K 线页高频切换时 Python 服务排队超时是常态，
+     * 必须让上层能区分两种情况。所有既有调用方均已判 null。
+     *
      * @param period day / week / month
      */
     public StockHistoryResponse getStockHistory(String symbol, String period) {
@@ -187,15 +231,16 @@ public class AkshareStockClient {
                     .block();
         } catch (WebClientResponseException e) {
             log.warn("akshare history error for {} (period={}): HTTP {} {}", symbol, period, e.getStatusCode(), e.getResponseBodyAsString());
-            return emptyHistory(symbol);
+            return null;
         } catch (Exception e) {
             log.warn("akshare history exception for {} (period={}): {}", symbol, period, e.getMessage());
-            return emptyHistory(symbol);
+            return null;
         }
     }
 
     /**
-     * 分钟 K 线（仅 A 股），akshare 数据源
+     * 分钟 K 线（仅 A 股），akshare 数据源。失败返回 {@code null}（理由同
+     * {@link #getStockHistory}：空列表与"取不到"必须可区分）。
      * @param period 1 / 5 / 15 / 30 / 60
      */
     public List<DailyStockResponse> getStockMinuteHistory(String symbol, int period) {
@@ -212,18 +257,11 @@ public class AkshareStockClient {
             return data == null ? List.of() : data;
         } catch (WebClientResponseException e) {
             log.warn("akshare minute error for {} (period={}): HTTP {} {}", symbol, period, e.getStatusCode(), e.getResponseBodyAsString());
-            return List.of();
+            return null;
         } catch (Exception e) {
             log.warn("akshare minute exception for {} (period={}): {}", symbol, period, e.getMessage());
-            return List.of();
+            return null;
         }
-    }
-
-    private StockHistoryResponse emptyHistory(String symbol) {
-        return new StockHistoryResponse(
-                new StockHistoryResponse.MetaData(symbol),
-                java.util.Map.of()
-        );
     }
 
     // ==================== 技术指标（RSI / MACD / 布林带）====================

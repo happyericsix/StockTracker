@@ -8,7 +8,7 @@ ths_client.py — 同花顺客户端（扫码登录 + 读取自选股）
    所以这两块**不要随意改**；要对照原版探针，去 git 历史（原 ths_probe_v2.py）。
 
 协议来源：
-    扫码登录 + 自选股解析   ← djj45/thspypc（源码在 stock-tracker/vendor/）
+    扫码登录 + 自选股解析   ← djj45/thspypc（源码在 StockTracker/vendor/）
     三步鉴权 + 自选股取数   ← 本项目实测（原探针已删，见 git 历史）
     RSA 加密                ← 本项目 _ths_crypto_shim（纯标准库，无第三方依赖）
 

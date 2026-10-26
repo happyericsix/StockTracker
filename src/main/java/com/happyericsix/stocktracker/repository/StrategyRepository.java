@@ -17,4 +17,7 @@ public interface StrategyRepository extends JpaRepository<Strategy, Long> {
     List<Strategy> findByUserIdAndPaperEnabledTrue(Long userId);
     /** 只读分享视图（token 是 32 位随机串，本身即凭证）。 */
     Optional<Strategy> findByShareToken(String shareToken);
+
+    /** 决策来源迁移用：所有还不是 agent 的存量策略（早期 rule 值 / 建表以来的 null）。 */
+    List<Strategy> findByDecisionModeIsNullOrDecisionModeNot(String decisionMode);
 }

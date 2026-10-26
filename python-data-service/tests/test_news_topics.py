@@ -31,7 +31,7 @@ def patch_llm(monkeypatch, replies, available=True):
         return {"message": {"role": "assistant", "content": reply}}
 
     monkeypatch.setattr(llm_service, "chat_completion", fake_completion)
-    monkeypatch.setattr(llm_service, "_is_available", lambda: available)
+    monkeypatch.setattr(llm_service, "_is_available", lambda providers=None: available)
     return calls
 
 

@@ -107,3 +107,64 @@ def test_gate_symbol_and_schema():
     ok2, reason2, _, _ = er._gate(make_records(80), er.DEFAULT_CONFIG,
                                   {**er.DEFAULT_CONFIG, "entry": "不是规则组"}, "601988")
     assert not ok2 and "schema" in reason2
+
+
+def test_gate_complexity_penalty(monkeypatch):
+    """闸门与生产门禁共用复杂度罚金（agent.revision 同一把尺）：
+    加条件 2pt 领先抵不过 5pt 罚金；删条件换 3pt 劣化在奖励范围内放行。"""
+    old = json.loads(json.dumps(er.DEFAULT_CONFIG))
+    add1 = json.loads(json.dumps(er.DEFAULT_CONFIG))
+    add1["exit"]["conditions"].append({"type": "rsi_above", "value": 80})
+
+    def fake(cfg, records):
+        # DEFAULT_CONFIG 复杂度 3，加一条变 4：旧 10% vs 新 12%，罚金 5pt 后 7% < 10%
+        return {"total_return_pct": 12.0 if len(cfg["exit"]["conditions"]) == 3 else 10.0}
+    monkeypatch.setattr(er, "run_backtest_realistic", fake)
+    ok, reason, _, _ = er._gate(make_records(80), old, add1, "601988")
+    assert not ok and "复杂度" in reason and "否决" in reason
+
+    lean = json.loads(json.dumps(er.DEFAULT_CONFIG))
+    lean["exit"]["conditions"] = lean["exit"]["conditions"][:1]
+
+    def fake2(cfg, records):
+        # 删一条（复杂度 4→2 的等价场景用单删一验证）：旧 10% vs 新 7%，奖励 5pt 后 12% > 10%
+        return {"total_return_pct": 7.0 if len(cfg["exit"]["conditions"]) == 1 else 10.0}
+    monkeypatch.setattr(er, "run_backtest_realistic", fake2)
+    ok2, reason2, _, _ = er._gate(make_records(80), old, lean, "601988")
+    assert ok2 and "极简奖励" in reason2
+
+
+def test_valuation_block_asof_and_floor():
+    """估值块纯函数：as-of 切片、分位口径、250 行下限。"""
+    from datetime import date as _d, timedelta as _td
+    start = _d(2024, 3, 1)
+    series = [{"date": (start + _td(days=i)).isoformat(),
+               "pe_ttm": round(50 - 40 * i / 299, 4)} for i in range(300)]
+    block = er._valuation_block(series, series[-1]["date"])
+    assert block and block["pe_percentile_5y"] < 1.0 and block["date"] == series[-1]["date"]
+    # 早于全部估值的 as_of：没有语境（不拿缺席当便宜）
+    assert er._valuation_block(series, "2020-01-01") is None
+    # 不足 250 行：分位无意义
+    assert er._valuation_block(series[:100], series[99]["date"]) is None
+
+
+def test_evidence_extras_injectable_and_fail_open(monkeypatch):
+    """沙盘证据对齐块：注入桩可驱动；取数失败时两块都缺席不挡回放。"""
+    from datetime import date as _d, timedelta as _td
+
+    start = _d(2024, 1, 1)
+    series = [{"date": (start + _td(days=i)).isoformat(),
+               "pe_ttm": round(50 - 40 * i / 259, 4)} for i in range(260)]
+    er._SANDBOX_VALUATION_CACHE.clear()
+    er._SANDBOX_FUNDAMENTALS_CACHE.clear()
+    monkeypatch.setattr(er, "_fetch_valuation_quietly", lambda s: series)
+    monkeypatch.setattr(er, "_fetch_fundamentals_quietly",
+                        lambda s, a: {"periods": [{"period": "20250331"}]})
+    extras = er._evidence_extras("600519", "2025-06-15")
+    assert "valuation_context" in extras and "fundamentals" in extras
+
+    er._SANDBOX_VALUATION_CACHE.clear()
+    er._SANDBOX_FUNDAMENTALS_CACHE.clear()
+    monkeypatch.setattr(er, "_fetch_valuation_quietly", lambda s: [])
+    monkeypatch.setattr(er, "_fetch_fundamentals_quietly", lambda s, a: None)
+    assert er._evidence_extras("600519", "2025-06-15") == {}

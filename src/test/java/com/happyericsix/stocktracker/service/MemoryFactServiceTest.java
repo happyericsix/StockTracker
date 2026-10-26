@@ -40,7 +40,8 @@ class MemoryFactServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new MemoryFactService(factRepo);
+        service = new MemoryFactService(factRepo,
+                org.mockito.Mockito.mock(com.happyericsix.stocktracker.repository.StrategyRepository.class));
     }
 
     private MemoryFactRequest fact(String subject, String predicate, String value) {
@@ -368,5 +369,28 @@ class MemoryFactServiceTest {
 
         List<Map<String, Object>> internal = service.searchFacts(1L, null, null, null, 10);
         assertEquals(2, internal.size(), "内部消费（recall/记忆搜索）读全量");
+    }
+
+    // ==================== 策略键归一（记忆分区 2026-10-15） ====================
+
+    @Test
+    void strategyNameSubjectIsCanonicalizedToStrategyId() {
+        // LLM 按提示词写 strategy:名称，客观通道写 strategy:{id}——写入前统一成 id 键，
+        // 否则同一策略两个主体键并存，取代链与记忆页分区都会断。
+        com.happyericsix.stocktracker.repository.StrategyRepository repo =
+                org.mockito.Mockito.mock(com.happyericsix.stocktracker.repository.StrategyRepository.class);
+        com.happyericsix.stocktracker.entity.Strategy named =
+                com.happyericsix.stocktracker.entity.Strategy.builder()
+                        .id(5L).name("中行趋势").build();
+        org.mockito.Mockito.when(repo.findByUserIdOrderByUpdatedAtDesc(1L))
+                .thenReturn(java.util.List.of(named));
+        MemoryFactService scoped = new MemoryFactService(factRepo, repo);
+
+        org.junit.jupiter.api.Assertions.assertEquals("strategy:5", scoped.canonicalSubject(1L, "strategy:中行趋势"));
+        org.junit.jupiter.api.Assertions.assertEquals("strategy:5", scoped.canonicalSubject(1L, "strategy:5"));
+        org.junit.jupiter.api.Assertions.assertEquals("user", scoped.canonicalSubject(1L, "user"));
+        org.junit.jupiter.api.Assertions.assertEquals("600519", scoped.canonicalSubject(1L, "600519"));
+        // 解析不到（策略已删/名字记错）：保持原名独立成键，绝不猜
+        org.junit.jupiter.api.Assertions.assertEquals("strategy:不存在", scoped.canonicalSubject(1L, "strategy:不存在"));
     }
 }

@@ -150,7 +150,26 @@ def get_market_context() -> Optional[dict]:
         breadth = _cached("breadth", MARKET_TTL, _fetch_breadth)
     except Exception as exc:  # noqa: BLE001
         logger.info("涨跌家数取数失败（不带该块）：%s", type(exc).__name__)
-    if not indices and not breadth:
+    # 大盘资金流子块（2026-10-16）：今日 + 近5日累计主力净流入（亿元）。
+    # 日频数据、盘后才更新——它是"钱的冷热"不是分钟信号，委员会用它校准
+    # "市场在给钱还是收钱"的语境，不作为买卖触发。
+    fund_flow: Optional[dict] = None
+    try:
+        from akshare_client import get_market_fund_flow
+        rows = get_market_fund_flow(limit=6) or []
+        if rows:
+            latest = rows[-1]
+            fund_flow = {
+                "as_of": latest["date"],
+                "main_net_yi_today": latest.get("main_net_yi"),
+                "main_net_yi_5d": round(sum(r.get("main_net_yi") or 0.0 for r in rows), 1),
+                "note": ("主力净流入=超大单+大单（亿元，正=流入）。资金流是日频语境"
+                         "不是触发信号：连续流出里的逆势买入要更硬的证据。"),
+            }
+    except Exception as exc:  # noqa: BLE001 —— 子块缺失不挡大盘语境
+        logger.info("大盘资金流子块取数失败（不带该块）：%s", type(exc).__name__)
+
+    if not indices and not breadth and not fund_flow:
         return None
 
     out: dict[str, Any] = {
@@ -166,6 +185,8 @@ def get_market_context() -> Optional[dict]:
             out["total_turnover_yi"] = round(turnover, 0)
     if breadth:
         out["breadth"] = breadth
+    if fund_flow:
+        out["fund_flow"] = fund_flow
     return out
 
 

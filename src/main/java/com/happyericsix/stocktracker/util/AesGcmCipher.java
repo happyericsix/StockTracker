@@ -94,7 +94,8 @@ public final class AesGcmCipher {
     /** 把任意长度的配置字符串摘要成 32 字节 AES-256 密钥。 */
     private static byte[] deriveKey(String keySource) {
         if (keySource == null || keySource.isBlank()) {
-            throw new IllegalStateException("ths.aes.key 未配置，无法加解密同花顺凭证");
+            throw new IllegalStateException(
+                    "AES 密钥未配置（THS_AES_KEY / LLM_AES_KEY），无法加解密");
         }
         try {
             return java.security.MessageDigest.getInstance("SHA-256")

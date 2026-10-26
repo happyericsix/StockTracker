@@ -9,15 +9,21 @@
  * 可以亲手核对；教训展示 LLM 原句与当时的上下文，不再是无头无尾的规范化键。
  */
 import { computed, onMounted, nextTick, ref } from 'vue'
+import { listSkills, createSkill, setSkillStatus, deleteSkill } from '../api/skills.js'
 import { useRouter } from 'vue-router'
 import InfoTip from '../components/InfoTip.vue'
 import Badge from '../components/ui/badge.vue'
 import Button from '../components/ui/button.vue'
 import Skeleton from '../components/ui/skeleton.vue'
+import BlockCard from '../components/ui/block-card.vue'
+import LessonEditSheet from '../components/LessonEditSheet.vue'
+import ChatDrawer from '../components/ChatDrawer.vue'
+import { renderMarkdown } from '../utils/markdown.js'
 import {
   getMemoryOverview, listMemoryFacts, listMemoryPersona, listMemoryLessons,
   listMemoryEpisodes, retractFact, activateLesson, retireLesson, fetchMemorySources,
 } from '../api/memory.js'
+import { listStrategies } from '../api/strategy.js'
 
 const router = useRouter()
 
@@ -29,13 +35,15 @@ const persona = ref([])
 const facts = ref([])
 const lessons = ref([])
 const episodes = ref([])
+/** 策略 id → 标的（标的共享层小节要按"策略的股票"归集对话域事实） */
+const strategySymbols = ref({})
 
 const showAllEpisodes = ref(false)
 const pendingRetractId = ref(null)
 const busyKey = ref('')
 const confirmButton = ref(null)
 
-const errorMessage = (e, fallback) => e?.response?.data?.message || fallback
+const errorMessage = (e, fallback) => e?.friendlyMessage || e?.response?.data?.message || fallback
 
 // ---------- 来源抽屉（记忆白盒）：同屏只开一个，按条目键缓存展开状态 ----------
 const sourcesKey = ref('')
@@ -90,11 +98,12 @@ const scopeStrategyId = (scope) => {
 /** 对话域的经验：scope 为 chat（或历史行的空值） */
 const chatLessons = computed(() => lessons.value.filter((l) => !scopeStrategyId(l.scope)))
 
-/** 模拟盘策略分区：事实按 subject=strategy:N、经验按 scope=strategy:N 聚到一起 */
+/** 模拟盘策略分区：事实按 subject=strategy:N、经验按 scope=strategy:N 聚到一起；
+ *  另把"该策略标的的共享观点"（L2 标的层：subject=股票代码 的对话域事实）挂进该策略的小节。 */
 const strategySections = computed(() => {
   const map = new Map()
   const bucketOf = (id) => {
-    if (!map.has(id)) map.set(id, { id, decisions: [], observations: [], lessons: [] })
+    if (!map.has(id)) map.set(id, { id, symbol: strategySymbols.value[id] || '', decisions: [], observations: [], lessons: [], symbolNotes: [] })
     return map.get(id)
   }
   for (const fact of facts.value) {
@@ -107,6 +116,18 @@ const strategySections = computed(() => {
     const id = scopeStrategyId(lesson.scope)
     if (!id) continue
     bucketOf(id).lessons.push(lesson)
+  }
+  // L2 标的共享层：每条策略把"自己的股票"的对话域事实收进小节（多条策略碰同一只票时各自都能看到同一份）
+  const bySymbol = new Map()
+  for (const fact of chatFacts.value) {
+    const code = String(fact.subject || '').trim().toUpperCase()
+    if (!/^\d{6}$/.test(code) && !/^(SH|SZ|BJ)?\d{6}$/.test(code)) continue
+    if (!bySymbol.has(code)) bySymbol.set(code, [])
+    bySymbol.get(code).push(fact)
+  }
+  for (const group of map.values()) {
+    const code = String(group.symbol || '').trim().toUpperCase()
+    group.symbolNotes = bySymbol.get(code) || []
   }
   return [...map.values()]
 })
@@ -176,7 +197,7 @@ const withUnit = (fact, value) => {
 }
 
 /** 低置信度且未经确认 = 模型推断，不是用户说过的话 */
-const isInferred = (item) => !item.confirmed && Number(item.confidence ?? 1) < 0.6
+const isInferred = (item) => !item.confirmed && Number(item.confidence ?? 1) < 0.7
 const isSystemObserved = (fact) => fact.provenance === 'system'
 
 const personaIds = computed(() => new Set(persona.value.map((f) => f.id)))
@@ -189,7 +210,6 @@ const preferenceFacts = computed(() => chatFacts.value.filter((f) => ['preferenc
 const holdingFacts = computed(() => chatFacts.value.filter((f) => f.factType === 'holding'))
 const chatDecisionFacts = computed(() => chatFacts.value.filter((f) => f.factType === 'decision'))
 const chatObservationFacts = computed(() => chatFacts.value.filter((f) => (f.factType || 'observation') === 'observation'))
-const showObservations = ref(false)
 
 const visibleEpisodes = computed(() => (showAllEpisodes.value ? episodes.value : episodes.value.slice(0, 3)))
 
@@ -209,15 +229,18 @@ const load = async () => {
   loading.value = true
   error.value = ''
   try {
-    const [overviewRes, personaRes, factsRes, lessonsRes, episodesRes] = await Promise.all([
+    const [overviewRes, personaRes, factsRes, lessonsRes, episodesRes, strategiesRes] = await Promise.all([
       getMemoryOverview(), listMemoryPersona(), listMemoryFacts({ limit: 50 }),
-      listMemoryLessons(), listMemoryEpisodes(),
+      listMemoryLessons(), listMemoryEpisodes(), listStrategies().catch(() => null),
     ])
     overview.value = overviewRes.data || null
     persona.value = Array.isArray(personaRes.data) ? personaRes.data : []
     facts.value = Array.isArray(factsRes.data) ? factsRes.data : []
     lessons.value = Array.isArray(lessonsRes.data) ? lessonsRes.data : []
     episodes.value = Array.isArray(episodesRes.data) ? episodesRes.data : []
+    // 策略 id → 标的映射（标的共享层小节用；拉不到就少这个小节，fail-open）
+    const rows = Array.isArray(strategiesRes?.data) ? strategiesRes.data : []
+    strategySymbols.value = Object.fromEntries(rows.map((s) => [String(s.id), s.symbol]))
   } catch (e) {
     error.value = errorMessage(e, '记忆加载失败，请检查网络后重试')
     overview.value = null
@@ -285,7 +308,118 @@ const changeLessonStatus = async (lesson, action) => {
 }
 
 const goAssistant = () => router.push('/assistant')
+
+// ---------- 修订与反问（方案一 2026-10-16） ----------
+// 修订：编辑面板保存 → 后端落一条取代旧行的新版本（历史保留），回来整页刷新。
+const editOpen = ref(false)
+const editingLesson = ref(null)
+const openLessonEdit = (lesson) => {
+  editingLesson.value = lesson
+  editOpen.value = true
+}
+const onLessonSaved = async () => {
+  status.value = `已修订「${editingLesson.value?.symptom || '经验'}」，旧版本保留在历史里`
+  await load()
+}
+
+// 反问：带着这条经验开聚焦对话，让 agent 摆证据自证或认错；agent 只答不改。
+const challengeOpen = ref(false)
+const challengeLesson = ref(null)
+const CHALLENGE_PRESETS = [
+  '这条经验的依据是什么？',
+  '最近的战绩还支持这条做法吗？',
+  '它在什么情况下会失效？',
+]
+const openLessonChallenge = (lesson) => {
+  challengeLesson.value = lesson
+  challengeOpen.value = true
+}
+
+// ---- 技能（④步）：人审核过的经验视角，启用后作为委员会的软参考 ----
+const skills = ref([])
+const skillsLoaded = ref(false)
+const skillDraft = ref({ name: '', ruleText: '' })
+const skillMsg = ref('')
+// 启用 = 内容开始进决策上下文：与"忘记这条"同一条两步确认纪律（焦点交确认键 +
+// 双击不算确认）。停用不设确认——收窄影响面的事不需要门槛。
+const pendingEnableId = ref(null)
+const setSkillConfirmButton = (el) => {
+  if (el) confirmButton.value = el
+}
+const askEnable = async (skill) => {
+  pendingDeleteId.value = null      // 两个确认面板互斥
+  pendingEnableId.value = skill.id
+  await nextTick()
+  confirmButton.value?.focus()
+}
+const cancelEnable = () => {
+  pendingEnableId.value = null
+}
+const confirmEnable = (skill, event) => {
+  if (event && event.detail > 1) return   // 双击不算确认
+  doToggleSkill(skill, 'active')
+}
+const doToggleSkill = async (skill, next) => {
+  pendingEnableId.value = null
+  try {
+    const res = await setSkillStatus(skill.id, next)
+    const idx = skills.value.findIndex((s) => s.id === skill.id)
+    if (idx >= 0) skills.value[idx] = res.data
+    skillMsg.value = next === 'active' ? '已启用：下一次委员会会议起作为软参考' : '已停用'
+  } catch (e) {
+    skillMsg.value = e?.response?.data?.message || '操作失败，请稍后再试'
+  }
+}
+const toggleSkill = (skill) => {
+  const next = skill.status === 'active' ? 'disabled' : 'active'
+  if (next === 'active') {
+    askEnable(skill)
+    return
+  }
+  doToggleSkill(skill, next)
+}
+// 删除（仅草稿）：物理删除不可恢复，走同一条两步确认纪律
+const pendingDeleteId = ref(null)
+const askDeleteSkill = async (skill) => {
+  pendingEnableId.value = null      // 两个确认面板互斥
+  pendingDeleteId.value = skill.id
+  await nextTick()
+  confirmButton.value?.focus()
+}
+const cancelDeleteSkill = () => {
+  pendingDeleteId.value = null
+}
+const confirmDeleteSkill = (skill, event) => {
+  if (event && event.detail > 1) return   // 双击不算确认
+  pendingDeleteId.value = null
+  deleteSkill(skill.id).then(() => {
+    skills.value = skills.value.filter((s) => s.id !== skill.id)
+    skillMsg.value = '草稿已删除'
+  }).catch((e) => {
+    skillMsg.value = e?.response?.data?.message || '删除失败，请稍后再试'
+  })
+}
+const loadSkills = async () => {
+  try { const res = await listSkills(); skills.value = Array.isArray(res.data) ? res.data : [] } catch { skills.value = [] }
+  skillsLoaded.value = true
+}
+const addSkill = async () => {
+  if (!skillDraft.value.name.trim() || !skillDraft.value.ruleText.trim()) {
+    skillMsg.value = '名称和准则都要填'
+    return
+  }
+  try {
+    const res = await createSkill({ ...skillDraft.value, scenes: ['committee'] })
+    skills.value.unshift(res.data)
+    skillDraft.value = { name: '', ruleText: '' }
+    skillMsg.value = '已创建（草稿）：启用后才会进委员会'
+  } catch (e) {
+    skillMsg.value = e?.response?.data?.message || '创建失败'
+  }
+}
+
 onMounted(load)
+onMounted(loadSkills)
 </script>
 
 <template>
@@ -332,15 +466,107 @@ onMounted(load)
       </section>
 
       <!-- ==================== 分区一：助手与我（对话域） ==================== -->
+      <!-- 技能（④步）：人审核过的经验视角，委员会软参考 -->
+      <BlockCard
+        title="技能"
+        hint="你确认过的经验视角（含情绪类不可量化判断）。启用后作为委员会开会的软参考——影响论证角度，不是硬规则。"
+        collapsible
+        storage-key="mem-skills"
+        body-class="p-4 pt-3"
+      >
+        <div class="mb-3 grid gap-2 rounded-lg border border-border bg-surface-2 p-3">
+          <input
+            v-model.trim="skillDraft.name"
+            placeholder="技能名（如：情绪冰点不接飞刀）"
+            class="h-[32px] rounded-lg border border-border bg-surface px-2.5 text-[13px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none"
+          >
+          <textarea
+            v-model.trim="skillDraft.ruleText"
+            rows="2"
+            placeholder="准则：当 X 时倾向于 Y，因为 Z（例：板块情绪冰点、个股无独立利好时，不接下落中的飞刀）"
+            class="rounded-lg border border-border bg-surface px-2.5 py-1.5 text-[13px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none"
+          ></textarea>
+          <p class="text-[11.5px] leading-relaxed text-ink-3">
+            写判断视角，不写交易指令；能量化成条件的（如"跌破 MA10 卖出"）请放进策略规则——那里是硬执行、可回测的。
+          </p>
+          <div class="flex items-center justify-between gap-2">
+            <p v-if="skillMsg" class="text-[12px] text-accent" role="status">{{ skillMsg }}</p>
+            <span v-else class="text-[11.5px] text-ink-3">新建为草稿，启用后生效</span>
+            <Button size="sm" variant="primary" @click="addSkill">添加</Button>
+          </div>
+        </div>
+        <p v-if="skillsLoaded && !skills.length" class="py-3 text-center text-[12.5px] text-ink-3">
+          还没有技能。把你的盘感写成一条准则试试。
+        </p>
+        <ul v-else class="flex flex-col gap-2">
+          <li
+            v-for="skill in skills"
+            :key="skill.id"
+            class="flex items-start gap-3 rounded-lg border border-border px-3 py-2.5"
+          >
+            <div class="min-w-0 flex-1">
+              <p class="flex flex-wrap items-center gap-2 text-[13.5px] font-medium text-ink">
+                {{ skill.name }}
+                <span
+                  class="rounded-full px-1.5 text-[11px]"
+                  :class="skill.status === 'active' ? 'bg-accent-soft text-accent' : skill.status === 'draft' ? 'bg-surface-2 text-ink-3' : 'bg-surface-2 text-ink-3'"
+                >{{ skill.status === 'active' ? '已启用' : skill.status === 'draft' ? '草稿' : '已停用' }}</span>
+                <span class="num text-[11px] text-ink-3">v{{ skill.version }}</span>
+              </p>
+              <p class="mt-1 text-[12.5px] leading-relaxed text-ink-2">{{ skill.ruleText }}</p>
+              <!-- 启用两步确认：内容从此进决策上下文，把影响说清 + 软性相关性自查 -->
+              <div v-if="pendingEnableId === skill.id" class="mt-2 flex flex-col gap-1.5 rounded-lg border border-border bg-surface-2 p-2.5">
+                <p class="text-[12px] leading-relaxed text-ink-2">
+                  启用后，这条内容会随证据包注入你匹配范围内的开会决策（委员会 8 个角色每次开会都会读到），
+                  用来校准论证角度——它不是硬规则，只影响你自己的账户，随时可停用。
+                </p>
+                <p class="text-[12px] leading-relaxed text-ink-3">
+                  自查一眼：它与你的交易判断相关吗？是"当 X 时倾向于 Y"的视角、而不是一句指令或口号吗？
+                </p>
+                <div class="flex items-center gap-2">
+                  <Button :ref="setSkillConfirmButton" size="sm" variant="primary" @click="confirmEnable(skill, $event)">确认启用</Button>
+                  <Button size="sm" variant="ghost" @click="cancelEnable">取消</Button>
+                </div>
+              </div>
+              <!-- 删除确认（仅草稿）：物理删除不可恢复，把边界说清 -->
+              <div v-if="pendingDeleteId === skill.id" class="mt-2 flex flex-wrap items-center gap-2">
+                <span class="text-[12px] text-ink-2">删除后不可恢复（草稿没进过任何决策）。被修订过的草稿请先删最新版本。</span>
+                <Button :ref="setSkillConfirmButton" size="sm" variant="danger" @click="confirmDeleteSkill(skill, $event)">确认删除</Button>
+                <Button size="sm" variant="ghost" @click="cancelDeleteSkill">取消</Button>
+              </div>
+            </div>
+            <div
+              v-if="pendingEnableId !== skill.id && pendingDeleteId !== skill.id"
+              class="flex shrink-0 items-center gap-1.5"
+            >
+              <Button
+                size="sm"
+                :variant="skill.status === 'active' ? 'secondary' : 'primary'"
+                @click="toggleSkill(skill)"
+              >
+                {{ skill.status === 'active' ? '停用' : '启用' }}
+              </Button>
+              <Button v-if="skill.status === 'draft'" size="sm" variant="ghost" @click="askDeleteSkill(skill)">删除</Button>
+            </div>
+          </li>
+        </ul>
+      </BlockCard>
+
       <section class="mb-2 mt-6 flex items-center gap-2">
         <h2 class="text-[16px] font-semibold text-ink">助手与我</h2>
         <span class="text-[12px] text-ink-3">你和聊天助手的对话沉淀，只影响对话</span>
       </section>
 
       <!-- 长期画像 -->
-      <section v-if="persona.length" class="mb-5 rounded-xl border border-border bg-surface p-5">
-        <h3 class="text-[15px] font-semibold text-ink">长期画像</h3>
-        <p class="mb-3 text-[12px] leading-relaxed text-ink-3">这几条是每次对话都会优先参考的稳定信息，其余的记在下面。</p>
+      <BlockCard
+        v-if="persona.length"
+        class="mb-4"
+        title="长期画像"
+        hint="这几条是每次对话都会优先参考的稳定信息，其余的记在下面。"
+        collapsible
+        storage-key="mem-persona"
+        body-class="p-5 pt-4"
+      >
         <ul>
           <li v-for="fact in persona" :key="`persona-${fact.id}`" class="border-t border-border py-2.5 first:border-t-0 first:pt-0">
             <p class="text-[13.5px] leading-relaxed text-ink">
@@ -351,16 +577,23 @@ onMounted(load)
             <span v-if="factNotes(fact)" class="num mt-0.5 block text-[12px] text-ink-3">{{ factNotes(fact) }}</span>
           </li>
         </ul>
-      </section>
+      </BlockCard>
 
-      <!-- 对话域三区：偏好 / 持仓 / 结论 -->
-      <section v-for="sec in [
+      <!-- 对话域三区：偏好 / 持仓 / 结论（同一张 fact 行模板） -->
+      <template v-for="sec in [
           { key: 'preference', title: '我的偏好', hint: '你告诉过助手的习惯、约束和目标。助手回答时会参考它们。', list: preferenceFacts },
           { key: 'holding', title: '持仓与关注', hint: '你提到持有的标的和关注的理由。', list: holdingFacts },
           { key: 'decision', title: '结论', hint: '对话里产生的一句话结论（助手自动记录）。', list: chatDecisionFacts },
-        ]" v-show="sec.list.length" :key="sec.key" class="mb-5 rounded-xl border border-border bg-surface p-5">
-        <h3 class="text-[15px] font-semibold text-ink">{{ sec.title }}</h3>
-        <p class="mb-3 text-[12px] leading-relaxed text-ink-3">{{ sec.hint }}</p>
+        ]" :key="sec.key">
+      <BlockCard
+        v-if="sec.list.length"
+        class="mb-4"
+        :title="sec.title"
+        :hint="sec.hint"
+        collapsible
+        :storage-key="`mem-${sec.key}`"
+        body-class="p-5 pt-4"
+      >
         <ul>
           <li v-for="fact in sec.list" :key="fact.id" class="border-t border-border py-2.5 first:border-t-0 first:pt-0">
             <div class="flex items-start justify-between gap-3">
@@ -398,20 +631,28 @@ onMounted(load)
               <ul v-else class="space-y-2">
                 <li v-for="src in sourcesItems" :key="src.id" class="text-[12.5px] leading-relaxed text-ink-2">
                   <span class="num mr-1.5 text-ink-3">{{ timeOf(src) }}</span>
-                  <strong class="text-ink">{{ speakerOf(src) }}</strong>：{{ src.content }}
+                  <strong class="text-ink">{{ speakerOf(src) }}</strong>
+                  <div class="md-body text-[12.5px] leading-relaxed text-ink-2" v-html="renderMarkdown(src.content)"></div>
                 </li>
               </ul>
             </div>
           </li>
         </ul>
-      </section>
+      </BlockCard>
+      </template>
 
       <!-- 对话域的经验 -->
-      <section class="mb-5 rounded-xl border border-border bg-surface p-5">
-        <h3 class="text-[15px] font-semibold text-ink">经验</h3>
-        <p class="mb-3 text-[12px] leading-relaxed text-ink-3">
-          助手在解决问题时总结的做法，只作参考：确认后助手会更信任它，停用后不再使用。
-        </p>
+      <BlockCard
+        class="mb-4"
+        title="经验"
+        hint="助手在解决问题时总结的做法，只作参考：确认后助手会更信任它，停用后不再使用。"
+        collapsible
+        storage-key="mem-lessons"
+        body-class="p-5 pt-4"
+      >
+        <template v-if="chatLessons.length" #actions>
+          <span class="num text-[12px] text-ink-3">{{ chatLessons.length }} 条</span>
+        </template>
 
         <div v-if="chatLessons.length === 0" class="flex flex-col items-start gap-1.5">
           <p class="text-[14px] font-semibold text-ink">还没有总结出经验</p>
@@ -422,6 +663,8 @@ onMounted(load)
           <li v-for="lesson in chatLessons" :key="lesson.id" class="border-t border-border py-3 first:border-t-0 first:pt-0">
             <div class="mb-1.5 flex flex-wrap items-center gap-2">
               <Badge :tone="lesson.status === 'active' ? 'down' : 'neutral'">{{ lessonStatusLabel(lesson) }}</Badge>
+              <Badge v-if="lesson.superseded" tone="flat">已修订</Badge>
+              <span v-if="lesson.status === 'pending' && lesson.provenance === 'agent' && lesson.supersedesId" class="text-[12px] text-warn">agent 修订，待确认</span>
               <span v-if="lesson.occurrences > 1" class="num text-[12px] text-ink-3">出现过 {{ lesson.occurrences }} 次</span>
               <span v-if="lesson.promotionSuggested" class="text-[12px] text-warn">可考虑固化成固定流程</span>
             </div>
@@ -453,6 +696,18 @@ onMounted(load)
                 @click="toggleLessonDetail(lesson); hasEvidence(lesson) && toggleSources(`lesson-${lesson.id}`, lesson.evidenceEventIds)"
               >{{ lessonDetailKey === `lesson-${lesson.id}` ? '收起详情' : '详情与来源' }}</Button>
               <Button
+                v-if="lesson.status !== 'retired'"
+                size="sm"
+                variant="ghost"
+                @click="openLessonEdit(lesson)"
+              >编辑</Button>
+              <Button
+                v-if="lesson.status !== 'retired'"
+                size="sm"
+                variant="ghost"
+                @click="openLessonChallenge(lesson)"
+              >反问</Button>
+              <Button
                 v-if="lesson.status !== 'active'"
                 size="sm"
                 variant="primary"
@@ -480,22 +735,29 @@ onMounted(load)
               <ul v-else class="space-y-2">
                 <li v-for="src in sourcesItems" :key="src.id" class="text-[12.5px] leading-relaxed text-ink-2">
                   <span class="num mr-1.5 text-ink-3">{{ timeOf(src) }}</span>
-                  <strong class="text-ink">{{ speakerOf(src) }}</strong>：{{ src.content }}
+                  <strong class="text-ink">{{ speakerOf(src) }}</strong>
+                  <div class="md-body text-[12.5px] leading-relaxed text-ink-2" v-html="renderMarkdown(src.content)"></div>
                 </li>
               </ul>
             </div>
           </li>
         </ul>
-      </section>
+      </BlockCard>
 
       <!-- 对话域的助手观察（默认折叠：机器观测不占用户门面；策略域的观测在各自分区） -->
-      <section v-if="chatObservationFacts.length" class="mb-5 rounded-xl border border-border bg-surface p-5">
-        <h3 class="text-[15px] font-semibold text-ink">助手观察</h3>
-        <p class="mb-3 text-[12px] leading-relaxed text-ink-3">助手自动记录的运行事实，仅供对话参考。</p>
-        <Button size="sm" variant="ghost" :aria-expanded="showObservations" @click="showObservations = !showObservations">
-          {{ showObservations ? '收起' : `展开 ${chatObservationFacts.length} 条观察` }}
-        </Button>
-        <ul v-if="showObservations" class="mt-3">
+      <BlockCard
+        v-if="chatObservationFacts.length"
+        class="mb-4"
+        title="助手观察"
+        hint="助手自动记录的运行事实，仅供对话参考。"
+        collapsible
+        storage-key="mem-observations"
+        body-class="p-5 pt-4"
+      >
+        <template #actions>
+          <span class="num text-[12px] text-ink-3">{{ chatObservationFacts.length }} 条</span>
+        </template>
+        <ul>
           <li v-for="fact in chatObservationFacts" :key="fact.id" class="border-t border-border py-2.5 first:border-t-0 first:pt-0">
             <div class="flex items-start justify-between gap-3">
               <p class="min-w-0 text-[13.5px] leading-relaxed text-ink">
@@ -520,12 +782,20 @@ onMounted(load)
             </div>
           </li>
         </ul>
-      </section>
+      </BlockCard>
 
       <!-- 对话摘要 -->
-      <section class="mb-5 rounded-xl border border-border bg-surface p-5">
-        <h3 class="text-[15px] font-semibold text-ink">对话摘要</h3>
-        <p class="mb-3 text-[12px] leading-relaxed text-ink-3">助手每天会把当天的对话整理成一段摘要，下次对话开始时参考它。</p>
+      <BlockCard
+        class="mb-4"
+        title="对话摘要"
+        hint="助手每天会把当天的对话整理成一段摘要，下次对话开始时参考它。"
+        collapsible
+        storage-key="mem-episodes"
+        body-class="p-5 pt-4"
+      >
+        <template v-if="episodes.length" #actions>
+          <span class="num text-[12px] text-ink-3">{{ episodes.length }} 段</span>
+        </template>
 
         <div v-if="episodes.length === 0" class="flex flex-col items-start gap-1.5">
           <p class="text-[14px] font-semibold text-ink">还没有对话摘要</p>
@@ -536,7 +806,7 @@ onMounted(load)
           <ul>
             <li v-for="episode in visibleEpisodes" :key="episode.sessionKey" class="border-t border-border py-2.5 first:border-t-0 first:pt-0">
               <span class="num text-[12px] text-ink-3">{{ String(episode.sessionKey).split(':').pop() }}</span>
-              <p class="mt-1 text-[13px] leading-relaxed text-ink">{{ episode.summary }}</p>
+              <div class="md-body mt-1 text-[13px] leading-relaxed text-ink" v-html="renderMarkdown(episode.summary)"></div>
               <ul v-if="episode.keyPoints?.length" class="mt-1.5 list-disc pl-4.5 text-[12px] leading-relaxed text-ink-2">
                 <li v-for="(point, index) in episode.keyPoints" :key="index">{{ point }}</li>
               </ul>
@@ -557,7 +827,7 @@ onMounted(load)
             {{ showAllEpisodes ? '收起' : `显示全部 ${episodes.length} 段` }}
           </Button>
         </template>
-      </section>
+      </BlockCard>
 
       <div
         v-if="preferenceFacts.length + holdingFacts.length === 0 && chatDecisionFacts.length === 0 && persona.length === 0"
@@ -586,12 +856,19 @@ onMounted(load)
         </p>
       </div>
 
-      <section v-for="group in strategySections" :key="group.id" class="mb-5 rounded-xl border border-border bg-surface p-5">
-        <h3 class="text-[15px] font-semibold text-ink">策略 #{{ group.id }}</h3>
-
+      <BlockCard
+        v-for="group in strategySections"
+        :key="group.id"
+        class="mb-4"
+        :title="`策略 #${group.id}`"
+        hint="该策略独立域：运行结论、周反思教训、系统观测。只有它的委员会会读到这里的经验。"
+        collapsible
+        :storage-key="`mem-strategy-${group.id}`"
+        body-class="p-5 pt-4"
+      >
         <!-- 该策略的运行结论 -->
         <template v-if="group.decisions.length">
-          <p class="mb-2 mt-2 text-[12px] text-ink-3">运行结论（回测 / 验证 / 模拟盘里程碑）</p>
+          <p class="mb-2 text-[12px] text-ink-3">运行结论（回测 / 验证 / 模拟盘里程碑）</p>
           <ul>
             <li v-for="fact in group.decisions" :key="fact.id" class="border-t border-border py-2 first:border-t-0 first:pt-0">
               <div class="flex items-start justify-between gap-3">
@@ -611,10 +888,24 @@ onMounted(load)
                 <ul v-else class="space-y-2">
                   <li v-for="src in sourcesItems" :key="src.id" class="text-[12.5px] leading-relaxed text-ink-2">
                     <span class="num mr-1.5 text-ink-3">{{ timeOf(src) }}</span>
-                    <strong class="text-ink">{{ speakerOf(src) }}</strong>：{{ src.content }}
+                    <strong class="text-ink">{{ speakerOf(src) }}</strong>
+                  <div class="md-body text-[12.5px] leading-relaxed text-ink-2" v-html="renderMarkdown(src.content)"></div>
                   </li>
                 </ul>
               </div>
+            </li>
+          </ul>
+        </template>
+
+        <!-- 该标的的共享观点（L2 标的层）：用户对这只票说过的话，跨策略共享 -->
+        <template v-if="group.symbolNotes.length">
+          <p class="mb-2 mt-3 text-[12px] text-ink-3">
+            对 {{ group.symbol || '该标的' }} 的共享观点（你对这只票说过的话，跨策略共享；委员会决策时会以它优先于全局偏好）
+          </p>
+          <ul class="space-y-1.5">
+            <li v-for="fact in group.symbolNotes" :key="`sym-${fact.id}`" class="text-[12.5px] leading-relaxed text-ink-2">
+              {{ factLineText(fact) }}
+              <span v-if="fact.rawTimePhrase" class="text-ink-3">（你当时说的是"{{ fact.rawTimePhrase }}"）</span>
             </li>
           </ul>
         </template>
@@ -626,6 +917,8 @@ onMounted(load)
             <li v-for="lesson in group.lessons" :key="lesson.id" class="border-t border-border py-2.5 first:border-t-0 first:pt-0">
               <div class="mb-1 flex flex-wrap items-center gap-2">
                 <Badge :tone="lesson.status === 'active' ? 'down' : 'neutral'">{{ lessonStatusLabel(lesson) }}</Badge>
+                <Badge v-if="lesson.superseded" tone="flat">已修订</Badge>
+                <span v-if="lesson.status === 'pending' && lesson.provenance === 'agent' && lesson.supersedesId" class="text-[12px] text-warn">agent 修订，待确认</span>
                 <span v-if="scopeLabel(lesson)" class="num text-[12px] text-ink-3">{{ scopeLabel(lesson) }}</span>
                 <span v-if="lesson.occurrences > 1" class="num text-[12px] text-ink-3">出现过 {{ lesson.occurrences }} 次</span>
               </div>
@@ -636,6 +929,18 @@ onMounted(load)
                 <span v-if="lesson.recordedAt"> · {{ shortDate(lesson.recordedAt) }}</span>
               </p>
               <div class="mt-2 flex flex-wrap gap-2">
+                <Button
+                  v-if="lesson.status !== 'retired'"
+                  size="sm"
+                  variant="ghost"
+                  @click="openLessonEdit(lesson)"
+                >编辑</Button>
+                <Button
+                  v-if="lesson.status !== 'retired'"
+                  size="sm"
+                  variant="ghost"
+                  @click="openLessonChallenge(lesson)"
+                >反问</Button>
                 <Button
                   v-if="lesson.status !== 'active'"
                   size="sm"
@@ -670,7 +975,24 @@ onMounted(load)
             </li>
           </ul>
         </template>
-      </section>
+      </BlockCard>
     </template>
+
+    <!-- 修订面板 + 反问聚焦对话（方案一 2026-10-16） -->
+    <LessonEditSheet
+      :open="editOpen"
+      :lesson="editingLesson"
+      @close="editOpen = false"
+      @saved="onLessonSaved"
+    />
+    <ChatDrawer
+      :open="challengeOpen"
+      :focus="challengeLesson ? { type: 'memory_lesson', lessonId: challengeLesson.id } : null"
+      :presets="CHALLENGE_PRESETS"
+      header-label="正在质疑这条经验"
+      :header-title="challengeLesson?.symptom || ''"
+      placeholder="问问这条经验…"
+      @close="challengeOpen = false"
+    />
   </div>
 </template>

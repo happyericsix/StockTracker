@@ -4,7 +4,8 @@
  * 模拟盘账户 / 交易 / 决策日志 / 净值曲线 / 结算痕迹。
  * 逻辑自旧版原样移植（零漂移）：口径纪律、图表令牌同源、快照不美化。
  */
-import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, computed, nextTick, watch, onMounted, onUnmounted } from 'vue'
+import { init as initKlinecharts, dispose as disposeKlinecharts, registerOverlay } from 'klinecharts'
 import { useRouter, useRoute } from 'vue-router'
 import { ArrowLeft, AlertTriangle } from 'lucide-vue-next'
 import InfoTip from '../components/InfoTip.vue'
@@ -14,6 +15,7 @@ import Button from '../components/ui/button.vue'
 import Empty from '../components/ui/empty.vue'
 import Skeleton from '../components/ui/skeleton.vue'
 import * as echarts from 'echarts'
+import { quoteBus } from '../composables/quoteBus.js'
 import {
   listStrategies, runBacktest, getStrategyDiagnostic, startPaper, stopPaper,
   getPaperAccount, getPaperTrades, getPaperTraces, getPaperEquity,
@@ -57,7 +59,7 @@ const equityChartRef = ref(null)
 let equityChart = null
 const overviewItem = ref(null)
 
-const errorMessage = (e, fallback) => e?.response?.data?.message || fallback
+const errorMessage = (e, fallback) => e?.friendlyMessage || e?.response?.data?.message || fallback
 
 // 图表颜色与 CSS 令牌同源（读不到交给 ECharts 默认色板兜底）
 const colorToken = (name) => {
@@ -250,6 +252,13 @@ const loadPaper = async () => {
   await loadOpsChart()
 }
 
+/** 冷启动（样本不足两天）：回撤/买入持有/超额在数学上需要至少两天的净值路径。
+ *  这个阶段用"次日起"和说明行替代裸 N/A——一排 N/A 看起来像坏了，实际是还没开始算。 */
+const equityColdStart = computed(() => {
+  const days = equity.value?.summary?.days
+  return days != null && days < 2
+})
+
 /** 净值曲线 + 机会成本：汇总由后端同一份算法给出，前端只显示 */
 const loadEquity = async () => {
   equityError.value = ''
@@ -263,7 +272,24 @@ const loadEquity = async () => {
   await renderEquityChart()
 }
 
-/** 只画后端给的点，并在决策来源变更日画一条竖线（两段不是同一个决策者） */
+/** 口径分界线：决策来源切换日 + 参数修订日（两侧曲线不是同一个口径，不能直接比） */
+const boundaryMarkLine = (dates, mutedColor) => {
+  const lines = []
+  const since = strategy.value?.decisionModeSince ? String(strategy.value.decisionModeSince) : ''
+  if (since && dates.includes(since)) {
+    lines.push({ xAxis: since, label: { formatter: '切换决策来源', color: mutedColor } })
+  }
+  const configAt = strategy.value?.configUpdatedAt ? String(strategy.value.configUpdatedAt).slice(0, 10) : ''
+  // 与决策来源线同日时只画一条（两条完全重合的虚线只会让标签叠成墨团）
+  if (configAt && configAt !== since && dates.includes(configAt)) {
+    lines.push({ xAxis: configAt, label: { formatter: '参数修订', color: mutedColor } })
+  }
+  return lines.length
+    ? { symbol: 'none', lineStyle: { color: mutedColor, type: 'dashed' }, data: lines }
+    : undefined
+}
+
+/** 只画后端给的点，并在口径变更日画竖线（决策来源切换 / 参数修订） */
 const renderEquityChart = async () => {
   await nextTick()
   const el = equityChartRef.value
@@ -276,15 +302,7 @@ const renderEquityChart = async () => {
   const accentSoftColor = colorToken('--accent-soft')
   const mutedColor = colorToken('--ink-3')
   const dates = points.map((point) => String(point.tradeDate || ''))
-  const since = strategy.value?.decisionModeSince ? String(strategy.value.decisionModeSince) : ''
-  const markLine = since && dates.includes(since)
-    ? {
-        symbol: 'none',
-        lineStyle: { color: mutedColor, type: 'dashed' },
-        label: { formatter: '切换决策来源', color: mutedColor },
-        data: [{ xAxis: since }],
-      }
-    : undefined
+  const markLine = boundaryMarkLine(dates, mutedColor)
 
   equityChart.setOption({
     tooltip: { trigger: 'axis', confine: true },
@@ -306,13 +324,31 @@ const renderEquityChart = async () => {
   }, { notMerge: true })
 }
 
-// ---- 操作 K 线：把每笔成交钉到标的行情上（在哪买的、在哪卖的，一眼可见）----
+// ---- 操作 K 线（klinecharts v10，2026-10-19 与主图统一引擎）----
+// 把每笔成交钉到标的行情上（在哪买的、在哪卖的，一眼可见）。
+// 成交标记 = 自定义 tradeMarker overlay（▲买/▼卖 + 时刻小字），锚点是
+// (当日时间戳, 外移价位)——价位在页面侧算好，同日同向多笔逐级外移与旧实现同款；
+// 悬停/点按标记在图下信息条看成交明细（替代旧 ECharts item tooltip）。
+// 口径分界线复用 verticalStraightLine；范围按钮（近N根）= 柱宽+滚回最新。
 const opsChartRef = ref(null)
 let opsChart = null
+// subscribeBar 注册的"当前柱"推送口：盘中 3 秒行情改写当日那根日线
+let opsBarPush = null
 const opsError = ref('')
 const opsBars = ref(120)
 const opsHiddenTrades = ref(0)
+/** 悬停/点按标记时的图内浮动卡（e.x/e.y 是相对图表容器的坐标，klinecharts 约定） */
+const opsHover = ref(null)
+const opsHoverStyle = computed(() => {
+  if (!opsHover.value) return {}
+  const width = opsChartRef.value?.clientWidth || 800
+  // 靠边翻转：不超出容器，也不压顶
+  const x = Math.min(Math.max(opsHover.value.x, 100), width - 100)
+  const y = Math.max(opsHover.value.y, 104)
+  return { left: `${x}px`, top: `${y}px`, transform: 'translate(-50%, calc(-100% - 12px))' }
+})
 let opsRawBars = []
+let opsDecorated = false   // 指标/标记只在首批数据回调后挂一次（无数据时挂 MA 会静默失败，实测）
 
 const OPS_RANGES = [
   { label: '近60根', value: 60 },
@@ -320,21 +356,247 @@ const OPS_RANGES = [
   { label: '近250根', value: 250 },
 ]
 
-const calcMA = (data, n) => {
-  const result = []
-  for (let i = 0; i < data.length; i++) {
-    if (i < n - 1) result.push('-')
-    else {
-      let sum = 0
-      for (let j = i - n + 1; j <= i; j++) sum += +data[j].close
-      result.push(+(sum / n).toFixed(2))
-    }
-  }
-  return result
+const toOpsTimestamp = (dateStr) => Date.parse(`${String(dateStr).replace(' ', 'T')}+08:00`)
+const toOpsBar = (r) => ({
+  timestamp: toOpsTimestamp(r.date),
+  open: +r.open, high: +r.high, low: +r.low, close: +r.close, volume: +r.volume || 0,
+})
+
+// 成交标记 overlay：三角形围绕锚点坐标画（买 ▲ 指向蜡烛、卖 ▼ 背向），
+// 颜色/方向/时刻标签都走 extendData，样式形状不猜——canvas 里画什么由这里说了算
+let tradeMarkerRegistered = false
+const registerTradeMarkerOverlay = () => {
+  if (tradeMarkerRegistered) return
+  tradeMarkerRegistered = true
+  registerOverlay({
+    name: 'tradeMarker',
+    totalStep: 1,
+    needDefaultPointFigure: false,
+    needDefaultXAxisFigure: false,
+    needDefaultYAxisFigure: false,
+    createPointFigures: ({ overlay, coordinates }) => {
+      const { side, time, color } = overlay.extendData || {}
+      if (!coordinates[0]) return []
+      const { x, y } = coordinates[0]
+      const s = 6
+      // 命中策略（2026-10-19 修）：三角形本身只有 ~12px，悬停/点按很难命中。
+      // 改为透明大圆（r=14）负责事件命中，三角形与时间文字 ignoreEvent 只做显示。
+      const figures = [
+        { type: 'circle', attrs: { x, y, r: 14 },
+          styles: { color: 'rgba(0,0,0,0)', style: 'fill' } },
+        { type: 'polygon',
+          attrs: { coordinates: side === 'buy'
+            ? [{ x, y: y - s }, { x: x - s, y: y + s * 0.7 }, { x: x + s, y: y + s * 0.7 }]
+            : [{ x, y: y + s }, { x: x - s, y: y - s * 0.7 }, { x: x + s, y: y - s * 0.7 }] },
+          styles: { color, style: 'fill' }, ignoreEvent: true },
+      ]
+      if (time) {
+        figures.push({
+          type: 'text',
+          attrs: { x, y: side === 'buy' ? y + s * 0.7 + 12 : y - s * 0.7 - 6, text: time },
+          styles: { color, size: 10, align: 'center' }, ignoreEvent: true,
+        })
+      }
+      return figures
+    },
+  })
 }
+
+const opsStylesOf = () => {
+  const up = colorToken('--up') || '#d92c2c'
+  const down = colorToken('--down') || '#0e9668'
+  const border = colorToken('--border') || '#e3e6ec'
+  const ink3 = colorToken('--ink-3') || '#8b92a5'
+  return {
+    candle: {
+      bar: {
+        upColor: up, downColor: down, noChangeColor: ink3,
+        upBorderColor: up, downBorderColor: down, noChangeBorderColor: ink3,
+        upWickColor: up, downWickColor: down, noChangeWickColor: ink3,
+      },
+      priceMark: {
+        high: { color: ink3 }, low: { color: ink3 },
+        last: { upColor: up, downColor: down, noChangeColor: ink3, text: { color: ink3 } },
+      },
+    },
+    grid: { horizontal: { show: true, style: 'dashed', color: border }, vertical: { show: false } },
+    xAxis: { tickText: { color: ink3 }, axisLine: { color: border } },
+    yAxis: { tickText: { color: ink3 }, axisLine: { color: border } },
+  }
+}
+
+const handleOpsResize = () => opsChart && opsChart.resize()
+
+/** "近N根"= 柱宽 + 滚回最新（数据全量在图上，纯缩放零重取；滚轮拖拽仍自由） */
+const applyOpsRange = (n) => {
+  if (!opsChart) return
+  const width = opsChart.getSize()?.width || opsChartRef.value?.clientWidth || 800
+  opsChart.setBarSpace(Math.max(1.2, (width - 64) / Math.max(24, n)))
+  opsChart.scrollToRealTime()
+}
+
+const changeOpsRange = async (n) => {
+  if (opsBars.value === n) return
+  opsBars.value = n
+  applyOpsRange(n)
+}
+
+/** 成交标记 + 口径分界线（锚定 timestamp，随缩放平移自动跟随） */
+const rebuildOpsMarkers = () => {
+  if (!opsChart) return
+  opsHover.value = null
+  opsChart.removeOverlay({ groupId: 'ops-trade' })
+  opsChart.removeOverlay({ groupId: 'ops-boundary' })
+
+  const up = colorToken('--up') || '#d92c2c'
+  const down = colorToken('--down') || '#0e9668'
+  const timeOf = (t) => {
+    const m = String(t.createdAt || '').match(/T(\d{2}:\d{2})/)
+    return m ? m[1] : ''
+  }
+  const showLabels = trades.value.length <= 40   // 交易太密时标签只会糊成一片，不硬塞
+  const barByDate = new Map(opsRawBars.map((d) => [d.date, d]))
+  const stackCount = new Map()
+  const markers = []
+  let hidden = 0
+  for (const t of trades.value) {
+    const side = String(t.side ?? '').toLowerCase()
+    if (side !== 'buy' && side !== 'sell') continue
+    const day = String(t.tradeDate ?? '').slice(0, 10)
+    const bar = barByDate.get(day)
+    if (!bar) { hidden++; continue }
+    // 买 ▲ 钉在当日最低价下方、卖 ▼ 钉在最高价上方（不压蜡烛本体），同日同向逐级外移
+    const high = +bar.high
+    const low = +bar.low
+    const span = Math.max(high - low, high * 0.004)
+    const k = stackCount.get(day + side) || 0
+    stackCount.set(day + side, k + 1)
+    const y = side === 'buy'
+      ? low - span * (0.35 + k * 0.4)
+      : high + span * (0.35 + k * 0.4)
+    markers.push({
+      name: 'tradeMarker',
+      groupId: 'ops-trade',
+      // 不 lock：lock=true 时 klinecharts 直接不派发 overlay 事件（源码级行为）。
+      // 分界线可以 lock，成交标记必须可交互
+      points: [{ timestamp: toOpsTimestamp(day), value: y }],
+      extendData: { side, time: showLabels ? timeOf(t) : '', color: side === 'buy' ? up : down, trade: t },
+      onMouseEnter: (e) => { opsHover.value = { trade: t, x: e.x, y: e.y } },
+      onMouseLeave: () => { opsHover.value = null },
+      onClick: (e) => { opsHover.value = { trade: t, x: e.x, y: e.y } },
+    })
+  }
+  opsHiddenTrades.value = hidden
+  if (markers.length) opsChart.createOverlay(markers)
+
+  // 口径分界线（与净值曲线同一语义：决策来源切换 / 参数修订；同日只画一条）
+  const daySet = new Set(opsRawBars.map((d) => d.date))
+  const since = strategy.value?.decisionModeSince ? String(strategy.value.decisionModeSince) : ''
+  const configAt = strategy.value?.configUpdatedAt ? String(strategy.value.configUpdatedAt).slice(0, 10) : ''
+  const boundaries = []
+  if (since && daySet.has(since)) boundaries.push(since)
+  if (configAt && configAt !== since && daySet.has(configAt)) boundaries.push(configAt)
+  if (boundaries.length) {
+    opsChart.createOverlay(boundaries.map((date) => ({
+      name: 'verticalStraightLine',
+      groupId: 'ops-boundary',
+      lock: true,
+      points: [{ timestamp: toOpsTimestamp(date) }],
+      styles: { line: { color: colorToken('--ink-3') || '#8b92a5', style: 'dashed', size: 1 } },
+    })))
+  }
+}
+
+// ---------- 实时补丁（2026-10-21）：操作K线的当日蜡烛跟随 3 秒行情 ----------
+// 与个股K线页同一快车道：setFocus(strategy.symbol) 让后端 3 秒推这只票，
+// 推送只改写"当日"那根日线的 close/high/low（成交标记不动——它们钉在成交
+// 那一刻；最后一根还不是今天时也不改，不能用今天的价改写历史柱）。
+const opsInMarketHours = () => {
+  const d = new Date()
+  const day = d.getDay()
+  if (day === 0 || day === 6) return false
+  const m = d.getHours() * 60 + d.getMinutes()
+  return (m >= 555 && m <= 690) || (m >= 780 && m <= 905)   // 09:15-11:30 / 13:00-15:05
+}
+
+/** SSE 批次里找本策略标的的条目（键可能带市场前缀，做精确/后缀两级匹配） */
+const opsLiveQuote = () => {
+  const sym = strategy.value?.symbol
+  if (!sym) return undefined
+  const key = String(sym).toUpperCase()
+  const direct = quoteBus.quotes[key]
+  if (direct) return direct
+  const digits = key.slice(-6)
+  for (const [k, v] of Object.entries(quoteBus.quotes)) {
+    if (String(k).toUpperCase().endsWith(digits)) return v
+  }
+  return undefined
+}
+
+const patchOpsLivePrice = (price) => {
+  if (!Number.isFinite(price) || !opsRawBars.length || !opsChart) return
+  const last = opsRawBars[opsRawBars.length - 1]
+  if (String(last.date).slice(0, 10) !== new Date().toLocaleDateString('sv-SE')) return
+  last.close = price
+  last.high = Math.max(+last.high || price, price)
+  last.low = Math.min(+last.low || price, price)
+  opsBarPush?.(toOpsBar(last))
+}
+
+watch(() => opsLiveQuote()?.at, () => {
+  if (opsInMarketHours()) patchOpsLivePrice(opsLiveQuote()?.price)
+})
+
+const ensureOpsChart = () => {
+  if (opsChart || !opsChartRef.value) return opsChart
+  registerTradeMarkerOverlay()
+  opsChart = initKlinecharts(opsChartRef.value, {
+    locale: 'zh-CN',
+    timezone: 'Asia/Shanghai',
+    styles: opsStylesOf(),
+  })
+  opsChart.setDataLoader({
+    // 全量日线一次喂入（loadOpsChart 已先行拉好）；左右边界请求回空 + 无更多
+    getBars: async ({ type, callback }) => {
+      if (type === 'backward' || type === 'forward') return callback([], false)
+      callback(opsRawBars.map(toOpsBar), false)
+      if (!opsDecorated) {
+        opsDecorated = true
+        opsChart.createIndicator({ name: 'MA', calcParams: [5, 20, 60], paneId: 'candle_pane' })
+        rebuildOpsMarkers()
+        // 库的首轮自适应布局在数据入图后才跑，立刻 setBarSpace 会被它顶掉
+        // （冒烟实测：首屏变成全量 500+ 根）。等两帧让布局稳定再设窗口。
+        requestAnimationFrame(() => requestAnimationFrame(() => applyOpsRange(opsBars.value)))
+      }
+    },
+    // 盘中 3 秒行情的"当前柱"推送口（2026-10-21 接入，见 patchOpsLivePrice）
+    subscribeBar: ({ callback: push }) => { opsBarPush = push },
+    unsubscribeBar: () => { opsBarPush = null },
+  })
+  window.addEventListener('resize', handleOpsResize)
+  return opsChart
+}
+
+const opsDataReady = ref(false)
+
+/** 图表挂载时机 = 数据就绪 && 容器在 DOM。首次加载时页面骨架（loading）在
+ *  loadDetail 收尾才卸下，容器渲染晚于 loadOpsChart 拿到数据——在 loadOpsChart
+ *  里 nextTick 后直接 init 会撞上 ref 还是 null、图表静默消失（2026-10-19 冒烟
+ *  实测）。双向 watch 覆盖"数据先到"与"容器先挂"两种先后。 */
+const mountOpsChart = () => {
+  if (!strategy.value?.symbol || !ensureOpsChart()) return
+  opsChart.setSymbol({ ticker: strategy.value.symbol, pricePrecision: 2, volumePrecision: 0 })
+  opsChart.setPeriod({ type: 'day', span: 1 })
+  // 挂载时机由 watch 驱动，可能撞上容器 0 尺寸的时刻（canvas 停在 300x150 默认值、
+  // 库不会自动补 resize，冒烟实测）。等布局稳定强制 resize 兜底。
+  requestAnimationFrame(() => requestAnimationFrame(() => opsChart?.resize()))
+}
+watch(opsChartRef, (el) => { if (el && opsDataReady.value) mountOpsChart() })
+watch(opsDataReady, (v) => { if (v && opsChartRef.value) mountOpsChart() })
 
 const loadOpsChart = async () => {
   opsError.value = ''
+  opsDataReady.value = false
   if (!strategy.value?.symbol) return
   try {
     // 与 KLineChart 同源同一接口：page=0 size=1000 拿全量日线，窗口在渲染时切
@@ -344,163 +606,10 @@ const loadOpsChart = async () => {
       opsError.value = 'K 线数据为空，暂时画不了操作图'
       return
     }
-    await renderOpsChart()
+    opsDataReady.value = true   // 挂载交给 watch：容器可能还在骨架里没渲染
   } catch (e) {
     opsError.value = errorMessage(e, 'K 线数据加载失败，暂时画不了操作图')
   }
-}
-
-const changeOpsRange = async (n) => {
-  if (opsBars.value === n) return
-  opsBars.value = n
-  await renderOpsChart()
-}
-
-const handleOpsResize = () => opsChart && opsChart.resize()
-
-const renderOpsChart = async () => {
-  await nextTick()
-  const el = opsChartRef.value
-  if (!el || !Array.isArray(opsRawBars) || opsRawBars.length === 0) return
-  const data = opsRawBars.slice(-opsBars.value)
-  const dates = data.map((d) => d.date)
-
-  const up = colorToken('--up') || '#d92c2c'
-  const down = colorToken('--down') || '#0e9668'
-  const ink2 = colorToken('--ink-2') || '#575e6e'
-  const ink3 = colorToken('--ink-3') || '#8b92a5'
-
-  const series = [
-    {
-      name: 'K线', type: 'candlestick', data: data.map((d) => [+d.open, +d.close, +d.low, +d.high]),
-      tooltip: {
-        valueFormatter: (v) => (Array.isArray(v)
-          ? `开 ${(+v[0]).toFixed(3)} / 收 ${(+v[1]).toFixed(3)} / 低 ${(+v[2]).toFixed(3)} / 高 ${(+v[3]).toFixed(3)}`
-          : (+v).toFixed(3)),
-      },
-      itemStyle: { color: up, color0: down, borderColor: up, borderColor0: down },
-    },
-  ]
-  const legend = ['K线']
-  const pushMA = (name, arr, color) => {
-    series.push({
-      name, type: 'line', data: arr, smooth: true, showSymbol: false,
-      tooltip: { valueFormatter: (v) => (+v).toFixed(3) },
-      lineStyle: { width: 1, color }, itemStyle: { color },
-    })
-    legend.push(name)
-  }
-  if (data.length >= 5) pushMA('MA5', calcMA(data, 5), colorToken('--chart-ma5') || '#d97706')
-  if (data.length >= 20) pushMA('MA20', calcMA(data, 20), colorToken('--chart-ma20') || '#0891b2')
-  if (data.length >= 60) pushMA('MA60', calcMA(data, 60), colorToken('--chart-ma60') || '#64748b')
-
-  // 成交标记：买 ▲ 钉在当日最低价下方、卖 ▼ 钉在最高价上方（保证不压蜡烛本体）；
-  // 同日同向多笔逐级外移；同日一买一卖自然分居蜡烛两侧。窗口外的成交计数提示，不静默丢。
-  // 每个标记带成交时刻（HH:mm）标签：与下方交易记录的时间一一对应——
-  // 同一根蜡烛上多笔时（如 10:42 卖 / 10:47 买）靠它分清谁是谁。
-  const timeOf = (t) => {
-    const m = String(t.createdAt || '').match(/T(\d{2}:\d{2})/)
-    return m ? m[1] : ''
-  }
-  const showLabels = trades.value.length <= 40 // 交易太密时标签只会糊成一片，不硬塞
-  const barByDate = new Map(data.map((d) => [d.date, d]))
-  const stackCount = new Map()
-  const buyPts = []
-  const sellPts = []
-  let hidden = 0
-  for (const t of trades.value) {
-    const side = String(t.side ?? '').toLowerCase()
-    if (side !== 'buy' && side !== 'sell') continue
-    const day = String(t.tradeDate ?? '').slice(0, 10)
-    const bar = barByDate.get(day)
-    if (!bar) { hidden++; continue }
-    const high = +bar.high
-    const low = +bar.low
-    const span = Math.max(high - low, high * 0.004)
-    const k = stackCount.get(day + side) || 0
-    stackCount.set(day + side, k + 1)
-    const y = side === 'buy'
-      ? low - span * (0.35 + k * 0.4)
-      : high + span * (0.35 + k * 0.4)
-    const time = timeOf(t)
-    ;(side === 'buy' ? buyPts : sellPts).push({
-      value: [day, y],
-      trade: t,
-      label: showLabels && time
-        ? {
-            show: true,
-            formatter: time,
-            position: side === 'buy' ? 'bottom' : 'top',
-            fontSize: 10,
-            color: side === 'buy' ? up : down,
-          }
-        : { show: false },
-    })
-  }
-  opsHiddenTrades.value = hidden
-
-  const tradeTooltip = (sideLabel) => ({
-    formatter: (p) => {
-      const t = p.data?.trade || {}
-      return [
-        `<b>${sideLabel} · ${p.data.value[0]}</b>`,
-        `成交价 ${t.price ?? 'N/A'} × ${t.shares ?? 'N/A'} 股`,
-        `金额 ${formatMoney(t.amount)}`,
-        t.reason ? `信号 ${t.reason}` : '',
-        t.createdAt ? `时间 ${formatTime(t.createdAt)}` : '',
-      ].filter(Boolean).join('<br/>')
-    },
-  })
-  series.push({
-    name: '买入', type: 'scatter', data: buyPts,
-    symbol: 'triangle', symbolSize: 13, symbolRotate: 0,
-    itemStyle: { color: up }, z: 12, emphasis: { scale: 1.4 },
-    tooltip: tradeTooltip('买入'),
-  })
-  series.push({
-    name: '卖出', type: 'scatter', data: sellPts,
-    symbol: 'triangle', symbolSize: 13, symbolRotate: 180,
-    itemStyle: { color: down }, z: 12, emphasis: { scale: 1.4 },
-    tooltip: tradeTooltip('卖出'),
-  })
-  legend.push('买入', '卖出')
-
-  // 决策来源切换日画竖线（与净值曲线同一语义：两侧不是同一个决策者）
-  const since = strategy.value?.decisionModeSince ? String(strategy.value.decisionModeSince) : ''
-  if (since && dates.includes(since)) {
-    series[0].markLine = {
-      symbol: 'none',
-      lineStyle: { color: ink3, type: 'dashed' },
-      label: { formatter: '切换决策来源', color: ink3 },
-      data: [{ xAxis: since }],
-    }
-  }
-
-  if (!opsChart) {
-    opsChart = echarts.init(el)
-    window.addEventListener('resize', handleOpsResize)
-  }
-  opsChart.setOption({
-    tooltip: {
-      // item 模式：买卖标记悬停出成交明细（axis 模式下 series 级 formatter 不生效）
-      trigger: 'item', confine: true,
-      backgroundColor: colorToken('--surface') || '#ffffff',
-      borderColor: colorToken('--border') || '#e3e6ec',
-      textStyle: { color: colorToken('--ink') || '#1b1e26', fontSize: 12 },
-    },
-    legend: { data: legend, top: 0, textStyle: { fontSize: 12, color: ink2 } },
-    grid: { left: 56, right: 20, top: 34, bottom: 52 },
-    xAxis: {
-      type: 'category', data: dates, boundaryGap: true,
-      axisLabel: { fontSize: 11, color: ink3 },
-    },
-    yAxis: { scale: true, axisLabel: { fontSize: 11, color: ink3 } },
-    dataZoom: [
-      { type: 'inside' },
-      { type: 'slider', height: 18, bottom: 10 },
-    ],
-    series,
-  }, { notMerge: true })
 }
 
 const METRIC_OPTIONS = [
@@ -552,6 +661,46 @@ const submitExpectation = async () => {
 
 const decisionMode = computed(() => strategy.value?.decisionMode || 'rule')
 const decisionModeLabel = (mode) => (mode || 'rule') === 'agent' ? '多角色委员会（agent）' : '规则引擎（rule）'
+
+// ---- 对账可视化（2026-10-16）：模式命中率对比 + 不动原因分布，全部从 journal 派生 ----
+const modeStats = computed(() => {
+  const byMode = {}
+  for (const e of journal.value?.entries || []) {
+    if (e.verdict !== 'hit' && e.verdict !== 'miss') continue
+    const mode = e.decisionMode === 'agent' ? 'agent' : 'rule'
+    const s = byMode[mode] || (byMode[mode] = { mode, hits: 0, misses: 0 })
+    if (e.verdict === 'hit') s.hits += 1
+    else s.misses += 1
+  }
+  return Object.values(byMode).map((s) => ({
+    ...s,
+    total: s.hits + s.misses,
+    rate: s.total ? Math.round((s.hits / s.total) * 100) : null,
+  }))
+})
+
+const skipReasons = computed(() => {
+  const counts = {}
+  let total = 0
+  for (const e of journal.value?.entries || []) {
+    if (e.verdict || !e.skipReason) continue
+    counts[e.skipReason] = (counts[e.skipReason] || 0) + 1
+    total += 1
+  }
+  return { total, items: Object.entries(counts)
+    .map(([reason, n]) => ({ reason, n }))
+    .sort((a, b) => b.n - a.n) }
+})
+
+const SKIP_REASON_LABELS = {
+  agent_no_new_information: '没触发开会',
+  agent_budget_exceeded: '预算用尽',
+  data_unavailable: '数据不可用',
+  state_mismatch: '信号矛盾',
+}
+
+/** 分布条配色：同族蓝灰渐进，不与红绿涨跌语义打架（分布不是方向） */
+const SKIP_COLORS = ['#3b6df6', '#7aa2f7', '#a8bffc', '#cbd8f9', '#e4ebfb']
 const isAgentMode = computed(() => decisionMode.value === 'agent')
 
 // 止损类条件（DSL 封闭集三类）：退出规则一条都没有时给出配置层提示
@@ -616,6 +765,7 @@ const loadDetail = async () => {
     const found = list.find((item) => String(item.id) === String(route.params.id))
     if (found) {
       strategy.value = found
+      quoteBus.setFocus(found.symbol)   // 3 秒快车道：告诉后端本页盯着这只票
       await loadPaper()
       await loadExpectation()
       await loadOverview()
@@ -728,7 +878,8 @@ const copyShare = async () => {
 }
 
 // ---- 策略修订闭环（P2，2026-10-15）：健康信号 → 提案 → 人审批 ----
-// 提案的证据是「截至当天、按交易日指数衰减加权」的回测对比（半衰期 60 天），
+// 展示分层（2026-10-19）：主视图只放通俗结论与简化对比（普通人能据此决策）；
+// 专业口径（决策段/留出段/半衰期/权重占比/系统原话）收进折叠区。
 // 未过门禁的提案也展示（否决理由透明），但不给批准按钮。
 const revisionHealth = ref([])
 const revisions = ref([])
@@ -749,6 +900,17 @@ const parseJsonField = (text) => {
 const pendingProposal = computed(() => parseJsonField(pendingRevision.value?.proposalJson))
 const pendingEvidence = computed(() => parseJsonField(pendingRevision.value?.evidenceJson))
 const pendingHealth = computed(() => parseJsonField(pendingRevision.value?.healthJson))
+
+/** 系统结论的大白话版：优先用后端门禁的 summary；旧提案（无 summary）给通用兜底 */
+const gateSummaryText = computed(() => {
+  if (pendingEvidence.value?.summary) return pendingEvidence.value.summary
+  return pendingRevision.value?.gatePassed
+    ? '系统模拟对比显示：新参数整体表现更好，可以批准应用。'
+    : '系统模拟对比显示：新参数没有跑赢现在的配置，不建议采用这次修改。'
+})
+
+/** 百分比显示：null/undefined（算不出来）显示 —，其余保留两位小数 */
+const fmtPct = (v) => (v === null || v === undefined || v === '' ? '—' : `${Number(v).toFixed(2)}%`)
 
 const signalTone = (level) => (level === 'warn' ? 'warn' : level === 'ok' ? 'down' : 'neutral')
 
@@ -776,7 +938,7 @@ const generateProposal = async () => {
   revisionNotice.value = ''
   try {
     await generateRevision(strategy.value.id)
-    revisionNotice.value = '提案已生成（含截至当天的加权回测证据），请审批。'
+      revisionNotice.value = '提案已生成，系统已完成行情模拟验证，请审批。'
     await loadRevisions()
   } catch (e) {
     revisionError.value = errorMessage(e, '提案生成失败：模型或行情服务暂不可用，稍后再试')
@@ -795,7 +957,7 @@ const actOnRevision = async (action) => {
   try {
     if (action === 'approve') {
       await approveRevision(strategy.value.id, revision.id)
-      revisionNotice.value = '已批准并应用：策略配置已更新（净值图会画出口径分界线）。'
+      revisionNotice.value = '已批准并应用：策略已按新参数运行，净值图上会标出这次调整的时间。'
     } else {
       await rejectRevision(strategy.value.id, revision.id)
       revisionNotice.value = '已拒绝该提案。'
@@ -809,10 +971,12 @@ const actOnRevision = async (action) => {
 }
 
 onMounted(async () => {
+  quoteBus.connect()   // 行情 SSE（全局单例，已连接则空操作）；focus 在 loadDetail 拿到 symbol 后注册
   await loadDetail()
   loadRevisions()
 })
 onUnmounted(() => {
+  quoteBus.setFocus('')   // 离开页面：撤销 3 秒快车道的 focus 注册
   if (backtestChart) {
     backtestChart.dispose()
     backtestChart = null
@@ -823,7 +987,7 @@ onUnmounted(() => {
   }
   if (opsChart) {
     window.removeEventListener('resize', handleOpsResize)
-    opsChart.dispose()
+    disposeKlinecharts(opsChart)
     opsChart = null
   }
 })
@@ -941,7 +1105,7 @@ onUnmounted(() => {
           策略修订
           <InfoTip
             label="策略修订说明"
-            text="委员会跑了一段时间后，可基于客观健康信号（决策命中率、可验证预期、回撤）生成参数修订提案。每份提案都附带截至当天的回测对比：数据窗口截到最新一根 K 线，并按交易日指数衰减加权（半衰期 60 天，越近权重越高），不再用一段固定旧数据一票定夺。提案需人工批准才生效，应用后净值图会画出口径分界线。"
+            text="策略运行一段时间后，系统会根据客观运行数据（决策命中率、收益与回撤、近期成交）自动生成参数调整提案，并用截至今天的真实行情做模拟对比，验证「新参数是否比现在更好」。提案需要你人工批准才会生效；验证未通过的提案只能拒绝。"
           />
         </h3>
 
@@ -961,14 +1125,28 @@ onUnmounted(() => {
         <p v-if="revisionError" class="text-[12.5px] text-up" role="alert">{{ revisionError }}</p>
         <p v-if="revisionNotice" class="mb-2.5 text-[13px] text-down">{{ revisionNotice }}</p>
 
-        <!-- 待审批提案 -->
+        <!-- 待审批提案：主视图只放"普通人能决策"的信息（结论 + 通俗对比），
+             专业口径（决策段/留出段/半衰期/权重占比）收进折叠区，想深究再展开 -->
         <div v-if="pendingRevision && pendingProposal" class="rounded-lg border border-border bg-surface-2 p-3.5">
           <div class="flex flex-wrap items-center gap-2">
             <Badge :tone="pendingRevision.gatePassed ? 'down' : 'warn'">
-              {{ pendingRevision.gatePassed ? '已过回测门禁' : '未过回测门禁' }}
+              {{ pendingRevision.gatePassed ? '系统验证通过' : '系统验证未通过' }}
             </Badge>
-            <span v-if="pendingEvidence?.window" class="text-[12px] text-ink-3">{{ pendingEvidence.window.note }}</span>
+            <span v-if="pendingEvidence?.window?.end" class="text-[12px] text-ink-3">
+              已用截至 {{ pendingEvidence.window.end }} 的真实行情完成模拟对比
+            </span>
           </div>
+
+          <!-- 系统结论（大白话版，来自后端门禁；旧数据无 summary 时给通用兜底） -->
+          <p
+            class="mt-2.5 rounded-lg border p-2.5 text-[13.5px] leading-relaxed"
+            :class="pendingRevision.gatePassed
+              ? 'border-down/30 bg-down/5 text-ink'
+              : 'border-warn/30 bg-warn-soft text-ink'"
+            role="status"
+          >
+            {{ gateSummaryText }}
+          </p>
 
           <p class="mt-2.5 text-[13px] leading-relaxed text-ink">
             <span class="mr-1.5 text-[12px] text-ink-3">修改理由</span>{{ pendingProposal.rationale }}
@@ -997,46 +1175,42 @@ onUnmounted(() => {
             </table>
           </div>
 
-          <!-- 回测证据：全期 + 近期加权并排，口径写明 -->
+          <!-- 通俗版回测对比：只回答"新参数和现版谁表现好"，术语不进主视图 -->
           <div v-if="pendingEvidence?.old && pendingEvidence?.new" class="mt-3 overflow-x-auto">
-            <table class="num w-full min-w-[420px] border-collapse text-[12px]">
+            <table class="num w-full min-w-[440px] border-collapse text-[12.5px]">
               <thead>
                 <tr class="border-b border-border text-left text-ink-3">
-                  <th class="py-1.5 pr-3 font-medium">回测对比（{{ pendingEvidence.window?.start }} ~ {{ pendingEvidence.window?.end }}）</th>
+                  <th class="py-1.5 pr-3 font-medium">模拟对比（真实行情回放：{{ pendingEvidence.window?.start }} ~ {{ pendingEvidence.window?.end }}）</th>
                   <th class="py-1.5 pr-3 font-medium">现行配置</th>
                   <th class="py-1.5 font-medium">提案配置</th>
                 </tr>
               </thead>
               <tbody>
                 <tr class="border-b border-border/60">
-                  <td class="py-1.5 pr-3 text-ink-2">近期加权年化收益（半衰期 {{ pendingEvidence.new.half_life_days }} 日）</td>
-                  <td class="py-1.5 pr-3 text-ink-3">{{ pendingEvidence.old.weighted_daily_return_pct }}%</td>
-                  <td class="py-1.5 font-medium" :class="dirTextClass(pendingEvidence.new.weighted_daily_return_pct - pendingEvidence.old.weighted_daily_return_pct)">
-                    {{ pendingEvidence.new.weighted_daily_return_pct }}%
+                  <td class="py-1.5 pr-3 text-ink-2">近期行情下的年化收益（越近的行情越重要）</td>
+                  <td class="py-1.5 pr-3 text-ink-3">{{ fmtPct(pendingEvidence.old.decision_weighted_daily_return_pct) }}</td>
+                  <td class="py-1.5 font-medium" :class="dirTextClass(pendingEvidence.new.decision_weighted_daily_return_pct - pendingEvidence.old.decision_weighted_daily_return_pct)">
+                    {{ fmtPct(pendingEvidence.new.decision_weighted_daily_return_pct) }}
                   </td>
                 </tr>
                 <tr class="border-b border-border/60">
-                  <td class="py-1.5 pr-3 text-ink-2">近期最大回撤（近 {{ pendingEvidence.new.recent_window_bars }} 根，占权重 {{ pendingEvidence.new.recent_window_weight_share_pct }}%）</td>
-                  <td class="py-1.5 pr-3 text-ink-3">{{ pendingEvidence.old.weighted_max_drawdown_pct }}%</td>
-                  <td class="py-1.5 font-medium">{{ pendingEvidence.new.weighted_max_drawdown_pct }}%</td>
+                  <td class="py-1.5 pr-3 text-ink-2">最近 {{ pendingEvidence.window?.holdout_bars || 40 }} 个交易日的收益（这段新行情未参与评估）</td>
+                  <td class="py-1.5 pr-3 text-ink-3">{{ fmtPct(pendingEvidence.old.holdout_return_pct) }}</td>
+                  <td class="py-1.5 font-medium">{{ fmtPct(pendingEvidence.new.holdout_return_pct) }}</td>
                 </tr>
                 <tr class="border-b border-border/60">
-                  <td class="py-1.5 pr-3 text-ink-2">全期收益 / 全期最大回撤</td>
-                  <td class="py-1.5 pr-3 text-ink-3">{{ pendingEvidence.old.total_return_pct }}% / {{ pendingEvidence.old.max_drawdown_pct }}%</td>
-                  <td class="py-1.5 font-medium">{{ pendingEvidence.new.total_return_pct }}% / {{ pendingEvidence.new.max_drawdown_pct }}%</td>
+                  <td class="py-1.5 pr-3 text-ink-2">整个模拟期总收益 / 期间最深回落</td>
+                  <td class="py-1.5 pr-3 text-ink-3">{{ fmtPct(pendingEvidence.old.total_return_pct) }} / {{ fmtPct(pendingEvidence.old.max_drawdown_pct) }}</td>
+                  <td class="py-1.5 font-medium">{{ fmtPct(pendingEvidence.new.total_return_pct) }} / {{ fmtPct(pendingEvidence.new.max_drawdown_pct) }}</td>
                 </tr>
                 <tr class="border-b border-border/60">
-                  <td class="py-1.5 pr-3 text-ink-2">完成交易次数</td>
+                  <td class="py-1.5 pr-3 text-ink-2">完成交易次数（越多，交易成本越高）</td>
                   <td class="py-1.5 pr-3 text-ink-3">{{ pendingEvidence.old.closed_trades }}</td>
                   <td class="py-1.5 font-medium">{{ pendingEvidence.new.closed_trades }}</td>
                 </tr>
               </tbody>
             </table>
           </div>
-
-          <p class="mt-2.5 text-[12.5px] leading-relaxed" :class="pendingRevision.gatePassed ? 'text-down' : 'text-warn'">
-            门禁结论：{{ pendingEvidence?.reason || (pendingRevision.gatePassed ? '通过' : '未通过') }}
-          </p>
 
           <div class="mt-3 flex flex-wrap gap-2">
             <Button
@@ -1047,8 +1221,58 @@ onUnmounted(() => {
               @click="actOnRevision('approve')"
             >批准并应用</Button>
             <Button size="sm" :disabled="revisionActing" @click="actOnRevision('reject')">拒绝</Button>
-            <span v-if="!pendingRevision.gatePassed" class="self-center text-[12px] text-ink-3">未过门禁的提案不能批准（近期加权口径下没跑赢现版），可拒绝后重新生成</span>
+            <span v-if="!pendingRevision.gatePassed" class="self-center text-[12px] text-ink-3">
+              验证未通过的提案不能批准（模拟对比里没跑赢现版），可拒绝后重新生成一份
+            </span>
           </div>
+
+          <!-- 专业口径：完整验证数据与系统原话，默认折叠 -->
+          <details v-if="pendingEvidence?.old && pendingEvidence?.new" class="mt-3 rounded-lg border border-border bg-surface">
+            <summary class="cursor-pointer select-none px-3 py-2 text-[12.5px] text-ink-3">展开专业口径的验证数据</summary>
+            <div class="border-t border-border px-3 py-2.5">
+              <p class="text-[12px] leading-relaxed text-ink-3">{{ pendingEvidence.window?.note }}</p>
+              <p v-if="pendingEvidence.complexity?.note" class="mt-1 text-[12px] leading-relaxed text-ink-3">{{ pendingEvidence.complexity.note }}</p>
+              <div class="mt-2 overflow-x-auto">
+                <table class="num w-full min-w-[420px] border-collapse text-[12px]">
+                  <thead>
+                    <tr class="border-b border-border text-left text-ink-3">
+                      <th class="py-1.5 pr-3 font-medium">指标</th>
+                      <th class="py-1.5 pr-3 font-medium">现行配置</th>
+                      <th class="py-1.5 font-medium">提案配置</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr class="border-b border-border/60">
+                      <td class="py-1.5 pr-3 text-ink-2">决策段加权年化收益（半衰期 {{ pendingEvidence.new.half_life_days }} 日，截至 {{ (pendingEvidence.window?.holdout_start || '').slice(5) }}）</td>
+                      <td class="py-1.5 pr-3 text-ink-3">{{ fmtPct(pendingEvidence.old.decision_weighted_daily_return_pct) }}</td>
+                      <td class="py-1.5 font-medium">{{ fmtPct(pendingEvidence.new.decision_weighted_daily_return_pct) }}</td>
+                    </tr>
+                    <tr class="border-b border-border/60">
+                      <td class="py-1.5 pr-3 text-ink-2">留出段收益（最近 {{ pendingEvidence.window?.holdout_bars }} 根，不参与挑选、只做反证）</td>
+                      <td class="py-1.5 pr-3 text-ink-3">{{ fmtPct(pendingEvidence.old.holdout_return_pct) }}</td>
+                      <td class="py-1.5 font-medium">{{ fmtPct(pendingEvidence.new.holdout_return_pct) }}</td>
+                    </tr>
+                    <tr class="border-b border-border/60">
+                      <td class="py-1.5 pr-3 text-ink-2">近期加权最大回撤（近 {{ pendingEvidence.new.recent_window_bars }} 根，占权重 {{ pendingEvidence.new.recent_window_weight_share_pct }}%）</td>
+                      <td class="py-1.5 pr-3 text-ink-3">{{ fmtPct(pendingEvidence.old.weighted_max_drawdown_pct) }}</td>
+                      <td class="py-1.5 font-medium">{{ fmtPct(pendingEvidence.new.weighted_max_drawdown_pct) }}</td>
+                    </tr>
+                    <tr class="border-b border-border/60">
+                      <td class="py-1.5 pr-3 text-ink-2">全期收益 / 全期最大回撤</td>
+                      <td class="py-1.5 pr-3 text-ink-3">{{ fmtPct(pendingEvidence.old.total_return_pct) }} / {{ fmtPct(pendingEvidence.old.max_drawdown_pct) }}</td>
+                      <td class="py-1.5 font-medium">{{ fmtPct(pendingEvidence.new.total_return_pct) }} / {{ fmtPct(pendingEvidence.new.max_drawdown_pct) }}</td>
+                    </tr>
+                    <tr class="border-b border-border/60">
+                      <td class="py-1.5 pr-3 text-ink-2">完成交易次数</td>
+                      <td class="py-1.5 pr-3 text-ink-3">{{ pendingEvidence.old.closed_trades }}</td>
+                      <td class="py-1.5 font-medium">{{ pendingEvidence.new.closed_trades }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="mt-2 text-[12px] leading-relaxed text-ink-3">系统结论（原话）：{{ pendingEvidence.reason }}</p>
+            </div>
+          </details>
         </div>
 
         <!-- 生成入口 + 历史 -->
@@ -1056,14 +1280,14 @@ onUnmounted(() => {
           <Button size="sm" variant="primary" :loading="revisionGenerating" :disabled="!!pendingRevision" @click="generateProposal">
             {{ pendingRevision ? '已有待审批提案' : '生成修订提案' }}
           </Button>
-          <span class="text-[12px] text-ink-3">1 次模型调用 + 加权回测验证，约需 30~90 秒</span>
+          <span class="text-[12px] text-ink-3">由 AI 生成参数提案并自动用真实行情验证，约需 30~90 秒</span>
         </div>
 
         <div v-if="historyRevisions.length" class="mt-2.5 flex flex-col gap-1">
           <p v-for="r in historyRevisions" :key="r.id" class="num flex flex-wrap items-center gap-2 text-[12px] text-ink-3">
             <Badge :tone="r.status === 'approved' ? 'down' : 'neutral'">{{ revisionStatusText[r.status] || r.status }}</Badge>
             <span>{{ formatTime(r.createdAt) }}</span>
-            <span v-if="r.gatePassed === false">未过门禁</span>
+            <span v-if="r.gatePassed === false">系统验证未通过</span>
             <span v-if="r.note" class="text-ink-2">{{ r.note }}</span>
           </p>
         </div>
@@ -1348,9 +1572,26 @@ onUnmounted(() => {
         />
         <template v-else>
           <p v-if="opsHiddenTrades > 0" class="mb-2 text-[12px] text-ink-3">
-            当前窗口外还有 {{ opsHiddenTrades }} 笔更早的成交，切大窗口可见。
+            有 {{ opsHiddenTrades }} 笔成交落在已加载行情之外（更早或当日 K 线未出），暂无法标注。
           </p>
-          <div ref="opsChartRef" class="h-[420px]"></div>
+          <!-- 成交明细回到图上（2026-10-19）：悬停/点按 ▲▼ 出浮动卡，贴着标记、
+               pointer-events-none 不挡画布交互，靠边自动翻转不溢出容器 -->
+          <div class="relative">
+            <div ref="opsChartRef" class="h-[420px]"></div>
+            <div
+              v-if="opsHover"
+              class="num pointer-events-none absolute z-20 w-max max-w-[280px] rounded-lg border border-border bg-surface px-3 py-2 text-[12px] leading-relaxed text-ink shadow-lg"
+              :style="opsHoverStyle"
+              role="status"
+            >
+              <p class="mb-0.5 font-semibold" :class="opsHover.trade.side === 'buy' ? 'text-up' : 'text-down'">
+                {{ opsHover.trade.side === 'buy' ? '买入' : '卖出' }} · {{ String(opsHover.trade.tradeDate || '').slice(0, 10) }}
+              </p>
+              <p>{{ opsHover.trade.price ?? 'N/A' }} × {{ opsHover.trade.shares ?? 'N/A' }} 股　金额 {{ formatMoney(opsHover.trade.amount) }}</p>
+              <p v-if="opsHover.trade.reason" class="text-ink-2">信号 {{ opsHover.trade.reason }}</p>
+              <p v-if="opsHover.trade.createdAt" class="text-ink-3">{{ formatTime(opsHover.trade.createdAt) }}</p>
+            </div>
+          </div>
         </template>
       </section>
 
@@ -1387,6 +1628,45 @@ onUnmounted(() => {
               <span class="text-[12px] text-ink-2">选择不动</span>
               <strong class="text-[16px] font-semibold text-ink">{{ journal.skips }} 天</strong>
             </div>
+          </div>
+
+          <!-- 模式命中率对比：委员会与规则各有判读样本时才显示（切换模式前的历史也计入） -->
+          <div v-if="modeStats.length === 2" class="num mt-1 flex flex-wrap gap-3">
+            <div
+              v-for="s in modeStats"
+              :key="s.mode"
+              class="flex min-w-[200px] flex-1 items-center gap-2.5 rounded-lg border border-border bg-surface-2 px-3 py-2"
+            >
+              <span class="shrink-0 text-[12px] text-ink-2">{{ s.mode === 'agent' ? '委员会' : '规则' }}</span>
+              <div class="h-2 min-w-0 flex-1 overflow-hidden rounded-full bg-surface">
+                <div
+                  class="h-full rounded-full bg-accent"
+                  :style="{ width: (s.rate || 0) + '%' }"
+                  role="progressbar"
+                  :aria-valuenow="s.rate || 0" aria-valuemin="0" aria-valuemax="100"
+                  :aria-label="`${s.mode === 'agent' ? '委员会' : '规则'}命中率 ${s.rate ?? '—'}%`"
+                ></div>
+              </div>
+              <span class="shrink-0 text-[12.5px] font-semibold text-ink">{{ s.rate != null ? s.rate + '%' : '—' }}</span>
+              <span class="shrink-0 text-[11px] text-ink-3">{{ s.hits }}/{{ s.total }}</span>
+            </div>
+          </div>
+
+          <!-- 不动原因分布：回答"为什么总不动"——分布条 + 前三原因 -->
+          <div v-if="skipReasons.total >= 3" class="mt-1">
+            <div class="flex h-2 w-full overflow-hidden rounded-full" role="img" :aria-label="`不动的 ${skipReasons.total} 天里：${skipReasons.items.map((i) => (SKIP_REASON_LABELS[i.reason] || i.reason) + ' ' + i.n + ' 天').join('，')}`">
+              <div
+                v-for="(item, i) in skipReasons.items"
+                :key="item.reason"
+                :style="{ width: (item.n / skipReasons.total * 100) + '%', background: SKIP_COLORS[i % SKIP_COLORS.length] }"
+              ></div>
+            </div>
+            <p class="num mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-[11.5px] text-ink-3">
+              <span v-for="(item, i) in skipReasons.items.slice(0, 4)" :key="item.reason">
+                <span class="mr-1 inline-block h-1.5 w-1.5 rounded-full align-middle" :style="{ background: SKIP_COLORS[i % SKIP_COLORS.length] }" aria-hidden="true"></span>
+                {{ SKIP_REASON_LABELS[item.reason] || item.reason }} {{ item.n }} 天
+              </span>
+            </p>
           </div>
           <div class="num flex flex-col gap-1.5">
             <div v-for="entry in journal.entries" :key="entry.tradeDate" class="flex flex-wrap items-center gap-2.5 rounded-lg border border-border px-2.5 py-2 text-[12.5px]">
@@ -1431,15 +1711,18 @@ onUnmounted(() => {
             </div>
             <div class="flex flex-col gap-1 rounded-lg border border-border bg-surface-2 px-3 py-2.5">
               <span class="text-[12px] text-ink-2">最大回撤</span>
-              <strong class="text-[16px] font-semibold text-down">{{ formatPct(equity.summary.maxDrawdownPct) }}</strong>
+              <strong v-if="equityColdStart" class="text-[13px] font-normal text-ink-3">次日起算</strong>
+              <strong v-else class="text-[16px] font-semibold text-down">{{ formatPct(equity.summary.maxDrawdownPct) }}</strong>
             </div>
             <div class="flex flex-col gap-1 rounded-lg border border-border bg-surface-2 px-3 py-2.5">
               <span class="text-[12px] text-ink-2">同期买入持有</span>
-              <strong class="text-[16px] font-semibold" :class="dirTextClass(equity.summary.buyAndHoldPct)">{{ formatPct(equity.summary.buyAndHoldPct) }}</strong>
+              <strong v-if="equityColdStart" class="text-[13px] font-normal text-ink-3">次日起算</strong>
+              <strong v-else class="text-[16px] font-semibold" :class="dirTextClass(equity.summary.buyAndHoldPct)">{{ formatPct(equity.summary.buyAndHoldPct) }}</strong>
             </div>
             <div class="flex flex-col gap-1 rounded-lg border border-border bg-surface-2 px-3 py-2.5">
               <span class="text-[12px] text-ink-2">超额（不动的代价）</span>
-              <strong class="text-[16px] font-semibold" :class="dirTextClass(equity.summary.excessVsBuyAndHoldPct)">{{ formatPct(equity.summary.excessVsBuyAndHoldPct) }}</strong>
+              <strong v-if="equityColdStart" class="text-[13px] font-normal text-ink-3">次日起算</strong>
+              <strong v-else class="text-[16px] font-semibold" :class="dirTextClass(equity.summary.excessVsBuyAndHoldPct)">{{ formatPct(equity.summary.excessVsBuyAndHoldPct) }}</strong>
             </div>
             <div class="flex flex-col gap-1 rounded-lg border border-border bg-surface-2 px-3 py-2.5">
               <span class="text-[12px] text-ink-2">空仓占比</span>
@@ -1454,8 +1737,11 @@ onUnmounted(() => {
               <strong class="text-[16px] font-semibold text-ink">{{ equity.summary.days }} 天</strong>
             </div>
           </div>
+          <p v-if="equityColdStart" class="mb-2.5 rounded-lg bg-surface-2 px-3 py-2 text-[12.5px] leading-relaxed text-ink-2" role="status">
+            模拟盘刚启动（样本 {{ equity.summary.days }} 天）：最大回撤、同期买入持有与超额需要至少两个交易日的净值才能计算，下一个交易日结算后开始有值——现在显示 N/A 不是数据丢了。
+          </p>
           <p class="mb-2.5 text-[12px] leading-relaxed text-ink-3">
-            自 {{ equity.summary.firstDate }} 起，共 {{ equity.summary.days }} 个交易日<template v-if="strategy.decisionModeSince">；{{ strategy.decisionModeSince }} 起换了决策来源（图中虚线），两侧不是同一个决策者</template>。
+            自 {{ equity.summary.firstDate }} 起，共 {{ equity.summary.days }} 个交易日<template v-if="strategy.decisionModeSince">；{{ strategy.decisionModeSince }} 起换了决策来源（图中虚线），两侧不是同一个决策者</template><template v-if="strategy.configUpdatedAt">；{{ String(strategy.configUpdatedAt).slice(0, 10) }} 起参数修订过（图中虚线），前后口径不可比</template>。
           </p>
           <div ref="equityChartRef" class="h-[320px]"></div>
         </template>

@@ -40,6 +40,21 @@ public class NewsController {
     private final NewsService newsService;
     private final NewsTopicService newsTopicService;
     private final ObjectMapper objectMapper;
+    private final com.happyericsix.stocktracker.client.NewsClient newsClient;
+
+    /**
+     * 个股人气榜 TopN（2026-10-16）：代理 Python 的东财人气榜（5 分钟缓存）。
+     * 不落库——热榜是分钟级瞬态视图，落库只会制造"缓存不一致"这类伪问题。
+     * Python 不可达时回「暂不可用」而不是 500：热榜缺席，资讯雷达其余视图照常。
+     */
+    @GetMapping("/hot-rank")
+    public Result<JsonNode> hotRank(@RequestParam(defaultValue = "20") int limit) {
+        JsonNode data = newsClient.getHotRank(limit);
+        if (data == null || !data.path("ok").asBoolean(false)) {
+            return Result.error(503, "热榜暂不可用，稍后再试");
+        }
+        return Result.success(data);
+    }
     private final JobRunService jobRunService;
 
     /**

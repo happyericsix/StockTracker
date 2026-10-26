@@ -279,6 +279,32 @@ def test_retract_fact_shape(monkeypatch):
     assert "userId=7" in captured["url"]
 
 
+def test_get_lesson_request_shape(monkeypatch):
+    """反问功能（2026-10-16）：聚焦取料必须打对路径与参数名，404/空体一律退成 {}。"""
+    captured = _capture(monkeypatch, {
+        "id": 41, "symptom": "追高被套", "reusableRule": "首仓不超过现金 50%",
+        "status": "active", "occurrences": 2})
+
+    lesson = memory_store.get_lesson(7, 41)
+
+    assert captured["url"].endswith("/api/v1/internal/memory/lessons/41")
+    assert captured["method"] == "GET"
+    assert captured["params"] == {"userId": 7}
+    assert lesson["id"] == 41 and lesson["status"] == "active"
+
+
+def test_get_lesson_fail_open_on_error_payload(monkeypatch):
+    """Java 404（{"error": ...}）或残缺响应不许冒充教训：render_focus 靠空判降级。"""
+    _capture(monkeypatch, {"error": "lesson not found"})
+    assert memory_store.get_lesson(7, 99) == {}
+
+    _capture(monkeypatch, {"symptom": "没有 id 的残缺体"})
+    assert memory_store.get_lesson(7, 99) == {}
+
+    assert memory_store.get_lesson(None, 41) == {}
+    assert memory_store.get_lesson(7, None) == {}
+
+
 def test_m2_calls_are_skipped_without_identity(monkeypatch):
     captured = _capture(monkeypatch, {})
 

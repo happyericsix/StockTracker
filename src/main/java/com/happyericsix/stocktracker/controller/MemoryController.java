@@ -1,5 +1,6 @@
 package com.happyericsix.stocktracker.controller;
 
+import com.happyericsix.stocktracker.dto.MemoryLessonRequest;
 import com.happyericsix.stocktracker.dto.Result;
 import com.happyericsix.stocktracker.entity.MemoryEvent;
 import com.happyericsix.stocktracker.entity.User;
@@ -131,6 +132,25 @@ public class MemoryController {
         }
         return lessonService.retire(userId, id)
                 ? Result.success("已停用")
+                : Result.error(404, "这条经验不存在");
+    }
+
+    /**
+     * 人工修订一条经验（方案一 2026-10-16）：落为取代旧行的新版本（新版本继承原
+     * status——人刚改过，人就是最高裁决）。请求体是 MemoryLessonRequest 的子集：
+     * 非空字段覆盖（symptom/reusableRule/resolution/context/confidence），空字段继承。
+     */
+    @PostMapping("/lessons/{id}/revise")
+    public Result<String> reviseLesson(Authentication authentication, @PathVariable Long id,
+                                       @RequestBody MemoryLessonRequest patch) {
+        Long userId = currentUserId(authentication);
+        if (userId == null) {
+            return Result.error(401, "登录已失效");
+        }
+        MemoryLessonService.LessonWriteResult result =
+                lessonService.reviseLesson(userId, id, patch, "user");
+        return result != null
+                ? Result.success("已修订")
                 : Result.error(404, "这条经验不存在");
     }
 

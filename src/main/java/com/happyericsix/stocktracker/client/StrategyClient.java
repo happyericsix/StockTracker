@@ -1,8 +1,10 @@
 package com.happyericsix.stocktracker.client;
 
 import com.happyericsix.stocktracker.service.ExecutionContract;
+import com.happyericsix.stocktracker.service.UserLlmConfigService;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -12,6 +14,7 @@ import org.springframework.web.reactive.function.client.WebClientResponseExcepti
 
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.List;
 
 @Service
 public class StrategyClient {
@@ -19,16 +22,19 @@ public class StrategyClient {
 
     private final WebClient webClient;
     private final ObjectMapper mapper;
+    private final UserLlmConfigService userLlmConfigService;
 
     public StrategyClient(@Value("${akshare.api.base-url:http://localhost:8000}") String baseUrl,
                           @Value("${internal.api-token:}") String internalToken,
-                          ObjectMapper mapper) {
+                          ObjectMapper mapper,
+                          UserLlmConfigService userLlmConfigService) {
         WebClient.Builder builder = WebClient.builder().baseUrl(baseUrl);
         if (internalToken != null && !internalToken.isBlank()) {
             builder.defaultHeader("X-Internal-Token", internalToken);
         }
         this.webClient = builder.build();
         this.mapper = mapper;
+        this.userLlmConfigService = userLlmConfigService;
     }
 
     public JsonNode backtestStrategy(String configJson) {
@@ -154,9 +160,22 @@ public class StrategyClient {
     public JsonNode agentDecide(String configJson, String symbol, String date, JsonNode position,
                                 String lastDecisionAt, JsonNode newsBriefing, JsonNode experience,
                                 JsonNode portfolio) {
+        return agentDecide(configJson, symbol, date, position, lastDecisionAt,
+                newsBriefing, experience, portfolio, null, null);
+    }
+
+    /**
+     * 全量+身份版（④技能注入，2026-10-16）：userId/strategyId 供 Python 按
+     * 三维 scope 拉取可注入技能（软参考）。null 时 Python 不带技能块（fail-open）。
+     */
+    public JsonNode agentDecide(String configJson, String symbol, String date, JsonNode position,
+                                String lastDecisionAt, JsonNode newsBriefing, JsonNode experience,
+                                JsonNode portfolio, Long userId, Long strategyId) {
         var body = new HashMap<String, Object>();
         body.put("strategy_json", raw(configJson));
         body.put("symbol", symbol);
+        if (userId != null) body.put("user_id", userId);
+        if (strategyId != null) body.put("strategy_id", strategyId);
         body.put("date", date);
         body.put(ExecutionContract.SETTLEMENT_KIND_FIELD, ExecutionContract.SETTLEMENT_DAILY);
         if (lastDecisionAt != null && !lastDecisionAt.isBlank()) {
@@ -166,6 +185,11 @@ public class StrategyClient {
         if (newsBriefing != null && !newsBriefing.isEmpty()) body.put("news_briefing", newsBriefing);
         if (experience != null && !experience.isEmpty()) body.put("experience", experience);
         if (portfolio != null && !portfolio.isEmpty()) body.put("portfolio", portfolio);
+        // BYOK（2026-10-25）：委员会是用户级任务里最贵的一档（8 棒串行 ~21k tokens/次），
+        // 必须花用户自己的 Key。**永远带这个字段**（userId 缺席也带空数组）——
+        // Python 侧以它区分用户级调用，不带就会静默烧部署者的全局 key。
+        body.put("llm_providers", userId != null
+                ? userLlmConfigService.providersFor(userId) : List.of());
         // 委员会是 8 次**串行** LLM 调用（每个角色一次），60s 的通用超时会在半途掐断：
         // 异常上抛后当天既无痕迹也无净值快照，"为什么今天没结算"只存在于日志。
         // 这里单独放宽到 240s（8 次 × 每次 15~30s 的量级），其余端点维持 60s。
@@ -229,6 +253,18 @@ public class StrategyClient {
     public JsonNode intradayWatch(String configJson, String symbol, JsonNode events,
                                   JsonNode position, JsonNode authorization, JsonNode newsAlert,
                                   JsonNode experience, JsonNode todayContext) {
+        return intradayWatch(configJson, symbol, events, position, authorization,
+                newsAlert, experience, todayContext, null);
+    }
+
+    /**
+     * 带教训检索的盯盘（2026-10-18 二轮）：userId 非 null 时 Python 侧按
+     * (用户, 标的) 检索复盘教训注入盯盘上下文（软参考）。fail-open：
+     * 传 null 与检索失败都只是"这次没有教训"，不挡盯盘。
+     */
+    public JsonNode intradayWatch(String configJson, String symbol, JsonNode events,
+                                  JsonNode position, JsonNode authorization, JsonNode newsAlert,
+                                  JsonNode experience, JsonNode todayContext, Long userId) {
         var body = new HashMap<String, Object>();
         body.put("strategy_json", raw(configJson));
         body.put("symbol", symbol);
@@ -238,6 +274,10 @@ public class StrategyClient {
         if (newsAlert != null) body.put("news_alert", newsAlert);
         if (experience != null && !experience.isEmpty()) body.put("experience", experience);
         if (todayContext != null && !todayContext.isEmpty()) body.put("today_context", todayContext);
+        if (userId != null) body.put("user_id", userId);
+        // BYOK（2026-10-25）：盯盘是用户级任务，Key 用他自己的（语义同 agentDecide）
+        body.put("llm_providers", userId != null
+                ? userLlmConfigService.providersFor(userId) : List.of());
         return post("/api/v1/agent/intraday-decide", body, Duration.ofSeconds(15));
     }
 
@@ -247,7 +287,32 @@ public class StrategyClient {
      * 60s 超时（1 次调用）；失败/空教训由调用方按无操作处理（反思是旁路，不影响复盘主链路）。
      */
     public JsonNode weeklyReflection(JsonNode payload) {
-        return post("/api/v1/agent/weekly-reflection", payload, Duration.ofSeconds(60));
+        return weeklyReflection(payload, null);
+    }
+
+    /**
+     * 带 userId 的周反思（BYOK，2026-10-25）：教训记在这个用户名下，LLM 也花他自己的 Key
+     * （未配置 → Python 侧降级"没有教训"，绝不烧部署者的全局 key）。
+     */
+    public JsonNode weeklyReflection(JsonNode payload, Long userId) {
+        return post("/api/v1/agent/weekly-reflection", withUserLlm(payload, userId),
+                Duration.ofSeconds(60));
+    }
+
+    /**
+     * 单笔大亏即时反思（2026-10-18）：一笔深亏了结的当天结算后触发，
+     * 产出 ≤1 条结构化教训（与周反思同一产物口径）。与周反思的分工：
+     * 周反思面向"本周模式"、周五一次；本端点面向"这一笔"、当天到位——
+     * 下一交易日的委员会就能读到。60s 超时；失败由调用方按无操作处理。
+     */
+    public JsonNode tradeReflection(JsonNode payload) {
+        return tradeReflection(payload, null);
+    }
+
+    /** 带 userId 的单笔反思（BYOK，语义同 {@link #weeklyReflection(JsonNode, Long)}）。 */
+    public JsonNode tradeReflection(JsonNode payload, Long userId) {
+        return post("/api/v1/agent/trade-reflection", withUserLlm(payload, userId),
+                Duration.ofSeconds(60));
     }
 
     /**
@@ -256,7 +321,13 @@ public class StrategyClient {
      * 季度信的数字底座是确定性代码，不因模型不可用而少发。
      */
     public JsonNode quarterlyReview(JsonNode payload) {
-        return post("/api/v1/agent/quarterly-review", payload, Duration.ofSeconds(60));
+        return quarterlyReview(payload, null);
+    }
+
+    /** 带 userId 的季度评语（BYOK，语义同 {@link #weeklyReflection(JsonNode, Long)}）。 */
+    public JsonNode quarterlyReview(JsonNode payload, Long userId) {
+        return post("/api/v1/agent/quarterly-review", withUserLlm(payload, userId),
+                Duration.ofSeconds(60));
     }
 
     /**
@@ -267,7 +338,27 @@ public class StrategyClient {
      * 失败语义 fail-closed：Python 返回 ok=false 时调用方不生成待审批记录。
      */
     public JsonNode strategyRevision(JsonNode payload) {
-        return post("/api/v1/agent/strategy-revision", payload, Duration.ofSeconds(120));
+        return strategyRevision(payload, null);
+    }
+
+    /** 带 userId 的修订提案（BYOK，语义同 {@link #weeklyReflection(JsonNode, Long)}）。 */
+    public JsonNode strategyRevision(JsonNode payload, Long userId) {
+        return post("/api/v1/agent/strategy-revision", withUserLlm(payload, userId),
+                Duration.ofSeconds(120));
+    }
+
+    /**
+     * 把用户身份 + BYOK 供应商注入反思类 payload（深拷贝，不动调用方的节点）。
+     * userId 为 null（旧调用方/测试）= 不带这两个键 → Python 侧按系统级调用走 env。
+     */
+    private ObjectNode withUserLlm(JsonNode payload, Long userId) {
+        ObjectNode body = payload != null && payload.isObject()
+                ? ((ObjectNode) payload).deepCopy() : mapper.createObjectNode();
+        if (userId != null) {
+            body.put("user_id", userId);
+            body.set("llm_providers", mapper.valueToTree(userLlmConfigService.providersFor(userId)));
+        }
+        return body;
     }
 
     private JsonNode raw(String json) {        try { return mapper.readTree(json); }

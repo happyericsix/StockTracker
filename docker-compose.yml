@@ -55,11 +55,32 @@ services:
       - INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN:?请在 .env 配置 INTERNAL_API_TOKEN（cp .env.example .env）}
       # 不传 key 时助手降级为模板回复（llm_available=false），服务本身不挂
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      # 备用 LLM 自动切换（与服务器 2026-10-20 版对齐；缺这四行时 .env 里的
+      # 备用配置进不了容器，主 key 失效后不切换）
+      - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-chat}
+      - LLM_FALLBACK_BASE_URL=${LLM_FALLBACK_BASE_URL:-}
+      - LLM_FALLBACK_API_KEY=${LLM_FALLBACK_API_KEY:-}
+      - LLM_FALLBACK_MODEL=${LLM_FALLBACK_MODEL:-}
       # Java 知识端点（新闻聚焦与资讯工具读库分析的通道）。2026-10-10 线上事故：
       # 没配时 news_knowledge 回退 localhost:8080 —— 在 python 容器里那是它自己，
       # 聚焦新闻与资讯工具在生产上全部静默失效（fail-open 不报错），
       # 用户"问 AI"得到的是"你贴的新闻我这边没收到"。
       - JAVA_BASE_URL=http://app:8080
+      # MCP 工具挂载（2026-10-20）：不配 MCP_SERVERS 时零行为变化；
+      # DEFAULT_VISIBLE 默认放开，0 可整体隐藏第三方工具。
+      # fetch 服务器以 stdio 子进程方式跑在 python 容器内（mcp-server-fetch 包，
+      # 官方 Docker 镜像是纯 stdio 的，不值得为它多跑一个容器）。
+      - MCP_SERVERS=${MCP_SERVERS:-fetch}
+      - MCP_FETCH_TRANSPORT=${MCP_FETCH_TRANSPORT:-stdio}
+      - MCP_FETCH_COMMAND=${MCP_FETCH_COMMAND:-python}
+      - MCP_FETCH_ARGS=${MCP_FETCH_ARGS:--m,mcp_server_fetch,--ignore-robots-txt}
+      - MCP_FETCH_ALLOW_TOOLS=${MCP_FETCH_ALLOW_TOOLS:-fetch}
+      - MCP_FETCH_TRUST=${MCP_FETCH_TRUST:-low}
+      - MCP_FETCH_TTL_S=${MCP_FETCH_TTL_S:-300}
+      # fanout 并行调研的紧急闸（默认开启；预算闸在代码里）
+      - FANOUT_ENABLED=${FANOUT_ENABLED:-1}
+      # LLM 日预算（委员会与 fanout 共用）：默认 0 = 不限；想设线时在 .env 填数字
+      - LLM_DAILY_TOKEN_BUDGET=${LLM_DAILY_TOKEN_BUDGET:-0}
     restart: unless-stopped
     logging: *default-logging
 
@@ -70,6 +91,10 @@ services:
     # 不发布宿主端口：由 frontend(nginx) 在内部网络反代 /api
     environment:
       - SPRING_DATA_REDIS_HOST=redis
+      # CORS 白名单（2026-10-24 线上事故）：代码默认只有 localhost:5173，浏览器 POST
+      # 带 Origin 头一律 403 Invalid CORS request——GET 不带 Origin 页面看似正常，
+      # 极具迷惑性。域名/www/IP/本地开发四个 origin 与服务器保持一致。
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-https://stocktracker.com.cn,https://www.stocktracker.com.cn,http://120.27.226.47,http://localhost:5173}
       - SPRING_DATA_REDIS_PORT=6379
       - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/stockdb?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai
       - SPRING_DATASOURCE_USERNAME=root
@@ -80,6 +105,9 @@ services:
       - AUTH_REGISTRATION_ENABLED=${AUTH_REGISTRATION_ENABLED:-true}
       # 同花顺凭证加密密钥：不配则 THS 绑定功能不可用（fail-closed），其余功能不受影响
       - THS_AES_KEY=${THS_AES_KEY:-}
+      # 用户 LLM Key 的加密密钥（BYOK，2026-10-25）：不配则用户无法在个人中心保管
+      # 自己的 Key（界面明示），其余功能不受影响。⚠️ 换了它用户已存的 Key 要重输
+      - LLM_AES_KEY=${LLM_AES_KEY:-}
       # RSA 签名密钥走运行时挂载（镜像内不含密钥）
       # 必须带 file: 前缀：Spring 按 Resource 解析，裸路径会被当成类路径资源
       # （本地冒烟实测踩过：FileNotFoundException class path resource [run/secrets/app.pub]）

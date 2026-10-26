@@ -29,7 +29,13 @@ public interface MemoryEventRepository extends JpaRepository<MemoryEvent, Long> 
     List<MemoryEvent> findByKindAndIngestedAtGreaterThanEqualOrderByIngestedAtAsc(
             String kind, java.time.LocalDateTime since);
 
-    long countByUserIdAndSessionKey(Long userId, String sessionKey);
+    /**
+     * 巩固节奏的计量口径：只数对话事件（chat_user/chat_bot）。
+     * 工具结果（tool_result）与用量（usage）也是账本事件，但它们是"过程的噪音"——
+     * 一轮工具密集的对话能写 12+ 条，把它们算进节奏会把"每 8 条巩固一次"
+     * 退化成"每条消息都巩固一次"（2026-10-20 线上实测事故）。
+     */
+    long countByUserIdAndSessionKeyAndKindIn(Long userId, String sessionKey, List<String> kinds);
 
     /**
      * 最近出现过的会话键（排除当前会话），用于判断"上一段对话是否还没总结"。

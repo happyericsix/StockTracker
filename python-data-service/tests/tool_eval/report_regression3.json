@@ -1,0 +1,303 @@
+{
+  "generated_at": "2026-10-18T11:50:46.597716+00:00",
+  "arms": {
+    "with": {
+      "metrics": {
+        "cases": 16,
+        "selection_cases": 14,
+        "selection_ok": 13,
+        "selection_accuracy": 0.9286,
+        "tool_calls": 14,
+        "args_valid_rate": 1.0,
+        "semantic_cases": 2,
+        "args_semantic_rate": 1.0,
+        "spurious_calls": 0,
+        "cases_with_unsupported_claims": 0,
+        "unsupported_numbers_total": 0,
+        "unsupported_examples": []
+      },
+      "gate_failures": [],
+      "rows": [
+        {
+          "id": "quote_lookup",
+          "message": "贵州茅台现在多少钱？",
+          "picked": [
+            "get_quote"
+          ],
+          "expected": [
+            "get_quote",
+            "search_stock"
+          ],
+          "args_problems": [],
+          "semantic_problems": [],
+          "semantic_expected": false,
+          "no_tool_expected": false,
+          "ok": true,
+          "kind": "select"
+        },
+        {
+          "id": "trend_lookup",
+          "message": "600519 最近走势怎么样？",
+          "picked": [
+            "get_quote",
+            "get_indicators",
+            "get_risk_metrics",
+            "get_history"
+          ],
+          "expected": [
+            "get_history",
+            "get_indicators"
+          ],
+          "args_problems": [],
+          "semantic_problems": [],
+          "semantic_expected": false,
+          "no_tool_expected": false,
+          "ok": true,
+          "kind": "select"
+        },
+        {
+          "id": "strategy_request",
+          "message": "帮我做一个 20 日均线上穿 60 日买入的策略",
+          "picked": [
+            "search_stock",
+            "get_quote",
+            "get_indicators",
+            "get_risk_metrics"
+          ],
+          "expected": [
+            "validate_strategy",
+            "get_history",
+            "search_stock",
+            "get_indicators"
+          ],
+          "args_problems": [],
+          "semantic_problems": [],
+          "semantic_expected": false,
+          "no_tool_expected": false,
+          "ok": true,
+          "kind": "select"
+        },
+        {
+          "id": "memory_followup",
+          "message": "我上次说的止损是多少来着？",
+          "picked": [
+            "memory_search"
+          ],
+          "expected": [
+            "memory_search"
+          ],
+          "args_problems": [],
+          "semantic_problems": [],
+          "semantic_expected": false,
+          "no_tool_expected": false,
+          "ok": true,
+          "kind": "select"
+        },
+        {
+          "id": "risk_check",
+          "message": "帮我看看 600519 的风险大不大",
+          "picked": [
+            "get_risk_metrics",
+            "get_quote",
+            "get_indicators"
+          ],
+          "expected": [
+            "get_risk_metrics",
+            "get_history",
+            "get_indicators"
+          ],
+          "args_problems": [],
+          "semantic_problems": [],
+          "semantic_expected": false,
+          "no_tool_expected": false,
+          "ok": true,
+          "kind": "select"
+        },
+        {
+          "id": "model_reference",
+          "message": "你们的模型预测现在能用吗？",
+          "picked": [
+            "get_model_status"
+          ],
+          "expected": [
+            "get_model_status",
+            "get_model_consensus"
+          ],
+          "args_problems": [],
+          "semantic_problems": [],
+          "semantic_expected": false,
+          "no_tool_expected": false,
+          "ok": true,
+          "kind": "select"
+        },
+        {
+          "id": "news_market",
+          "message": "今天有什么消息？",
+          "picked": [
+            "get_news"
+          ],
+          "expected": [
+            "get_news"
+          ],
+          "args_problems": [],
+          "semantic_problems": [],
+          "semantic_expected": false,
+          "no_tool_expected": false,
+          "ok": true,
+          "kind": "select"
+        },
+        {
+          "id": "news_symbol",
+          "message": "贵州茅台最近有什么新闻吗？",
+          "picked": [
+            "get_stock_briefing"
+          ],
+          "expected": [
+            "get_news"
+          ],
+          "args_problems": [],
+          "semantic_problems": [],
+          "semantic_expected": false,
+          "no_tool_expected": false,
+          "ok": false,
+          "kind": "select"
+        },
+        {
+          "id": "news_reason",
+          "message": "宁德时代今天为什么跌？",
+          "picked": [
+            "get_quote",
+            "get_stock_briefing",
+            "search_news",
+            "get_news"
+          ],
+          "expected": [
+            "get_news"
+          ],
+          "args_problems": [],
+          "semantic_problems": [],
+          "semantic_expected": false,
+          "no_tool_expected": false,
+          "kind": "select",
+          "unsupported_numbers": [],
+          "audit_verdict": "clean",
+          "ok": true
+        },
+        {
+          "id": "financial_lookup",
+          "message": "茅台 2026 年中报的净利润是多少？",
+          "picked": [
+            "get_financial_abstract"
+          ],
+          "expected": [
+            "get_financial_abstract"
+          ],
+          "args_problems": [],
+          "semantic_problems": [],
+          "semantic_expected": false,
+          "no_tool_expected": false,
+          "ok": true,
+          "kind": "select"
+        },
+        {
+          "id": "quote_comparison",
+          "message": "对比一下贵州茅台和五粮液今天的表现",
+          "picked": [
+            "get_quotes"
+          ],
+          "expected": [
+            "get_quotes",
+            "get_quote"
+          ],
+          "args_problems": [],
+          "semantic_problems": [],
+          "semantic_expected": false,
+          "no_tool_expected": false,
+          "ok": true,
+          "kind": "select"
+        },
+        {
+          "id": "unknown_stock_should_be_resolved",
+          "message": "帮我查一下双汇发展现在多少钱",
+          "picked": [
+            "search_stock"
+          ],
+          "expected": [
+            "get_quote",
+            "search_stock"
+          ],
+          "args_problems": [],
+          "semantic_problems": [],
+          "semantic_expected": false,
+          "no_tool_expected": false,
+          "ok": true,
+          "kind": "select"
+        },
+        {
+          "id": "greeting_should_not_call_tools",
+          "message": "你好呀",
+          "picked": [],
+          "expected": [],
+          "args_problems": [],
+          "semantic_problems": [],
+          "semantic_expected": false,
+          "no_tool_expected": true,
+          "ok": true,
+          "kind": "abstain"
+        },
+        {
+          "id": "chitchat_should_not_call_tools",
+          "message": "谢谢，你辛苦了",
+          "picked": [],
+          "expected": [],
+          "args_problems": [],
+          "semantic_problems": [],
+          "semantic_expected": false,
+          "no_tool_expected": true,
+          "ok": true,
+          "kind": "abstain"
+        },
+        {
+          "id": "history_with_explicit_days",
+          "message": "给我 600519 最近 30 天的日线",
+          "picked": [
+            "get_history"
+          ],
+          "expected": [
+            "get_history"
+          ],
+          "args_problems": [],
+          "semantic_problems": [],
+          "semantic_expected": true,
+          "no_tool_expected": false,
+          "ok": true,
+          "kind": "select"
+        },
+        {
+          "id": "strategy_with_full_parameters",
+          "message": "帮我做个策略：贵州茅台，20 日上穿 60 日买入，止损 8%，止盈 15%，跟踪止盈 10%，初始资金 20 万，半仓",
+          "picked": [
+            "search_stock",
+            "get_quote",
+            "get_indicators",
+            "get_risk_metrics",
+            "validate_strategy",
+            "backtest_strategy"
+          ],
+          "expected": [
+            "validate_strategy",
+            "finalize_strategy"
+          ],
+          "args_problems": [],
+          "semantic_problems": [],
+          "semantic_expected": true,
+          "no_tool_expected": false,
+          "kind": "select",
+          "unsupported_numbers": [],
+          "audit_verdict": "clean",
+          "ok": true
+        }
+      ]
+    }
+  }
+}

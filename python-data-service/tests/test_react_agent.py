@@ -15,6 +15,8 @@ VALID_STRATEGY = {
     "schema_version": "1.0",
     "name": "MA cross",
     "symbol": "600519",
+    # 显式半仓：position 缺省 = 满仓，会被满仓门禁（test_full_position_gate）打回
+    "position": {"type": "percent", "size_pct": 50},
     "entry": {
         "logic": "all",
         "conditions": [{"type": "ma_cross", "fast": 20, "slow": 60, "direction": "above"}],
@@ -57,7 +59,8 @@ def fake_execute_tool(name, args):
     return tc.ok({"ok": True})
 
 
-def _run_with_completion(completion, user_id="u1", message="做一个20日上穿60日买入", history=None):
+def _run_with_completion(completion, user_id="u1", message="做一个20日上穿60日买入", history=None,
+                         epoch=None, on_delta=None):
     original = ra.llm_service.chat_completion
     original_execute_tool = ra.execute_tool
     original_queue = ra._queue_tool_log
@@ -66,7 +69,7 @@ def _run_with_completion(completion, user_id="u1", message="做一个20日上穿
     # 工具结果入账会发 HTTP：单测里不联网，也不让它异步写日志
     ra._queue_tool_log = lambda *args, **kwargs: None
     try:
-        return ra.run_agent(user_id, message, history)
+        return ra.run_agent(user_id, message, history, epoch=epoch, on_delta=on_delta)
     finally:
         ra.llm_service.chat_completion = original
         ra.execute_tool = original_execute_tool
@@ -74,7 +77,7 @@ def _run_with_completion(completion, user_id="u1", message="做一个20日上穿
 
 
 def fake_completion(messages, tools=None, temperature=0.2, max_tokens=1200):
-    return {"message": {"role": "assistant", "content": "最终回复\n```json\n{\"schema_version\":\"1.0\",\"name\":\"ma\",\"symbol\":\"600519\",\"entry\":{\"logic\":\"all\",\"conditions\":[{\"type\":\"ma_cross\",\"fast\":20,\"slow\":60,\"direction\":\"above\"}]},\"exit\":{\"logic\":\"any\",\"conditions\":[{\"type\":\"stop_loss_pct\",\"value\":-8}]}}\n```"}}
+    return {"message": {"role": "assistant", "content": "最终回复\n```json\n{\"schema_version\":\"1.0\",\"name\":\"ma\",\"symbol\":\"600519\",\"position\":{\"type\":\"percent\",\"size_pct\":50},\"entry\":{\"logic\":\"all\",\"conditions\":[{\"type\":\"ma_cross\",\"fast\":20,\"slow\":60,\"direction\":\"above\"}]},\"exit\":{\"logic\":\"any\",\"conditions\":[{\"type\":\"stop_loss_pct\",\"value\":-8}]}}\n```"}}
 
 
 def _tool_call(name, args, call_id="call_1"):
@@ -422,9 +425,11 @@ def test_model_backtest_is_not_repeated_by_the_loop():
     def fake(messages, tools=None, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
-            # 第一步：模型自己发起回测（参数是"精简"的，没有 initial_capital 等默认值）
+            # 第一步：模型自己发起回测（参数是"精简"的，没有 initial_capital 等默认值；
+            # position 与第二步的 VALID_STRATEGY 一致，归一化后才算同一条缓存键）
             return _tool_call("backtest_strategy", {"strategy_json": {
                 "schema_version": "1.0", "name": "MA cross", "symbol": "600519",
+                "position": {"type": "percent", "size_pct": 50},
                 "entry": {"logic": "all", "conditions": [
                     {"type": "ma_cross", "fast": 20, "slow": 60, "direction": "above"}]},
                 "exit": {"logic": "any", "conditions": [{"type": "stop_loss_pct", "value": -8}]},
@@ -535,6 +540,129 @@ def test_memory_failure_degrades_to_time_anchor_only():
 
     assert out["replies"] == ["好"]
     assert "<memory" in seen["system"]  # 时间锚点仍然在
+
+
+def test_superseded_epoch_exits_at_step_boundary():
+    """连发中断（2026-10-20）：轮次落后时在步骤边界退出 —— 模型一次都不再被调用。
+
+    用户连发第二条消息后，Java 会取消旧线程（断开 HTTP），但 to_thread 里的
+    run_agent 不会随之停止；靠 _EPOCHS 轮次登记，旧轮次自己发现落后就退出，
+    省下剩余的模型调用与工具执行。
+    """
+    calls = []
+
+    def completion(messages, tools=None, temperature=0.2, max_tokens=1200):
+        calls.append(1)
+        return fake_completion(messages, tools)
+
+    ra.note_epoch("u9", 2)  # 用户最新已受理轮次是 2；本轮是落后的 1
+    try:
+        out = _run_with_completion(completion, user_id="u9", message="随便问点什么", epoch=1)
+    finally:
+        ra._EPOCHS.pop("u9", None)
+
+    assert out.get("superseded") is True
+    assert out["replies"] == []
+    assert out["strategy_json"] is None
+    assert calls == [], "轮次已落后，不应再发生任何模型调用"
+
+
+def test_on_delta_forwards_stream_deltas():
+    """流式输出（2026-10-20）：带 on_delta 时走 chat_completion_stream，文本增量逐段回调；
+    返回值形状与非流式完全一致——调用方（app.py 的 stream 端点）逻辑不用分叉。"""
+    deltas = []
+
+    def fake_stream(messages, tools=None, temperature=0.2, max_tokens=1200,
+                    on_delta=None, **kwargs):
+        on_delta("最终")
+        on_delta("回复")
+        return fake_completion(messages, tools)
+
+    original = ra.llm_service.chat_completion_stream
+    ra.llm_service.chat_completion_stream = fake_stream
+    try:
+        out = _run_with_completion(fake_completion, user_id="u1", message="问点啥",
+                                   on_delta=deltas.append)
+    finally:
+        ra.llm_service.chat_completion_stream = original
+
+    assert deltas == ["最终", "回复"]
+    assert out["strategy_json"] is not None, "返回值照常完整（流式不影响结果形状）"
+    assert isinstance(out["backtest"], dict)
+
+
+# ==================== 样本外验证（多时段矩阵）接进交付汇报 ====================
+# 2026-10-20：此前设计流程只做一次整段回测，"换一段行情还成不成立"从未到达用户。
+# 矩阵结论必须随罐装汇报一起交付（模型的正文会被罐装汇报替换，不接就永远看不到）。
+
+MATRIX = {
+    "valid": True, "symbols": ["600519"], "segments_requested": 3,
+    "cells_total": 3, "cells_valid": 3, "cells_unaffordable": 0, "cells_warmup_only": 0,
+    "beat_buy_and_hold": 2, "avg_excess_pct": 1.5, "avg_total_return_pct": 4.2,
+    "worst_return_pct": -3.1, "best_return_pct": 9.8, "total_fees": 620.5,
+    "avg_cost_pct_of_capital": 0.62, "per_symbol": [], "note": "测试替身数据",
+}
+
+
+def _run_with_tools(tool_fn, message="做一个20日上穿60日买入"):
+    """_run_with_completion 的自定义工具版：替换 execute_tool 而不是用默认替身。"""
+    original = ra.llm_service.chat_completion
+    original_execute_tool = ra.execute_tool
+    original_queue = ra._queue_tool_log
+    ra.llm_service.chat_completion = fake_completion
+    ra.execute_tool = tool_fn
+    ra._queue_tool_log = lambda *args, **kwargs: None
+    try:
+        return ra.run_agent("u1", message, [])
+    finally:
+        ra.llm_service.chat_completion = original
+        ra.execute_tool = original_execute_tool
+        ra._queue_tool_log = original_queue
+
+
+def test_matrix_result_is_surfaced_in_strategy_reply():
+    def matrix_tool(name, args):
+        if name == "backtest_matrix":
+            return tc.ok(dict(MATRIX))
+        return fake_execute_tool(name, args)
+
+    out = _run_with_tools(matrix_tool)
+
+    assert out["matrix"]["beat_buy_and_hold"] == 2
+    joined = "\n".join(out["replies"])
+    assert "样本外验证" in joined
+    assert "2/3 个有效时段跑赢买入持有" in joined
+    assert "时效性" in joined
+
+
+def test_matrix_no_sample_cells_are_disclosed_not_flattened():
+    """cells_unaffordable / cells_warmup_only 是"没样本"，汇报里必须点名——
+    它们和 0.00% 在表上长得一模一样，不点名就会被读成"表现平平"。"""
+    sparse = dict(MATRIX, cells_valid=2, cells_unaffordable=1, cells_warmup_only=0)
+
+    def matrix_tool(name, args):
+        if name == "backtest_matrix":
+            return tc.ok(sparse)
+        return fake_execute_tool(name, args)
+
+    out = _run_with_tools(matrix_tool)
+    joined = "\n".join(out["replies"])
+    assert "1 个格子没有样本" in joined
+
+
+def test_matrix_failure_does_not_block_delivery():
+    """矩阵失败 fail-open：策略照常交付（单次回测仍成立），只是少样本外验证那块。"""
+
+    def no_matrix(name, args):
+        if name == "backtest_matrix":
+            return tc.ok({"valid": False, "error": "数据不足"})
+        return fake_execute_tool(name, args)
+
+    out = _run_with_tools(no_matrix)
+
+    assert isinstance(out["strategy_json"], dict)
+    assert out["matrix"] is None
+    assert "样本外验证" not in "\n".join(out["replies"])
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ import Empty from '../components/ui/empty.vue'
 import Skeleton from '../components/ui/skeleton.vue'
 import {
   searchNews, getStockEvents, refreshNews, getEventBody,
-  getMarketRead, getNewsTopics, getTopicDetail, countNewsSince,
+  getMarketRead, getNewsTopics, getTopicDetail, countNewsSince, getHotRank,
 } from '../api/news.js'
 import { getFavorites, getFavoritesBrief } from '../api/stock.js'
 
@@ -28,6 +28,25 @@ const form = reactive({ keyword: '', symbol: '', types: [], days: 7 })
 const mode = ref('market')
 const activeSymbol = ref('')
 const searchOpen = ref(false)
+
+// ---- 热榜（东财个股人气榜，2026-10-16）：瞬态视图，5 分钟粒度足够，不做轮询 ----
+const hotRank = ref([])
+const hotError = ref('')
+const selectHot = async () => {
+  if (mode.value === 'hot') return
+  stopAnalysisPolling()
+  mode.value = 'hot'
+  activeSymbol.value = ''
+  if (hotRank.value.length) return       // 已有数据不重复拉（热榜 5 分钟缓存，回切无需刷新）
+  hotError.value = ''
+  try {
+    const res = await getHotRank(20)
+    hotRank.value = Array.isArray(res.data?.items) ? res.data.items : []
+    if (!hotRank.value.length) hotError.value = '热榜暂不可用，稍后再试'
+  } catch {
+    hotError.value = '热榜暂不可用，稍后再试'
+  }
+}
 
 const CHANNELS = {
   all: { label: '全部', types: [2, 4], days: 3 },
@@ -87,14 +106,21 @@ const closeReader = () => { readerEvent.value = null; readerRelated.value = [] }
 
 const bodyText = (e) => bodies[e.id] || e.body || cleanWireContent(e.content)
 const cleanWireContent = (raw) => {
-  if (!raw || raw.length < 30) return ''
+  if (!raw || raw.length < 10) return ''   // 10 字：短讯/龙虎榜解读也是正文（30 会把它们挡成"无正文"）
   let t = raw
   const b = t.match(/^【[^】]{4,}】/)
   if (b) t = t.slice(b[0].length)
   return t.replace(/\r/g, '').replace(/([^\n])\n([^\n])/g, '$1$2').replace(/ {2,}/g, ' ').trim().length >= 30 ? t.trim() : ''
 }
 const bodyState = (e) => (bodyLoading[e.id] ? 'loading' : bodyErrors[e.id] ? 'error' : bodyText(e) ? 'ok' : 'none')
-const interpretationOf = (e) => (!e.analyzed || !e.plainSummary) ? '' : e.plainSummary
+// 预览三段回退：AI 解读 → 原文摘要 → 空。解读没跑到/没跑的条目也要有一行内容可读，
+// 否则列表里只剩标题，看起来像"看不到内容"（2026-10-16 用户反馈）
+const interpretationOf = (e) => {
+  if (e.analyzed && e.plainSummary) return e.plainSummary
+  const raw = String(e.content || '').trim()
+  if (raw.length >= 10) return raw.length > 110 ? raw.slice(0, 110) + '…' : raw
+  return ''
+}
 const prefetchBodies = (items) => { items.filter((e) => e.url && !bodyText(e) && !bodyErrors[e.id] && !bodies[e.id]).slice(0, 3).forEach((e) => { getEventBody(e.id).then((r) => { bodies[e.id] = r.data }).catch(() => {}) }) }
 
 const CATEGORY_ORDER = ['公司动态', '业绩财务', '行业关联', '宏观经济', '政策监管', '地缘政治', '舆论热度', '市场快讯']
@@ -106,6 +132,7 @@ const groupedResults = computed(() => {
   return groups
 })
 const displaySections = computed(() => {
+  if (mode.value === 'hot') return []   // 热榜模式下新闻列表让位（热榜自己就是内容）
   if (!results.value.length) return []
   if (mode.value === 'search') return [{ key: 'flat', category: '', items: results.value }]
   return groupedResults.value.map((g) => ({ key: g.category, category: g.category, items: g.items }))
@@ -200,7 +227,7 @@ onUnmounted(() => { stopAnalysisPolling(); if (newCountTimer) clearInterval(newC
     </div>
 
     <!-- 今日信息面 -->
-    <section v-if="marketRead" class="mb-4 rounded-xl border border-border bg-surface p-4">
+    <section v-if="marketRead && mode !== 'hot'" class="mb-4 rounded-xl border border-border bg-surface p-4">
       <div class="mb-2 flex items-baseline justify-between">
         <h2 class="text-[14px] font-semibold text-ink">今日信息面</h2>
         <span class="num text-[12px] text-ink-3">{{ marketReadAt }}</span>
@@ -218,7 +245,7 @@ onUnmounted(() => { stopAnalysisPolling(); if (newCountTimer) clearInterval(newC
     </section>
 
     <!-- 要闻专题 -->
-    <section v-if="visibleTopics.length" class="mb-4 rounded-xl border border-border bg-surface p-4">
+    <section v-if="visibleTopics.length && mode !== 'hot'" class="mb-4 rounded-xl border border-border bg-surface p-4">
       <h2 class="mb-1 text-[14px] font-semibold text-ink">要闻专题</h2>
       <article v-for="topic in visibleTopics" :key="topic.id" class="border-b border-border py-2.5 last:border-b-0">
         <button type="button" class="flex w-full items-start justify-between gap-3 text-start" @click="toggleTopic(topic)">
@@ -283,7 +310,42 @@ onUnmounted(() => { stopAnalysisPolling(); if (newCountTimer) clearInterval(newC
         :class="mode === 'search' ? 'border-accent bg-accent text-on-accent' : 'border-border bg-surface text-ink-2 hover:bg-surface-2 hover:text-ink'"
         @click="toggleSearch"
       >搜索</button>
+      <button
+        type="button"
+        class="h-[30px] rounded-full border px-3.5 text-[13px] transition-colors"
+        :class="mode === 'hot' ? 'border-accent bg-accent text-on-accent' : 'border-border bg-surface text-ink-2 hover:bg-surface-2 hover:text-ink'"
+        @click="selectHot"
+      >热榜</button>
     </div>
+
+    <!-- 热榜（东财个股人气榜）：点一行直达该股资讯 -->
+    <section v-if="mode === 'hot'" class="rounded-xl border border-border bg-surface p-4">
+      <div class="mb-1 flex items-baseline justify-between">
+        <h2 class="text-[14px] font-semibold text-ink">人气榜</h2>
+        <span class="text-[11.5px] text-ink-3">市场关注度排名，非买卖建议 · 5 分钟更新</span>
+      </div>
+      <p v-if="hotError" class="py-4 text-[13px] text-ink-2">{{ hotError }}</p>
+      <ul v-else>
+        <li
+          v-for="item in hotRank"
+          :key="item.symbol"
+          class="flex cursor-pointer items-center gap-3 border-b border-border py-2.5 last:border-b-0 hover:bg-surface-2/60"
+          @click="selectStock(item.symbol)"
+        >
+          <span class="num w-7 shrink-0 text-center text-[13px] font-semibold"
+                :class="item.rank <= 3 ? 'text-accent' : 'text-ink-3'">{{ item.rank }}</span>
+          <span class="min-w-0 flex-1 truncate text-[13.5px] text-ink">
+            {{ item.name }}
+            <span class="num ml-1 text-[11.5px] text-ink-3">{{ String(item.symbol || '').replace(/^(SH|SZ|BJ)/, '') }}</span>
+          </span>
+          <span class="num shrink-0 text-[13px] text-ink-2">{{ item.price }}</span>
+          <span
+            class="num w-[64px] shrink-0 text-right text-[13px] font-medium"
+            :class="item.change_pct > 0 ? 'text-up' : item.change_pct < 0 ? 'text-down' : 'text-ink-3'"
+          >{{ item.change_pct > 0 ? '+' : '' }}{{ item.change_pct }}%</span>
+        </li>
+      </ul>
+    </section>
 
     <!-- 频道 -->
     <div v-if="mode === 'market'" class="mb-3 flex flex-wrap gap-1">
@@ -291,7 +353,7 @@ onUnmounted(() => { stopAnalysisPolling(); if (newCountTimer) clearInterval(newC
         v-for="(ch, key) in CHANNELS"
         :key="key"
         type="button"
-        class="h-[26px] rounded-full px-3 text-[12.5px] transition-colors"
+        class="h-[26px] rounded-full px-3 text-[12.5px] transition-colors max-sm:h-[34px]"
         :class="channel === key ? 'bg-accent text-on-accent' : 'text-ink-3 hover:bg-surface-2 hover:text-ink-2'"
         @click="selectChannel(key)"
       >{{ ch.label }}</button>
@@ -336,11 +398,11 @@ onUnmounted(() => { stopAnalysisPolling(); if (newCountTimer) clearInterval(newC
       </div>
     </div>
 
-    <Empty v-else-if="!loading && !error && searched && results.length === 0" :title="emptyHint">
+    <Empty v-else-if="mode !== 'hot' && !loading && !error && searched && results.length === 0" :title="emptyHint">
       <template #icon><Radar :size="20" :stroke-width="1.5" /></template>
     </Empty>
 
-    <!-- 新闻列表 -->
+    <!-- 新闻列表（displaySections 在热榜模式下为空，列表自然让位） -->
     <section v-for="sec in displaySections" :key="sec.key">
       <h2 v-if="sec.category" class="mt-4 mb-1 flex items-baseline gap-2 text-[12px] font-semibold text-ink-2">
         {{ sec.category }} <span class="num font-normal text-ink-3">{{ sec.items.length }}</span>

@@ -1,6 +1,6 @@
 # Stock Data Service (akshare)
 
-为 stock-tracker Java 后端提供数据服务的 Python 微服务，基于 [akshare](https://github.com/akfamily/akshare) 获取 A 股/港股/美股行情数据。
+为 StockTracker Java 后端提供数据服务的 Python 微服务，基于 [akshare](https://github.com/akfamily/akshare) 获取 A 股/港股/美股行情数据。
 
 ## 快速启动
 
@@ -51,7 +51,7 @@ python-data:
 协议实现分两部分：
 
 - **扫码登录 + 自选股解析** ← 社区开源项目 [djj45/thspypc](https://github.com/djj45/thspypc)，
-  源码副本在 `stock-tracker/vendor/thspypc_src/`（含一处本地补丁，见 `vendor/README.md`）
+  源码副本在 `StockTracker/vendor/thspypc_src/`（含一处本地补丁，见 `vendor/README.md`）
 - **三步鉴权 + 自选股取数** ← 本项目实测（2026-09-12 验证通过），代码在 `ths_client.py`
 
 | 文件 | 作用 |

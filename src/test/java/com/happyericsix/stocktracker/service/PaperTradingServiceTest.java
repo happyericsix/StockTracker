@@ -2,6 +2,7 @@ package com.happyericsix.stocktracker.service;
 
 import com.happyericsix.stocktracker.client.StrategyClient;
 import com.happyericsix.stocktracker.dto.MemoryFactRequest;
+import com.happyericsix.stocktracker.dto.MemoryLessonRequest;
 import com.happyericsix.stocktracker.dto.PaperAccountResponse;
 import com.happyericsix.stocktracker.dto.StockHistoryResponse;
 import com.happyericsix.stocktracker.entity.PaperAccount;
@@ -350,7 +351,7 @@ class PaperTradingServiceTest {
 
         paperTradingService.evaluateDaily();
 
-        verify(strategyClient, never()).agentDecide(anyString(), anyString(), anyString(), any(), any());
+        verify(strategyClient, never()).agentDecide(anyString(), anyString(), anyString(), any(), any(), any(), any(), any(), any(), any());
         verify(strategyClient, times(1)).evaluateBar(eq(configJson), eq("600519"), anyString(), any());
         // 估值行落库时按**策略声明的模式**标注（它不是一次决策，但必须落在同一段曲线上）
         ArgumentCaptor<PaperTradeTrace> captor = ArgumentCaptor.forClass(PaperTradeTrace.class);
@@ -448,14 +449,14 @@ class PaperTradingServiceTest {
                         + "\"authorization\":{\"intraday_execution\":true,\"allow_open\":true,"
                         + "\"allow_close\":true,\"max_position_pct\":1.0}}");
         when(strategyClient.agentDecide(eq(configJson), eq("601988"), anyString(), isNull(), isNull(),
-                any(), any(), any()))
+                any(), any(), any(), any(), any()))
                 .thenReturn(result);
 
         PaperAccountResponse response = paperTradingService.startPaper("alice", 10L);
 
         assertEquals("buy", response.getLastSignal());
         verify(strategyClient, times(1)).agentDecide(eq(configJson), eq("601988"), anyString(),
-                isNull(), isNull(), any(), any(), any());
+                isNull(), isNull(), any(), any(), any(), any(), any());
         // 盘中路径一次都不许走：它没有任何授权时只会留一条 awaiting_authorization
         verify(strategyClient, never()).evaluateBarRealtime(anyString(), anyString(), any());
         // 第一份授权当场落库 —— 盘中规则执行从启动那一刻起就有边界可依
@@ -493,7 +494,7 @@ class PaperTradingServiceTest {
 
         when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
         when(paperTraceService.listRecent(eq(10L), anyInt())).thenReturn(List.of(committeeTrace));
-        when(strategyClient.weeklyReflection(any())).thenReturn(mapper.readTree(
+        when(strategyClient.weeklyReflection(any(), any())).thenReturn(mapper.readTree(
                 "{\"ok\":true,\"lessons\":[{\"symptom\":\"追高买入连续方向错\","
                         + "\"reusable_rule\":\"首仓不超过现金 50%，等回踩确认\","
                         + "\"confidence\":0.7}],\"warnings\":[]}"));
@@ -531,8 +532,137 @@ class PaperTradingServiceTest {
 
         paperTradingService.runWeeklyReview();
 
-        verify(strategyClient, never()).weeklyReflection(any());
+        verify(strategyClient, never()).weeklyReflection(any(), any());
         verify(memoryLessonService, never()).saveLessons(any());
+    }
+
+    // ==================== 质疑回路（方案一 2026-10-16：旧教训的喂入与处置） ====================
+
+    /** 现存旧教训的最小形状（prior_lessons 的原料，字段名与 MemoryLessonService.toMap 一致）。 */
+    private static Map<String, Object> priorLesson(long id, String symptom, String rule, String recordedAt) {
+        return Map.of("id", id, "symptom", symptom, "reusableRule", rule,
+                "status", "active", "occurrences", 1L, "recordedAt", recordedAt);
+    }
+
+    /**
+     * 反思材料必须带上本策略的旧教训；响应里的处置只对白名单内的 id 生效：
+     * 修订走 reviseLesson（provenance=agent，落 pending）、停用走 retire，
+     * 幻觉 id（本次没喂过的）一条都不许碰。
+     */
+    @Test
+    void weeklyReflectionChallengesPriorLessonsWithWhitelistedDispositions() throws Exception {
+        User user = User.builder().id(1L).username("alice").password("x").email("a@e.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("Committee").symbol("601988")
+                .configJson("{\"initial_capital\":10000.0}")
+                .user(user).paperEnabled(true).decisionMode("agent").build();
+        PaperTradeTrace committeeTrace = PaperTradeTrace.builder()
+                .strategy(strategy).user(user)
+                .tradeDate(java.time.LocalDate.now())
+                .settlementKind(ExecutionContract.SETTLEMENT_DAILY)
+                .decisionMode("agent").decision("buy").signal("buy")
+                .snapshotJson("{\"committee\":{\"roles\":[{\"role\":\"bear\",\"label\":\"空头研究员\","
+                        + "\"excerpt\":\"战绩差要求更硬证据\"}],\"warnings\":[]}}")
+                .build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(paperTraceService.listRecent(eq(10L), anyInt())).thenReturn(List.of(committeeTrace));
+        when(memoryLessonService.searchLessons(eq(1L), anyString(), eq("weekly_reflection"),
+                eq("strategy:10"), anyInt())).thenReturn(List.of(
+                priorLesson(41L, "追高被套", "首仓不超过现金 50%", "2026-10-01T10:00:00"),
+                priorLesson(43L, "跌破 MA5 就跑", "破线即清仓", "2026-10-08T10:00:00")));
+        // 体检口径：样本不足不退 —— 处置路径的 retire 只能来自反思响应
+        when(decisionQualityService.agentOutcomeSince(eq(strategy), any()))
+                .thenReturn(Map.of("evaluated", 0));
+        when(strategyClient.weeklyReflection(any(), any())).thenReturn(mapper.readTree(
+                "{\"ok\":true,\"lessons\":[],"
+                        + "\"revisions\":[{\"lesson_id\":41,\"reason\":\"回踩确认后加仓连续做对，50% 过保守\","
+                        + "\"reusable_rule\":\"首仓不超过现金 60%\",\"confidence\":0.7},"
+                        + "{\"lesson_id\":99,\"reason\":\"幻觉 id\"}],"
+                        + "\"retirements\":[{\"lesson_id\":43,\"reason\":\"趋势行情里反复打脸\"}],"
+                        + "\"warnings\":[]}"));
+
+        paperTradingService.runWeeklyReview();
+
+        // 喂入材料必须带旧教训（id 白名单的原料），且只带本策略 scope 的
+        ArgumentCaptor<JsonNode> payloadCaptor = ArgumentCaptor.forClass(JsonNode.class);
+        verify(strategyClient).weeklyReflection(payloadCaptor.capture(), any());
+        JsonNode prior = payloadCaptor.getValue().path("prior_lessons");
+        assertTrue(prior.isArray() && prior.size() == 2, "prior_lessons 必须带上本策略的旧教训");
+        assertEquals(41L, prior.get(0).path("id").asLong());
+        assertEquals("首仓不超过现金 50%", prior.get(0).path("reusable_rule").asText());
+
+        // 白名单内的修订：provenance=agent（落 pending，过人这一关）
+        ArgumentCaptor<MemoryLessonRequest> patchCaptor =
+                ArgumentCaptor.forClass(MemoryLessonRequest.class);
+        verify(memoryLessonService).reviseLesson(eq(1L), eq(41L), patchCaptor.capture(), eq("agent"));
+        assertEquals("首仓不超过现金 60%", patchCaptor.getValue().getReusableRule());
+        // 白名单外的 id（99，本次从未喂入）：一条都不许碰
+        verify(memoryLessonService, never()).reviseLesson(eq(1L), eq(99L), any(), anyString());
+        // 白名单内的停用：直接生效（与胜率自动退役同先例）
+        verify(memoryLessonService).retire(1L, 43L);
+    }
+
+    /**
+     * 教训体检（胜率退役）必须按策略 scope 检索——不过滤时 A 策略的教训
+     * 会被 B 策略的战绩误杀（2026-10-16 修复）。
+     */
+    @Test
+    void lessonDemoteHealthCheckUsesTheStrategyScope() throws Exception {
+        User user = User.builder().id(1L).username("alice").password("x").email("a@e.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("Committee").symbol("601988")
+                .configJson("{\"initial_capital\":10000.0}")
+                .user(user).paperEnabled(true).decisionMode("agent").build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        // 本周没有任何痕迹：反思早退，但体检在门控之前已经跑过
+        when(paperTraceService.listRecent(eq(10L), anyInt())).thenReturn(List.of());
+
+        paperTradingService.runWeeklyReview();
+
+        verify(memoryLessonService).searchLessons(eq(1L), anyString(), eq("weekly_reflection"),
+                eq("strategy:10"), eq(5));
+    }
+
+    /**
+     * 矛盾指令（A-2）：LLM 对同一条教训同时输出"修订"和"停用"时，停用优先——
+     * 先改后停会让 retire 只翻旧行 status，新 pending 版本照活，证伪意图落空。
+     */
+    @Test
+    void retirementWinsOverRevisionForTheSameLesson() throws Exception {
+        User user = User.builder().id(1L).username("alice").password("x").email("a@e.com").build();
+        Strategy strategy = Strategy.builder()
+                .id(10L).name("Committee").symbol("601988")
+                .configJson("{\"initial_capital\":10000.0}")
+                .user(user).paperEnabled(true).decisionMode("agent").build();
+        PaperTradeTrace committeeTrace = PaperTradeTrace.builder()
+                .strategy(strategy).user(user)
+                .tradeDate(java.time.LocalDate.now())
+                .settlementKind(ExecutionContract.SETTLEMENT_DAILY)
+                .decisionMode("agent").decision("buy").signal("buy")
+                .snapshotJson("{\"committee\":{\"roles\":[{\"role\":\"bear\",\"label\":\"空头研究员\","
+                        + "\"excerpt\":\"战绩差\"}],\"warnings\":[]}}")
+                .build();
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(paperTraceService.listRecent(eq(10L), anyInt())).thenReturn(List.of(committeeTrace));
+        when(memoryLessonService.searchLessons(eq(1L), anyString(), eq("weekly_reflection"),
+                eq("strategy:10"), anyInt())).thenReturn(List.of(
+                priorLesson(41L, "追高被套", "首仓不超过现金 50%", "2026-10-01T10:00:00")));
+        when(decisionQualityService.agentOutcomeSince(eq(strategy), any()))
+                .thenReturn(Map.of("evaluated", 0));
+        when(strategyClient.weeklyReflection(any(), any())).thenReturn(mapper.readTree(
+                "{\"ok\":true,\"lessons\":[],"
+                        + "\"revisions\":[{\"lesson_id\":41,\"reusable_rule\":\"改成 60%\"}],"
+                        + "\"retirements\":[{\"lesson_id\":41,\"reason\":\"已被本周材料证伪\"}],"
+                        + "\"warnings\":[]}"));
+
+        paperTradingService.runWeeklyReview();
+
+        // 停用优先：修订被丢弃，教训整体退场
+        verify(memoryLessonService, never()).reviseLesson(any(), any(), any(), anyString());
+        verify(memoryLessonService).retire(1L, 41L);
     }
 
     // ==================== 经验回流（P4：委员会先读自己的病历） ====================
@@ -584,7 +714,7 @@ class PaperTradingServiceTest {
                         + "\"allow_close\":true,\"max_position_pct\":1.0}}");
         when(strategyClient.agentDecide(eq(configJson), eq("601988"), anyString(), isNull(),
                 isNull(), isNull(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any()))
+                org.mockito.ArgumentMatchers.any(), any(), any()))
                 .thenReturn(result);
 
         paperTradingService.startPaper("alice", 10L);
@@ -593,7 +723,7 @@ class PaperTradingServiceTest {
         ArgumentCaptor<JsonNode> portfolioCaptor = ArgumentCaptor.forClass(JsonNode.class);
         verify(strategyClient, times(1)).agentDecide(eq(configJson), eq("601988"), anyString(),
                 isNull(), isNull(), isNull(), experienceCaptor.capture(),
-                portfolioCaptor.capture());
+                portfolioCaptor.capture(), any(), any());
         assertEquals(25.0, experienceCaptor.getValue().path("winRatePct").asDouble(), 0.001);
         assertEquals(4, experienceCaptor.getValue().path("evaluatedTrades").asInt());
         // 组合上下文（P5）同一趟必须带上：委员会得知道自己管着多大集中度
@@ -640,20 +770,20 @@ class PaperTradingServiceTest {
                 "{\"signal\":\"hold\",\"matched_conditions\":[],\"price\":6.73,"
                         + "\"skip_reason\":\"agent_no_new_information\"}");
         when(strategyClient.agentDecide(eq(configJson), eq("601988"), anyString(), isNull(), isNull(),
-                any(), any(), any()))
+                any(), any(), any(), any(), any()))
                 .thenReturn(decision);
 
         paperTradingService.retryFailedDailySettlements(true);
 
         // 失败的那条被补跑（问了一次委员会），成功过的那条一次都没问
         verify(strategyClient, times(1)).agentDecide(eq(configJson), eq("601988"), anyString(),
-                isNull(), isNull(), any(), any(), any());
-        verify(strategyClient, never()).agentDecide(anyString(), eq("600519"), anyString(), any(), any());
+                isNull(), isNull(), any(), any(), any(), any(), any());
+        verify(strategyClient, never()).agentDecide(anyString(), eq("600519"), anyString(), any(), any(), any(), any(), any(), any(), any());
     }
 
     /**
      * 15:30 首轮的 no_bar 是**中间态**（日线源当天的 bar 常在 15:30 之后才发布），
-     * 报告必须压住不发；只有当天最后一次尝试（17:10 重试 / 手动补跑）才把结论
+     * 报告必须压住不发；只有当天最后一次尝试（20:10 重试 / 手动补跑）才把结论
      * 说出来 —— 而且终轮仍失败时说的是**系统告警**（结算未完成、曲线缺格），
      * 不是复盘日报（那等于把丧事当喜办）。2026-10-09 事故：首轮就把
      * "这一天没有 K 线"推给了用户，而 bar 在 17:10 之后才发布、重试已经停了。
@@ -678,7 +808,7 @@ class PaperTradingServiceTest {
                 "{\"signal\":\"hold\",\"bar_date_missing\":true,\"skip_reason\":\"no_bar\",\"price\":null}");
         // 持仓账户的 position 非空（与既有重试用例的空仓不同），第 4 参用 any()
         when(strategyClient.agentDecide(eq(configJson), eq("601988"), anyString(), any(), isNull(),
-                any(), any(), any()))
+                any(), any(), any(), any(), any()))
                 .thenReturn(noBar);
 
         paperTradingService.evaluateDaily();
@@ -686,7 +816,7 @@ class PaperTradingServiceTest {
         verify(messageService, never()).saveReport(any(), anyString(), anyString(), any(), anyString());
 
         paperTradingService.retryFailedDailySettlements(true);
-        // 终轮（17:10 / 手动补跑语义）：仍失败 → 一条系统告警（结算未完成），
+        // 终轮（20:10 / 手动补跑语义）：仍失败 → 一条系统告警（结算未完成），
         // 复盘日报依旧不发 —— 同一件事只说一遍，且用故障的措辞。
         ArgumentCaptor<String> key = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<String> content = ArgumentCaptor.forClass(String.class);
@@ -697,7 +827,7 @@ class PaperTradingServiceTest {
     }
 
     /**
-     * 16:10 的中间轮即使失败也不告警：bar 常在 16~17 点才发布，
+     * 16:10 / 17:10 的中间轮即使失败也不告警：bar 常在 16~20 点才发布，
      * 那时的失败还是"再等等"而不是定论 —— 告警必须留给终轮。
      */
     @Test
@@ -714,13 +844,110 @@ class PaperTradingServiceTest {
                         .tradeDate(LocalDate.now()).decision(ExecutionContract.DECISION_SKIP)
                         .skipReason(ExecutionContract.SKIP_NO_BAR).build()));
         when(strategyClient.agentDecide(eq(configJson), eq("601988"), anyString(), any(), isNull(),
-                any(), any(), any()))
+                any(), any(), any(), any(), any()))
                 .thenReturn(mapper.readTree(
                         "{\"signal\":\"hold\",\"bar_date_missing\":true,\"skip_reason\":\"no_bar\",\"price\":null}"));
 
         paperTradingService.retryFailedDailySettlements(false);
 
         verify(messageService, never()).saveReport(any(), anyString(), anyString(), any(), anyString());
+    }
+
+    // ==================== 取数失败的可观测性与兜底（2026-10-19/20 事故） ====================
+
+    /**
+     * 引擎回 error 信封（无价格）时，错误文本与 error_detail 必须落进痕迹快照 ——
+     * 事故那两天 snapshot_json 全是 NULL，排查只能翻两边容器日志。
+     * 合成快照会在补跑成功后被 dedupe 整行覆盖，这里只钉"失败时留得下证据"。
+     */
+    @Test
+    void errorEnvelopeLeavesItsDetailInTheTraceSnapshot() throws Exception {
+        String configJson = "{\"initial_capital\":10000.0}";
+        Strategy strategy = agentStrategy(configJson, alice());
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.of(holdingAccount(strategy)));
+        when(strategyClient.agentDecide(eq(configJson), eq("601988"), anyString(), any(), isNull(),
+                any(), any(), any(), any(), any()))
+                .thenReturn(mapper.readTree(
+                        "{\"error\":\"历史 K 线数据不足，暂时无法评估\",\"price\":null,"
+                                + "\"skip_reason\":\"data_unavailable\","
+                                + "\"error_detail\":{\"type\":\"history_empty\",\"symbol\":\"601988\"}}"));
+
+        paperTradingService.evaluateDaily();
+
+        ArgumentCaptor<PaperTradeTrace> traceCaptor = ArgumentCaptor.forClass(PaperTradeTrace.class);
+        verify(paperTraceService, atLeastOnce()).record(traceCaptor.capture());
+        PaperTradeTrace trace = traceCaptor.getAllValues().stream()
+                .filter(t -> ExecutionContract.SETTLEMENT_DAILY.equals(t.getSettlementKind()))
+                .findFirst().orElseThrow();
+        assertEquals(ExecutionContract.SKIP_DATA_UNAVAILABLE, trace.getSkipReason());
+        assertNotNull(trace.getSnapshotJson(), "失败也必须留下可排查的快照");
+        assertTrue(trace.getSnapshotJson().contains("history_empty"), trace.getSnapshotJson());
+        assertTrue(trace.getSnapshotJson().contains("历史 K 线数据不足"), trace.getSnapshotJson());
+    }
+
+    /**
+     * 引擎调用**抛异常**（连接拒绝/超时/非 2xx，即 Python 整宕的形态）也要落
+     * data_unavailable 痕迹 —— 没有这条痕迹，补跑筛选（failedToday 判当天痕迹）
+     * 判不到这类失败，三轮补跑都不会碰它，当天的结算就静默缺失。
+     */
+    @Test
+    void engineCallExceptionLeavesADataUnavailableTrace() throws Exception {
+        String configJson = "{\"initial_capital\":10000.0}";
+        Strategy strategy = agentStrategy(configJson, alice());
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.of(holdingAccount(strategy)));
+        when(strategyClient.agentDecide(eq(configJson), eq("601988"), anyString(), any(), isNull(),
+                any(), any(), any(), any(), any()))
+                .thenThrow(new RuntimeException("Connection refused: python-data/8000"));
+
+        paperTradingService.evaluateDaily();
+
+        ArgumentCaptor<PaperTradeTrace> traceCaptor = ArgumentCaptor.forClass(PaperTradeTrace.class);
+        verify(paperTraceService, times(1)).record(traceCaptor.capture());
+        PaperTradeTrace trace = traceCaptor.getValue();
+        assertEquals(ExecutionContract.SETTLEMENT_DAILY, trace.getSettlementKind());
+        assertEquals(ExecutionContract.SKIP_DATA_UNAVAILABLE, trace.getSkipReason());
+        assertEquals(ExecutionContract.DECISION_SKIP, trace.getDecision());
+        assertNotNull(trace.getSnapshotJson());
+        assertTrue(trace.getSnapshotJson().contains("RuntimeException"), trace.getSnapshotJson());
+        assertTrue(trace.getSnapshotJson().contains("Connection refused"), trace.getSnapshotJson());
+    }
+
+    /**
+     * 异常写下的 data_unavailable 痕迹与取数失败信封的痕迹走同一条补跑轨道：
+     * 16:10 / 17:10 / 20:10 三轮都会重新问它，直到成功或当天定论。
+     */
+    @Test
+    void settlementRetryPicksUpExceptionWrittenFailureTraces() throws Exception {
+        String configJson = "{\"initial_capital\":10000.0}";
+        Strategy strategy = agentStrategy(configJson, alice());
+
+        when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
+        when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
+        when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.of(holdingAccount(strategy)));
+        when(paperAccountRepository.save(any(PaperAccount.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        // 15:30 那轮是"引擎调用抛异常"写下的 data_unavailable 痕迹
+        when(paperTraceService.listForDay(eq(10L), any(LocalDate.class))).thenReturn(List.of(
+                PaperTradeTrace.builder()
+                        .settlementKind(ExecutionContract.SETTLEMENT_DAILY)
+                        .tradeDate(LocalDate.now()).decision(ExecutionContract.DECISION_SKIP)
+                        .skipReason(ExecutionContract.SKIP_DATA_UNAVAILABLE).build()));
+        when(strategyClient.agentDecide(eq(configJson), eq("601988"), anyString(), any(), isNull(),
+                any(), any(), any(), any(), any()))
+                .thenReturn(mapper.readTree(
+                        "{\"signal\":\"hold\",\"matched_conditions\":[],\"price\":6.73,"
+                                + "\"skip_reason\":\"agent_no_new_information\"}"));
+
+        paperTradingService.retryFailedDailySettlements(false);
+
+        verify(strategyClient, times(1)).agentDecide(eq(configJson), eq("601988"), anyString(),
+                any(), isNull(), any(), any(), any(), any(), any());
     }
 
     // ==================== 止损硬通道（2026-10-08：大跌日的生存底线） ====================
@@ -1428,14 +1655,14 @@ class PaperTradingServiceTest {
                         + "\"indicators\":{\"ma_20\":9.8},"
                         + "\"extra\":{\"committee\":{\"llm_calls\":8,\"total_tokens\":33449}}}}");
         when(strategyClient.agentDecide(eq(configJson), eq("600519"), anyString(), isNull(), any(),
-                any(), any(), any()))
+                any(), any(), any(), any(), any()))
                 .thenReturn(result);
 
         paperTradingService.evaluateDaily();
 
         // ① 走的是 agent 端点，而且**没有**去调规则端点
         verify(strategyClient, times(1)).agentDecide(eq(configJson), eq("600519"), anyString(), isNull(), any(),
-                any(), any(), any());
+                any(), any(), any(), any(), any());
         verify(strategyClient, never()).evaluateBar(anyString(), anyString(), anyString(), any());
 
         // ② 决策被执行（成交 + 账户变化）
@@ -1690,7 +1917,7 @@ class PaperTradingServiceTest {
                         + "\"fingerprint\":{\"fill_basis\":\"close\",\"adjust_mode\":\"qfq\","
                         + "\"money_policy_version\":1,\"engine_version\":\"abc123\",\"decision_mode\":\"agent\"}}");
         when(strategyClient.agentDecide(eq(configJson), eq("600519"), anyString(), isNull(), any(),
-                any(), any(), any()))
+                any(), any(), any(), any(), any()))
                 .thenReturn(result);
 
         paperTradingService.evaluateDaily();
@@ -1882,7 +2109,7 @@ class PaperTradingServiceTest {
         paperTradingService.evaluateDaily();
 
         verify(strategyClient, times(1)).evaluateBar(eq(configJson), eq("600519"), anyString(), isNull());
-        verify(strategyClient, never()).agentDecide(anyString(), anyString(), anyString(), any(), any());
+        verify(strategyClient, never()).agentDecide(anyString(), anyString(), anyString(), any(), any(), any(), any(), any(), any(), any());
         ArgumentCaptor<PaperTradeTrace> captor = ArgumentCaptor.forClass(PaperTradeTrace.class);
         verify(paperTraceService, times(1)).record(captor.capture());
         assertEquals(ExecutionContract.DECISION_MODE_RULE, captor.getValue().getDecisionMode(),
@@ -1929,7 +2156,7 @@ class PaperTradingServiceTest {
                         + "\"money_policy_version\":1,\"engine_version\":\"abc123\",\"decision_mode\":\"agent\"},"
                         + "\"committee\":{\"llm_calls\":8,\"total_tokens\":21457}}");
         when(strategyClient.agentDecide(eq(configJson), eq("600519"), anyString(), isNull(), any(),
-                any(), any(), any()))
+                any(), any(), any(), any(), any()))
                 .thenReturn(result);
 
         paperTradingService.evaluateDaily();

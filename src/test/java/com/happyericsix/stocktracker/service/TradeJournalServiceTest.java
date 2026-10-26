@@ -126,6 +126,32 @@ class TradeJournalServiceTest {
         assertEquals("0.0", journal.hitRate().toString());
     }
 
+    /**
+     * 0.00% 平盘对 buy **和 sell** 都按 miss 计（2026-10-15 改）：
+     * 此前 ("buy")==up 的写法让平盘的 sell 记 hit —— 胜率对卖出方向系统性偏乐观，
+     * 而这个数字会流进委员会 experience 包与修订健康信号。
+     */
+    @Test
+    void flatDayCountsAsMissForBothBuyAndSell() {
+        stubOwnership();
+        when(traceRepository.findByStrategyIdOrderByCreatedAtDesc(eq(42L), any(Pageable.class)))
+                .thenReturn(List.of(
+                        trace("buy", LocalDate.of(2026, 9, 17), null),
+                        trace("sell", LocalDate.of(2026, 9, 18), null)));
+        // 两天都收在 100.00：09-17 的 buy 与 09-18 的 sell 对到的都是 0.00% 平盘
+        when(stockDataGateway.getStockHistory("600519", "daily")).thenReturn(history(Map.of(
+                "2026-09-17", "100.00",
+                "2026-09-18", "100.00",
+                "2026-09-19", "100.00")));
+
+        TradeJournalResponse journal = service.journal("alice", 42L, 90);
+
+        assertEquals(2, journal.evaluated());
+        assertEquals(0, journal.hits(), "平盘=方向没对，buy 和 sell 一视同仁记 miss");
+        assertEquals(2, journal.misses());
+        assertEquals("0.0", journal.hitRate().toString());
+    }
+
     @Test
     void mostRecentDecisionIsPendingNotMiss() {
         // 最后一根 K 线当天做的决策：还没有"后来"，必须是 pending

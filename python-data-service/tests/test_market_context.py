@@ -58,6 +58,13 @@ def test_breadth_with_empty_frame_returns_none():
 def test_market_context_fails_open_when_all_sources_fail(monkeypatch):
     monkeypatch.setattr(mc, "_fetch_indices", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
     monkeypatch.setattr(mc, "_fetch_breadth", lambda: None)
+    # 资金流源也必须桩成失败（"all sources fail"的名副其实版）：
+    # 2026-10-19 起资金流有腾讯 fallback，不桩的话测试机上它真能取到数据，
+    # market_context 就不再是 None——用例成败由机房网络决定，不是由代码决定。
+    import akshare_client
+    monkeypatch.setattr(akshare_client, "get_market_fund_flow", lambda limit=6: [])
+    monkeypatch.setattr(akshare_client.akshare, "stock_market_fund_flow",
+                        lambda: (_ for _ in ()).throw(RuntimeError("boom")))
     mc._clear_cache()
     assert mc.get_market_context() is None
 

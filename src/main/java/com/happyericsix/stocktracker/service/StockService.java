@@ -12,7 +12,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
+import org.springframework.http.HttpStatus;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 import java.util.Map;
@@ -113,6 +115,12 @@ public class StockService {
 
     public PagedResponse<DailyStockResponse> getHistoryPaged(String symbol, int page, int size, String period) {
         StockHistoryResponse response = stockDataGateway.getStockHistory(symbol, period);
+        // 数据源失败（Python/akshare 超时或 5xx）：显式 503。空响应会被前端当成
+        // "暂无 K 线数据"，用户就永远不知道这是"这次没取到、稍后再试就好"
+        if (response == null || response.timeSeries() == null) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                    "K 线数据源暂不可用，请稍后重试");
+        }
 
         List<DailyStockResponse> allData = response.timeSeries().entrySet().stream()
                 .map(entry -> new DailyStockResponse(
@@ -355,6 +363,12 @@ public class StockService {
             log.warn("Invalid minute period {}, fallback to 5", period);
             period = 5;
         }
-        return stockDataGateway.getStockMinuteHistory(symbol, period);
+        List<DailyStockResponse> data = stockDataGateway.getStockMinuteHistory(symbol, period);
+        if (data == null) {
+            // 同 getHistoryPaged：失败必须是 503，不能是空数组（前端分不清"没数据"和"没取到"）
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                    "分钟K线数据源暂不可用，请稍后重试");
+        }
+        return data;
     }
 }

@@ -166,8 +166,10 @@ public class TradeJournalService {
     }
 
     /**
-     * 判定：方向对了 hit，错了 miss；0.00% 的平盘按 miss 计（对 buy 来说
-     * "没涨"就不是对了）——口径见 TradeJournalResponse 的诚实边界。
+     * 判定：方向对了 hit，错了 miss；0.00% 的平盘对 buy **和 sell** 都按 miss 计
+     * —— 方向没对就是对错答案，不分哪边（口径见 TradeJournalResponse 的诚实边界）。
+     * 此前 ("buy")==up 的写法让平盘的 sell 记 hit：胜率对卖出方向系统性偏乐观，
+     * 而这个数字会流进委员会的 experience 包与修订健康信号。
      */
     private String verdictFor(String decision, BigDecimal closeAtDecision,
                               BigDecimal nextClose, BigDecimal nextChangePct) {
@@ -181,7 +183,11 @@ public class TradeJournalService {
                     ? TradeJournalResponse.VERDICT_NO_PRICE
                     : TradeJournalResponse.VERDICT_PENDING;
         }
-        boolean up = nextChangePct.signum() > 0;
+        int direction = nextChangePct.signum();
+        if (direction == 0) {
+            return TradeJournalResponse.VERDICT_MISS;
+        }
+        boolean up = direction > 0;
         return ("buy".equals(decision)) == up
                 ? TradeJournalResponse.VERDICT_HIT
                 : TradeJournalResponse.VERDICT_MISS;

@@ -158,12 +158,26 @@ public class StockDataGateway {
         }
     }
 
-    // ==================== K 线历史（无缓存直通：分页/周期组合太多，缓存命中率不划算）====================
+    // ==================== K 线历史（短 TTL 缓存 + 同 key 并发合并）====================
+    //
+    // 曾经"无缓存直通"的理由是"分页/周期组合太多，命中率不划算"，但实际调用
+    // 全部收敛在 (symbol, period) 上（页面固定拉 1000 根）。K 线页一次切换要打
+    // 这里最多 2 次（行情+历史），高频切换时直通会瞬间放大成对 Python 服务
+    // （akshare 外部源，单次秒级）的连环 miss —— 那是"频繁点击变卡"的主链路。
+    //
+    // TTL 对齐 Python 侧缓存（日 K 近期 60s / 分钟 K 30s），Java 这层只做合并
+    // 与挡高频重复，不引入比下游更陈旧的数据。失败返回 null，null 不缓存。
+    //
+    // sync=true：同 key 并发 miss 只放一个线程去加载（走 TwoLevelCache 的
+    // 合并 get），其余线程等同一次结果 —— 没有它，缓存击穿的瞬间每个并发
+    // 请求都会各自打一次 Python。
 
+    @Cacheable(value = "stockHistory", key = "#symbol + ':' + #period", sync = true)
     public StockHistoryResponse getStockHistory(String symbol, String period) {
         return akshareStockClient.getStockHistory(symbol, period);
     }
 
+    @Cacheable(value = "stockMinute", key = "#symbol + ':' + #period", sync = true)
     public java.util.List<DailyStockResponse> getStockMinuteHistory(String symbol, int period) {
         return akshareStockClient.getStockMinuteHistory(symbol, period);
     }

@@ -20,12 +20,18 @@ import { quoteBus } from '../composables/quoteBus.js'
 import { useMarketStatus } from '../composables/useMarketStatus.js'
 import { sessionBadgeFor } from '../utils/marketStatus.js'
 import { useTheme } from '../composables/useTheme.js'
-import { getProfile } from '../api/user.js'
+import { getProfile, completeOnboarding } from '../api/user.js'
 import { getPaperOverview } from '../api/strategy.js'
+import UsageGuide from './UsageGuide.vue'
+import BeianFooter from './BeianFooter.vue'
 
 const route = useRoute()
 const router = useRouter()
 const { toggle: toggleTheme } = useTheme()
+
+/**
+ * 合规备案信息已抽到 BeianFooter.vue（Login/Share 壳外页也要展示）。
+ */
 
 /** 导航唯一配置：图标、标题、徽章都从这一份来，桌面侧栏与移动抽屉共用 */
 const navItems = [
@@ -50,12 +56,25 @@ const marketBadge = computed(() => {
 
 // ---------- 用户 ----------
 const username = ref('')
+// 首次登录的使用说明引导：profile 里 onboardingCompleted === false 才弹
+// （服务端三态折叠后只有新注册账号会是 false；老账号不打扰）
+const showOnboarding = ref(false)
 const loadUser = async () => {
   try {
     const res = await getProfile()
     username.value = res.data?.username || ''
+    if (res.data?.onboardingCompleted === false) showOnboarding.value = true
   } catch {
     username.value = ''
+  }
+}
+
+const finishOnboarding = async () => {
+  showOnboarding.value = false
+  try {
+    await completeOnboarding()
+  } catch {
+    // 标记失败就让它失败：下次登录还会再弹一次（状态以服务端为准）
   }
 }
 
@@ -219,6 +238,12 @@ watch(() => route.path, closeDrawer)
       <div class="mx-auto max-w-[1200px] px-4 py-6 sm:px-6 lg:px-8">
         <RouterView />
       </div>
+
+      <!-- 备案合规：ICP 与公安备案号都挂 footer（公安号审核通过后自动出现） -->
+      <BeianFooter />
     </main>
+
+    <!-- 首次登录的全屏使用说明（线性翻页，翻完才能开始使用） -->
+    <UsageGuide :open="showOnboarding" mode="onboarding" @complete="finishOnboarding" />
   </div>
 </template>

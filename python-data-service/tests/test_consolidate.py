@@ -162,6 +162,17 @@ def test_prompt_forbids_guessing_and_requires_absolute_dates():
     assert "不要" in prompt and "行情数据" in prompt
 
 
+def test_prompt_rejects_discussion_as_preference():
+    """2026-10-12 事故：用户质疑"难道我应该全仓吗（这是默认值？）"被抽成
+    偏好 position_size=100%。讨论/质疑/纠正某个值 ≠ 用户偏好——规则必须写进提示词。"""
+    prompt = consolidate.SUMMARY_SYSTEM_PROMPT
+
+    assert "讨论过" in prompt and "≠" in prompt
+    assert "亲口主张" in prompt
+    # 助手自己解释里的数值也不是用户的话
+    assert "助手自己解释" in prompt
+
+
 def test_facts_are_extracted_in_the_same_llm_call(monkeypatch):
     """事实和摘要在同一次 LLM 调用里产出，不额外花钱。"""
     calls = _patch(monkeypatch, EVENTS, json.dumps(VALID_SUMMARY, ensure_ascii=False))
@@ -368,6 +379,64 @@ def test_prompt_carries_line_numbers_and_ref_instructions(monkeypatch):
     assert "行号" in user_content and "[1]" in user_content
     assert "evidence_refs" in calls["messages"][0]["content"]
     assert "source_refs" in calls["messages"][0]["content"]
+
+
+# ==================== 显著性门控（2026-10-20）：寒暄不配成为经验 ====================
+
+def test_trivial_session_writes_tombstone_without_facts_or_lessons(monkeypatch):
+    """memorable=false：只落墓碑摘要，事实/经验一个不写。
+    事故背景：打招呼也会被忠实总结成"用户仅做了打招呼"的摘要并走完整套巩固。"""
+    payload = {"memorable": False, "summary": "", "key_points": [], "facts": [
+        {"subject": "user", "predicate": "风险偏好", "object": "稳健", "confidence": 0.9},
+    ], "lessons": [dict(LESSON_PAYLOAD)]}
+    calls = _patch(monkeypatch, EVENTS, json.dumps(payload, ensure_ascii=False))
+
+    result = consolidate.consolidate_session(1, "1:2026-09-14")
+
+    assert result["memorable"] is False
+    assert result["version"] == 1
+    episode = calls["episode"]
+    assert episode["summary"] == consolidate.TOMBSTONE_SUMMARY
+    assert episode["key_points"] == []
+    # 模型硬塞进来的 facts/lessons 也要拦掉：不值得记的会话整体不抽
+    assert calls["facts"] is None
+    assert calls["lessons"] is None
+
+
+def test_memorable_false_outranks_a_summary_the_model_wrote_anyway(monkeypatch):
+    """模型嘴上说 memorable=false 却又写了 summary：以门控为准，落墓碑。"""
+    payload = {"memorable": False, "summary": "用户仅做了打招呼"}
+    calls = _patch(monkeypatch, EVENTS, json.dumps(payload, ensure_ascii=False))
+
+    result = consolidate.consolidate_session(1, "1:2026-09-14")
+
+    assert result["memorable"] is False
+    assert calls["episode"]["summary"] == consolidate.TOMBSTONE_SUMMARY
+
+
+def test_tombstone_still_invalidates_the_semantic_index(monkeypatch):
+    """墓碑也是新 episode，语料变了索引同样要失效。"""
+    invalidated = {"user": None}
+    payload = {"memorable": False, "summary": ""}
+    _patch(monkeypatch, EVENTS, json.dumps(payload, ensure_ascii=False))
+
+    from agent import vector_index
+    monkeypatch.setattr(vector_index, "invalidate", lambda user_id=None: invalidated.update(user=user_id))
+
+    consolidate.consolidate_session(7, "7:2026-09-14")
+
+    assert invalidated["user"] == 7
+
+
+def test_prompt_carries_salience_gate():
+    """提示词必须给"不值得记"的显式出口，否则模型只能硬凑内容。"""
+    prompt = consolidate.SUMMARY_SYSTEM_PROMPT
+
+    assert "memorable" in prompt
+    # 门控信号：决定/偏好/修正/新事实/问题解决，缺一条模型就不知道判什么
+    assert "决定" in prompt and "偏好" in prompt and "修正" in prompt
+    # 反例也要写明：寒暄、单轮查询是本次事故的直接来源
+    assert "寒暄" in prompt and "单轮" in prompt
 
 
 if __name__ == "__main__":

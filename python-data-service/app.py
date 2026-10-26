@@ -1,5 +1,5 @@
 """
-FastAPI 入口 — 为 stock-tracker Java 后端提供实时行情接口。
+FastAPI 入口 — 为 StockTracker Java 后端提供实时行情接口。
 """
 
 import hmac
@@ -59,12 +59,24 @@ async def lifespan(_app: FastAPI):
         trading_calendar.warm(background=True)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"交易日历预热失败（不影响服务）：{e}")
+    # MCP 工具挂载（2026-10-20）：按 .env 的 MCP_SERVERS 把远端只读工具装进
+    # ToolSpec 注册表。未配置时是 no-op；某台服务器连不上只记状态，不炸启动。
+    # 放在预热段是因为 list_tools 要真实握手——不能让第一个用户请求付这个代价。
+    try:
+        import asyncio
+
+        from agent import mcp_tools
+
+        # mount_all 是同步阻塞（握手 + list_tools），放进线程别卡事件循环
+        await asyncio.to_thread(mcp_tools.mount_all)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"MCP 工具挂载失败（不影响服务）：{e}")
     yield
 
 
 app = FastAPI(
     title="Stock Data Service (akshare)",
-    description="为 stock-tracker Java 后端提供实时行情、K 线历史、基本面数据",
+    description="为 StockTracker Java 后端提供实时行情、K 线历史、基本面数据",
     version="0.2.0",
     lifespan=lifespan,
 )
@@ -157,6 +169,7 @@ def health():
         "memory": _memory_health(),
         "tools": _tools_health(),
         "external": _external_health(),
+        "mcp": _mcp_health(),
         "metering": _metering_health(),
         "objective_facts": _objective_health(),
         "audit": _audit_health(),
@@ -165,6 +178,17 @@ def health():
         "trading_committee": _committee_health(),
         "execution_contract": _contract_health(),
     }
+
+
+def _mcp_health():
+    """MCP 挂载状态：哪些服务器挂上了/挂了、共挂了几个工具。"""
+    try:
+        from agent import mcp_tools
+
+        return mcp_tools.snapshot()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"mcp health probe failed: {e}")
+        return {"error": "MCP 挂载状态暂不可用"}
 
 
 def _strategy_review_health():
@@ -435,6 +459,20 @@ def dividends(symbol: str):
     return {"symbol": symbol, "dividends": rows or []}
 
 
+@app.get("/api/v1/valuation/{symbol}")
+def valuation_history_endpoint(symbol: str, window: int = 1250):
+    """PE-TTM 与滚动 5 年分位的日线序列（K 线页估值副图）。
+
+    与 market_context 估值语境、DSL pe_percentile 条件同一分位口径；
+    上游 12h 缓存（get_valuation_history），这里不再叠加。fail-open。
+    """
+    from akshare_client import get_valuation_percentile_series
+    rows = get_valuation_percentile_series(
+        str(symbol).strip(), window=max(250, min(int(window), 2500)))
+    return {"ok": bool(rows), "items": rows,
+            "note": "分位=当日 PE 在此前 window 个交易日（含当日）中的百分位；早期不足 250 根为空"}
+
+
 @app.get("/api/v1/quote/{symbol}", response_model=StockQuoteResponse)
 def stock_quote(symbol: str):
     data = get_quote(symbol)
@@ -516,6 +554,31 @@ def stock_minute(
         except (ValueError, TypeError):
             continue
     return out
+
+
+@app.get("/api/v1/market/fund-flow")
+def market_fund_flow(limit: int = 60):
+    """大盘主力资金流日线（净额单位亿元，升序，最后一根最新）。
+
+    Dashboard 资金卡与助手工具 get_market_fund_flow 共用；中间件已按
+    /api/v1/* 校验 X-Internal-Token。fail-open：取不到 items=[]（前端软失败）。
+    """
+    from akshare_client import get_market_fund_flow
+    rows = get_market_fund_flow(limit=max(1, min(int(limit), 250)))
+    return {"ok": bool(rows), "items": rows,
+            "note": "主力净流入=超大单+大单（东财优先，机房不可达时自动切腾讯源；"
+                    "腾讯源日级仅主力+当日四档）。正=净流入。"}
+
+
+# ==================== 个股资金流（K 线页主力资金卡，2026-10-19） ====================
+
+@app.get("/api/v1/fund-flow/{symbol}")
+def stock_fund_flow(symbol: str, limit: int = Query(default=30)):
+    """个股主力资金流日线（腾讯源，与大盘同接口换代码）。fail-open：items=[]。"""
+    from akshare_client import get_stock_fund_flow
+    rows = get_stock_fund_flow(symbol, limit=max(1, min(int(limit), 50)))
+    return {"ok": bool(rows), "items": rows,
+            "note": "主力净流入=超大单+大单（腾讯口径）；四档仅当日有值。正=净流入。"}
 
 
 # ==================== 基本面概况 ====================
@@ -672,6 +735,76 @@ def models_summary(symbol: str = Query(default=None, description="可选：按�
 # ==================== Agent 与策略接口 ====================
 
 
+def _llm_callables(data, scope_id):
+    """BYOK（2026-10-25）：把请求体的 llm_providers 绑定成 LLM 调用对。
+
+    契约（见 llm_service.user_providers）：请求体带 llm_providers 字段（哪怕空数组，
+    = 用户没配 Key）即用户级调用——只用用户自己的供应商，绝不落到部署者的全局 key；
+    不带该字段 = 系统级调用（新闻解读等共享流水线），走 env 供应商。
+
+    返回 (completion, completion_stream)：用户级时是绑定了 providers 的 partial，
+    系统级时 (None, None)（调用方各自回落 llm_service.*）。Java 保存配置时已校验
+    过形状，这里再校验一次是纵深防御；失败抛 ValueError，由端点兜成错误响应——
+    契约被破坏必须让人看见，静默换回全局 key 等于替陌生人付钱。
+    """
+    import llm_service
+
+    providers = llm_service.user_providers(data.get("llm_providers"), scope_id)
+    if providers is None:
+        return None, None
+    return llm_service.bind_user_calls(providers)
+
+
+def _parse_agent_chat_body(data):
+    """agent chat 请求体的公共解析（非流式 /api/v1/agent/chat 与流式 /stream 共用）。
+
+    返回 None = 空值守卫（缺 user_id 或 message），调用方快速返回空 replies；
+    否则返回可直接展开进 run_agent 的关键字 dict。字段清洗规则两边必须一字不差
+    ——历史上两边分叉出现过"user_name/user_id 对不上、LLM 静默没被调用"的故障，
+    契约由 tests/test_agent_chat_contract.py 钉住。
+    """
+    user_id = str(data.get("user_id") or data.get("user_name") or "").strip()
+    message = data.get("message", "").strip()
+    if not user_id or not message:
+        return None
+    history = data.get("history")
+    if not isinstance(history, list):
+        history = []
+    session_id = str(data.get("session_id") or "").strip()
+    # 角色（W2）：由**调用方**声明"这一轮是谁在跑"，缺省 = 主 agent。
+    # 它只是个标记（决定账本条目算不算"用户的对话"），**不是权限** ——
+    # 权限仍然只由 scopes 决定，角色不能靠自己的名字主张任何能力。
+    role = str(data.get("role") or "").strip() or None
+    # 记忆账本用数字 userId（user_id 字段是用户名，两者语义不同）
+    memory_user_id = data.get("memory_user_id")
+    if isinstance(memory_user_id, str):
+        memory_user_id = memory_user_id.strip() or None
+    # 工具装填（T1）：调用方可以显式声明模式与权限，两者都不做任何意图猜测。
+    # 不传 = 全给 + 普通用户默认权限，与改造前行为一致。
+    tool_mode = str(data.get("tool_mode") or "").strip() or None
+    scopes = data.get("scopes")
+    if not isinstance(scopes, list) or not scopes:
+        scopes = None
+    # 聚焦对象（agent 互通 P2）：用户从资讯雷达"问 AI"进入的聚焦对话。
+    # 只认 {"type":"news_event","event_id":n}；其余形状忽略（run_agent 内 fail-open）。
+    focus = data.get("focus")
+    if not isinstance(focus, dict):
+        focus = None
+    # 连发中断（2026-10-20）：epoch 是 Java 侧的聊天轮次号。不带（旧客户端/其他
+    # 调用方）= 不启用中断，行为不变。
+    epoch = data.get("epoch")
+    if isinstance(epoch, bool) or not isinstance(epoch, int):
+        epoch = None
+    # BYOK（2026-10-25）：llm_providers 绑定成用户自己的 LLM 调用（冷却名按用户
+    # 命名空间隔离）。scope 优先数字 memory_user_id（与记忆账本同一身份口径）。
+    completion, completion_stream = _llm_callables(
+        data, memory_user_id if memory_user_id is not None else user_id)
+    return {"user_id": user_id, "message": message, "history": history,
+            "session_id": session_id, "role": role, "memory_user_id": memory_user_id,
+            "tool_mode": tool_mode, "scopes": scopes, "focus": focus, "epoch": epoch,
+            "completion": completion, "completion_stream": completion_stream}
+
+
 @app.post("/api/v1/agent/chat")
 async def agent_chat(req: Request):
     """站内聊天机器人入口。
@@ -696,42 +829,99 @@ async def agent_chat(req: Request):
     try:
         import agent.react_agent as react_agent
         data = await req.json()
-        user_id = str(data.get("user_id") or data.get("user_name") or "").strip()
-        message = data.get("message", "").strip()
-        if not user_id or not message:
+        parsed = _parse_agent_chat_body(data)
+        if parsed is None:
             return {"replies": [], "strategy_json": None}
-        history = data.get("history")
-        if not isinstance(history, list):
-            history = []
-        session_id = str(data.get("session_id") or "").strip()
-        # 角色（W2）：由**调用方**声明"这一轮是谁在跑"，缺省 = 主 agent。
-        # 它只是个标记（决定账本条目算不算"用户的对话"），**不是权限** ——
-        # 权限仍然只由 scopes 决定，角色不能靠自己的名字主张任何能力。
-        role = str(data.get("role") or "").strip() or None
-        # 记忆账本用数字 userId（user_id 字段是用户名，两者语义不同）
-        memory_user_id = data.get("memory_user_id")
-        if isinstance(memory_user_id, str):
-            memory_user_id = memory_user_id.strip() or None
-        # 工具装填（T1）：调用方可以显式声明模式与权限，两者都不做任何意图猜测。
-        # 不传 = 全给 + 普通用户默认权限，与改造前行为一致。
-        tool_mode = str(data.get("tool_mode") or "").strip() or None
-        scopes = data.get("scopes")
-        if not isinstance(scopes, list) or not scopes:
-            scopes = None
-        # 聚焦对象（agent 互通 P2）：用户从资讯雷达"问 AI"进入的聚焦对话。
-        # 只认 {"type":"news_event","event_id":n}；其余形状忽略（run_agent 内 fail-open）。
-        focus = data.get("focus")
-        if not isinstance(focus, dict):
-            focus = None
+        # 连发中断：受理即登记"该用户最新轮次"，仍在跑的旧轮次会在下一个
+        # 步骤边界发现落后并自行退出（见 agent/react_agent.py 的 _EPOCHS）。
+        if parsed["epoch"] is not None:
+            react_agent.note_epoch(parsed["user_id"], parsed["epoch"])
         result = await asyncio.to_thread(
-            react_agent.run_agent, user_id, message,
-            history=history, session_id=session_id, memory_user_id=memory_user_id,
-            tool_mode=tool_mode, scopes=scopes, role=role, focus=focus
+            react_agent.run_agent, parsed["user_id"], parsed["message"],
+            **{k: parsed[k] for k in ("history", "session_id", "memory_user_id",
+                                      "tool_mode", "scopes", "role", "focus", "epoch",
+                                      "completion", "completion_stream")}
         )
         return result
     except Exception as e:
         logger.error(f"agent chat error: {e}", exc_info=True)
         return {"replies": ["⚠️ 处理出错了，稍后再试"], "strategy_json": None}
+
+
+# 流式端点的在途 worker 任务（仅为攥住引用防 GC，见 agent_chat_stream）
+_STREAM_TASKS: set = set()
+
+
+@app.post("/api/v1/agent/chat/stream")
+async def agent_chat_stream(req: Request):
+    """agent_chat 的流式版（2026-10-20，前端流式输出）。
+
+    请求体与非流式版完全一致（含 epoch 连发中断契约）；响应是 text/event-stream，
+    每个事件一行：data: {"type": "...", ...}，按序三种：
+
+    - {"type":"delta","text":"..."}      文本增量（边生成边推，用于前端打字机效果）
+    - {"type":"result","result":{...}}   最终结果，形状与非流式版返回值相同（权威）
+    - {"type":"error","error":"..."}     worker 异常（调用方按失败兜底）
+
+    Java 侧以 result 事件落库，delta 只做展示；连发取消时 Java 断开本流，
+    worker 里的 run_agent 靠 epoch 在下一步骤边界自行退出。
+    """
+    from fastapi.responses import StreamingResponse
+
+    try:
+        import agent.react_agent as react_agent
+        data = await req.json()
+        parsed = _parse_agent_chat_body(data)
+    except Exception as e:
+        logger.error(f"agent chat stream body error: {e}", exc_info=True)
+        parsed = None
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    _SENTINEL = object()
+
+    def _emit(evt):
+        # worker 跑在 to_thread 的线程里：跨线程投递必须走 call_soon_threadsafe
+        loop.call_soon_threadsafe(queue.put_nowait, evt)
+
+    def _work():
+        try:
+            if parsed is None:
+                _emit({"type": "result", "result": {"replies": [], "strategy_json": None}})
+                return
+            if parsed["epoch"] is not None:
+                react_agent.note_epoch(parsed["user_id"], parsed["epoch"])
+            result = react_agent.run_agent(
+                parsed["user_id"], parsed["message"],
+                **{k: parsed[k] for k in ("history", "session_id", "memory_user_id",
+                                          "tool_mode", "scopes", "role", "focus", "epoch",
+                                          "completion", "completion_stream")},
+                on_delta=lambda text: _emit({"type": "delta", "text": text}),
+            )
+            _emit({"type": "result", "result": result})
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"agent chat stream worker error: {exc}", exc_info=True)
+            _emit({"type": "error", "error": str(exc)})
+        finally:
+            _emit(_SENTINEL)
+
+    # 持有任务引用：事件循环对 task 只存弱引用，不攥住会被 GC 半路收走（官方文档明示）
+    _stream_tasks = _STREAM_TASKS
+    task = asyncio.create_task(asyncio.to_thread(_work))
+    _stream_tasks.add(task)
+    task.add_done_callback(_stream_tasks.discard)
+
+    async def event_gen():
+        import json as _json
+        while True:
+            evt = await queue.get()
+            if evt is _SENTINEL:
+                break
+            yield f"data: {_json.dumps(evt, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/v1/memory/consolidate")
@@ -750,7 +940,10 @@ async def memory_consolidate(req: Request):
         session_key = str(data.get("session_key") or "").strip()
         if user_id is None or not session_key:
             return {"error": "user_id and session_key are required"}
-        return await asyncio.to_thread(consolidate.consolidate_session, user_id, session_key)
+        # BYOK：巩固记的是这个用户的账，用用户自己的 Key（没配就降级跳过这次摘要）
+        completion, _ = _llm_callables(data, user_id)
+        return await asyncio.to_thread(consolidate.consolidate_session, user_id, session_key,
+                                       completion=completion)
     except Exception as e:
         logger.error(f"memory consolidate error: {e}", exc_info=True)
         return {"error": "会话总结生成失败，请稍后重试"}
@@ -945,8 +1138,11 @@ async def evaluate_bar_endpoint(req: Request):
             records = await asyncio.to_thread(get_history, symbol)
         if not records:
             # 无数据也要带口径：否则调用方只能猜这条记录属于哪个口径，或者干脆不记
+            # error_detail：机器可读的失败细节（写法沿用盯盘端点把异常类名放进
+            # reason 的先例）——Java 会把它原样落进痕迹快照，排查不用再翻两边日志。
             return {"error": "历史 K 线数据不足，暂时无法评估", "signal": "hold", "matched_conditions": [],
                     "decision": ec.DECISION_SKIP, "skip_reason": ec.SKIP_DATA_UNAVAILABLE,
+                    "error_detail": {"type": "history_empty", "symbol": symbol},
                     **ec.no_bar_facts(settlement_kind, ADJUST_MODE)}
         bar_time = str(records[-1].get("date", ""))
         position = data.get("position")
@@ -973,6 +1169,7 @@ async def evaluate_bar_endpoint(req: Request):
         logger.error(f"strategy evaluate-bar error: {e}", exc_info=True)
         return {"error": "行情评估失败，请稍后重试", "signal": "hold", "matched_conditions": [],
                 "decision": ec.DECISION_SKIP, "skip_reason": ec.SKIP_DATA_UNAVAILABLE,
+                "error_detail": {"type": type(e).__name__, "message": str(e)[:200]},
                 **ec.no_bar_facts(settlement_kind, ADJUST_MODE)}
 
 
@@ -1068,9 +1265,35 @@ async def agent_decide_endpoint(req: Request):
             position = dict(position)
             position["shares"] = position["quantity"]
 
+        # 技能注入（④步）：按 (用户, committee 场景, 标的, 策略) 拉软参考技能
+        skill_items = []
+        user_id = data.get("user_id")
+        if user_id:
+            try:
+                from agent import skill_store
+                skill_items = skill_store.injectable(
+                    str(user_id), "committee", symbol=symbol,
+                    strategy_id=data.get("strategy_id"))
+            except Exception:  # noqa: BLE001 —— 技能缺席不挡会议
+                skill_items = []
+        # 复盘教训注入（2026-10-18）：周反思产出的教训流回决策现场（软参考，
+        # fail-open）。与 skills 的信任级别不同：教训未经用户逐条确认。
+        lesson_items = []
+        if user_id:
+            try:
+                from agent import trading_lessons
+                lesson_items = trading_lessons.injectable(
+                    str(user_id), "committee", symbol=symbol,
+                    strategy_id=data.get("strategy_id"))
+            except Exception:  # noqa: BLE001 —— 教训缺席不挡会议
+                lesson_items = []
         result = await asyncio.to_thread(
             trading_committee.decide, symbol, date, records or [], position,
             settlement_kind=settlement_kind or ec.SETTLEMENT_DAILY, adjust_mode=ADJUST_MODE,
+            # BYOK：委员会 8 棒串行是用户级任务里最贵的一档（~21k tokens/次），
+            # 必须花用户自己的 Key——没配 Key 时 _is_available 判不可用，
+            # decide 内部门控会退化成"不开会"，Java 侧按既有降级路径处理
+            completion=_llm_callables(data, user_id)[0],
             # 策略 JSON 只给门控用（"规则信号"触发理由复用规则引擎）；
             # `last_decision_at` 决定"太久没看"这条 —— 由 Java 从痕迹里取上次**真的开了会**的日子，
             # 而不是"上次结算的日子"（后者每天都有，定时器永远不会到期）。
@@ -1087,6 +1310,9 @@ async def agent_decide_endpoint(req: Request):
             # 市场语境三块（大盘/板块/估值）：agent/market_context.py 自取，
             # AGENT_MARKET_CONTEXT=0 可整体关闭；任一块失败缺席不挡决策
             **(await _market_context_args(symbol)),
+            skills=skill_items or None,
+            # 复盘教训（软参考）：教训库检索非空才带（fail-open）
+            lessons=lesson_items or None,
         )
         result["valid"] = True
         return result
@@ -1094,7 +1320,11 @@ async def agent_decide_endpoint(req: Request):
         logger.error(f"agent decide error: {e}", exc_info=True)
         from agent import execution_contract as ec
         from akshare_client import ADJUST_MODE
+        # skip_reason 保持 data_unavailable：Java 补跑轮次只认 no_bar/data_unavailable，
+        # 换成别的值瞬时故障（网络/LLM）就永远不被重试。真因走 error_detail 进
+        # 痕迹快照（Java errorSnapshot 消费），代码错误不再伪装成纯数据问题。
         return {"valid": False, "error": "agent 决策失败，请稍后重试",
+                "error_detail": {"type": type(e).__name__, "message": str(e)[:200]},
                 "decision": ec.DECISION_SKIP, "skip_reason": ec.SKIP_DATA_UNAVAILABLE,
                 "signal": None,
                 **ec.no_bar_facts(settlement_kind, ADJUST_MODE, ec.DECISION_MODE_AGENT)}
@@ -1151,11 +1381,24 @@ async def intraday_decide_endpoint(req: Request):
                 market_context = await asyncio.to_thread(_mc.get_market_context)
             except Exception as e:  # noqa: BLE001 —— 大盘语境取不到不该挡盯盘
                 logger.info("盯盘大盘语境取数失败（不带该块）：%s", type(e).__name__)
+        # 复盘教训（2026-10-18）：请求带 user_id 才检索（Java 侧随请求透传，缺省不带）。
+        # fail-open：检索失败/没有 user_id 都不影响盯盘。
+        lesson_items = []
+        if data.get("user_id"):
+            try:
+                from agent import trading_lessons
+                lesson_items = await asyncio.to_thread(
+                    trading_lessons.injectable, str(data.get("user_id")), "watch",
+                    symbol=symbol)
+            except Exception:  # noqa: BLE001 —— 教训缺席不挡盯盘
+                lesson_items = []
         result = await asyncio.to_thread(
             intraday_watch.intraday_decide, symbol, events, position,
             data.get("authorization"), config, minute_bars or [], day_records or [],
+            completion=_llm_callables(data, data.get("user_id"))[0],
             news_alert=news_alert, experience=experience,
-            today_context=today_context, market_context=market_context)
+            today_context=today_context, market_context=market_context,
+            lessons=lesson_items or None)
         result["valid"] = True
         return result
     except Exception as e:
@@ -1175,32 +1418,48 @@ WEEKLY_REFLECTION_MAX = 3
 
 _WEEKLY_REFLECTION_SYSTEM = (
     "你是这条策略的周复盘官。输入是本周的客观材料：定量战绩（每笔成交 N 个交易日后"
-    "回看的方向对错，样本可能很少）、成交记录、委员会决策过程（角色发言摘录）。"
+    "回看的方向对错，样本可能很少）、成交记录、委员会决策过程（角色发言摘录），"
+    "以及 prior_lessons——这条策略现存的旧教训（带 id）。\n"
     f"请提炼**最多 {WEEKLY_REFLECTION_MAX} 条**本周教训。\n"
     "要求：symptom 一句话点出重复出现的模式（犯错或做对都算）；reusable_rule 是一句"
     "**可执行、可验证**的话（例如「首仓不超过现金 50%，等回踩确认再加仓」）——"
     "不是投资结论，不预测行情；context 用两三句给出依据（引用战绩/成交/辩论里的具体"
     "事实，不许编数字）；resolution 写这条教训打算怎么落实。没有足够事实支撑就少写"
     "或不写 —— 宁缺毋滥。\n"
+    "质疑旧教训（可选，同样宁缺毋滥）：仅当本周材料与 prior_lessons 里的某条旧教训"
+    "**明确矛盾**时，才在 revisions（改写该条，只给要改的字段）或 retirements"
+    "（该条已被证伪，建议停用）里提出处置；lesson_id 只能填 prior_lessons 里出现过的"
+    "id，编造的 id 会被直接丢弃；reason 引用具体事实说明为什么。证据不充分就保持"
+    "沉默，不要为了输出而质疑。\n"
     "只输出一个 JSON 对象，不要任何其他文字：\n"
     '{"lessons": [{"symptom": "...", "context": "...", "resolution": "...", '
-    '"reusable_rule": "...", "confidence": 0.0-1.0}]}'
+    '"reusable_rule": "...", "confidence": 0.0-1.0}], '
+    '"revisions": [{"lesson_id": 0, "reason": "...", "symptom": "可选", '
+    '"context": "可选", "resolution": "可选", "reusable_rule": "可选", '
+    '"confidence": 0.0-1.0}], '
+    '"retirements": [{"lesson_id": 0, "reason": "..."}]}'
 )
 
 
-def _parse_weekly_lessons(text: str) -> list[dict]:
-    """确定性解析（保守优先，与 trading_decision 同一条纪律）：读不懂就当没有教训。"""
+def _extract_json_object(text: str):
+    """从模型输出里提取第一个 JSON 对象（容忍代码围栏/前后散文）；读不懂返回 None。"""
     import json as _json
     import re as _re
 
     match = _re.search(r"\{.*\}", str(text or ""), _re.DOTALL)
     if not match:
-        return []
+        return None
     try:
         data = _json.loads(match.group(0))
     except Exception:  # noqa: BLE001
-        return []
-    raw = data.get("lessons") if isinstance(data, dict) else None
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _parse_weekly_lessons(text: str) -> list[dict]:
+    """确定性解析（保守优先，与 trading_decision 同一条纪律）：读不懂就当没有教训。"""
+    data = _extract_json_object(text)
+    raw = data.get("lessons") if data else None
     if not isinstance(raw, list):
         return []
     lessons: list[dict] = []
@@ -1227,6 +1486,61 @@ def _parse_weekly_lessons(text: str) -> list[dict]:
     return lessons
 
 
+def _parse_weekly_dispositions(text: str) -> dict:
+    """解析周反思对旧教训的处置指令（方案一质疑回路，2026-10-16）。
+
+    保守优先，与 _parse_weekly_lessons 同一条纪律：
+    - lesson_id 必须是正整数（bool 不算）——非整数/编造不出具体行的条目直接丢弃，
+      Java 侧还有一层"只认本次喂入 prior_lessons 集合"的白名单，两层闸门各管一段；
+    - revisions 里一个字段都没改的"空修订"是噪声，不进结果；
+    - 读不懂就当没有任何处置。
+    """
+    data = _extract_json_object(text)
+    revisions: list[dict] = []
+    retirements: list[dict] = []
+    if data is None:
+        return {"revisions": revisions, "retirements": retirements}
+
+    def _lesson_id(item) -> int | None:
+        value = item.get("lesson_id")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            return None
+        return value
+
+    for item in data.get("revisions") or []:
+        if not isinstance(item, dict):
+            continue
+        lesson_id = _lesson_id(item)
+        if lesson_id is None:
+            continue
+        patch = {"lesson_id": lesson_id,
+                 "reason": str(item.get("reason") or "").strip()[:300] or None}
+        for key, cap in (("symptom", 200), ("context", 600),
+                         ("resolution", 600), ("reusable_rule", 300)):
+            value = str(item.get(key) or "").strip()
+            if value:
+                patch[key] = value[:cap]
+        confidence = item.get("confidence")
+        if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
+            patch["confidence"] = max(0.0, min(1.0, float(confidence)))
+        if any(key in patch for key in ("symptom", "context", "resolution",
+                                        "reusable_rule", "confidence")):
+            revisions.append(patch)
+        if len(revisions) >= WEEKLY_REFLECTION_MAX:
+            break
+    for item in data.get("retirements") or []:
+        if not isinstance(item, dict):
+            continue
+        lesson_id = _lesson_id(item)
+        if lesson_id is None:
+            continue
+        retirements.append({"lesson_id": lesson_id,
+                            "reason": str(item.get("reason") or "").strip()[:300] or None})
+        if len(retirements) >= WEEKLY_REFLECTION_MAX:
+            break
+    return {"revisions": revisions, "retirements": retirements}
+
+
 def weekly_reflection_run(payload: dict, completion=None) -> dict:
     """一次周反思（**1 次** LLM 调用）。永不抛异常：任何故障退化成"没有教训"。"""
     import json as _json
@@ -1235,10 +1549,11 @@ def weekly_reflection_run(payload: dict, completion=None) -> dict:
 
     if not isinstance(payload, dict) or not isinstance(payload.get("strategy"), dict):
         return {"ok": False, "lessons": [], "warnings": ["payload 缺少 strategy 字段"]}
-    checker = getattr(llm_service, "_is_available", None)
+    checker = getattr(llm_service, "completion_available", None) \
+        or getattr(llm_service, "_is_available", None)
     if callable(checker):
         try:
-            if not checker():
+            if not checker(completion):
                 return {"ok": False, "lessons": [], "warnings": ["模型服务不可用"]}
         except Exception:  # noqa: BLE001 —— 探测失败不应阻止尝试
             pass
@@ -1247,14 +1562,19 @@ def weekly_reflection_run(payload: dict, completion=None) -> dict:
         choice = call(
             [{"role": "system", "content": _WEEKLY_REFLECTION_SYSTEM},
              {"role": "user", "content": _json.dumps(payload, ensure_ascii=False, default=str)}],
-            temperature=0.2, max_tokens=800)
+            temperature=0.2, max_tokens=1100)
         text = str((((choice or {}).get("message") or {}).get("content")) or "")
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "lessons": [], "warnings": [f"反思调用失败（{type(exc).__name__}）"]}
-    if "AI 服务暂不可用" in text:
-        return {"ok": False, "lessons": [], "warnings": ["模型服务占位响应"]}
+    if "AI 服务暂不可用" in text or "AI 服务未配置" in text:
+        reason = "用户未绑定自己的 API Key（个人中心可配置）" if "AI 服务未配置" in text \
+            else "模型服务占位响应"
+        return {"ok": False, "lessons": [], "warnings": [reason]}
     warnings: list[str] = [] if text.strip() else ["模型返回空内容"]
-    return {"ok": True, "lessons": _parse_weekly_lessons(text), "warnings": warnings}
+    result = {"ok": True, "lessons": _parse_weekly_lessons(text), "warnings": warnings}
+    # 质疑回路（方案一）：旧教训的处置指令一并带回，Java 侧过 id 白名单后落库
+    result.update(_parse_weekly_dispositions(text))
+    return result
 
 
 @app.post("/api/v1/agent/weekly-reflection")
@@ -1262,20 +1582,115 @@ async def weekly_reflection_endpoint(req: Request):
     """**周反思**（P2，经验回流的定性半环）：本周战绩/成交/委员会过程 → ≤3 条结构化教训。
 
     请求体（Java PaperTradingService 在周五复盘时组装）：
-        {"strategy": {...}, "experience": {...}?, "trades": [...]?, "committee": [...]?}
+        {"strategy": {...}, "experience": {...}?, "trades": [...]?,
+         "committee": [...]?, "prior_lessons": [{id, symptom, ...}]?}
 
     - 委员会记录缺一周不开会就没有原料 —— Java 侧门控在先，本端点不再判断；
     - 产物是结构化教训（symptom/context/resolution/reusable_rule/confidence），
       Java 落 MemoryLesson（taskType=weekly_reflection），随经验包回读给委员会；
+    - prior_lessons 是本策略现存旧教训（2026-10-16 质疑回路）：模型对照本周材料
+      可输出 revisions/retirements 处置意见带回 Java，由 Java 过 id 白名单后落库
+      （本服务仍然没有任何教训写接口——防投毒：处置只产出，不落地）；
     - fail-open：任何失败返回 ok=false + 人话 warning，绝不抛异常。
     """
     try:
         data = await req.json()
-        result = await asyncio.to_thread(weekly_reflection_run, data if isinstance(data, dict) else {})
+        payload = data if isinstance(data, dict) else {}
+        # BYOK：周反思记的是这个用户的教训，Key 也用他自己的（没配就"没有教训"降级）
+        completion, _ = _llm_callables(payload, payload.get("user_id"))
+        result = await asyncio.to_thread(weekly_reflection_run, payload, completion)
         return result
     except Exception as e:  # noqa: BLE001
         logger.error(f"weekly reflection error: {e}", exc_info=True)
         return {"ok": False, "lessons": [], "warnings": ["周反思端点异常"]}
+
+
+# ==================== 单笔大亏即时反思（2026-10-18 二轮，mini-reflection） ====================
+# 与周反思的分工：周反思每周五一次、面向"模式"；本端点在一笔大亏了结的当天结算后
+# 立即触发、面向"这一笔"——教训到位时间从"最迟下周五"压到"当天收盘后"，
+# 下一交易日的委员会就能读到。触发阈值与大亏判定在 Java 侧（确定性代码），
+# 本端点只负责定性半环；产物 ≤1 条（单笔材料只配得上一条，宁缺毋滥）。
+
+_TRADE_REFLECTION_MAX = 1
+
+_TRADE_REFLECTION_SYSTEM = (
+    "你是这条策略的单笔复盘官。输入是一笔**已了结且亏损较深**的卖出：成交明细、"
+    "往返路径口径（maePct/mfePct = 持仓期间相对 FIFO 成本的最大不利/有利偏移%，"
+    "exitEarly = 曾有明显浮盈但落袋不足一半）、这条策略的定量战绩（experience）、"
+    "以及当次/最近的委员会决策过程摘录（committee）。\n"
+    f"请提炼**最多 {_TRADE_REFLECTION_MAX} 条**教训，聚焦这一笔暴露出的**可执行**问题"
+    "（例如「浮盈 mfePct 远大于落袋 → 应设跟踪止盈」「入场即遭 deepAdverse → 首仓过重，"
+    "应等回踩确认」）。symptom 一句话点名这笔的具体病理；reusable_rule 是一句可执行、"
+    "可验证的话，不预测行情；context 引用给定的具体数字（不许编）；confidence 如实给。"
+    "材料撑不起一条像样的教训就不输出——**宁缺毋滥，单笔材料只配一条**。\n"
+    "只输出一个 JSON 对象，不要任何其他文字：\n"
+    '{"lessons": [{"symptom": "...", "context": "...", "resolution": "...", '
+    '"reusable_rule": "...", "confidence": 0.0-1.0}]}'
+)
+
+
+def trade_reflection_run(payload: dict, completion=None) -> dict:
+    """一次单笔反思（**1 次** LLM 调用）。永不抛异常：任何故障退化成"没有教训"。
+
+    与 weekly_reflection_run 同一条纪律（解析保守优先、结构化产物、无写接口）；
+    差异只有两点：提示词面向单笔病理、产物封顶 1 条。
+    """
+    import json as _json
+
+    import llm_service
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("strategy"), dict):
+        return {"ok": False, "lessons": [], "warnings": ["payload 缺少 strategy 字段"]}
+    if not isinstance(payload.get("trade"), dict):
+        return {"ok": False, "lessons": [], "warnings": ["payload 缺少 trade 字段"]}
+    checker = getattr(llm_service, "completion_available", None) \
+        or getattr(llm_service, "_is_available", None)
+    if callable(checker):
+        try:
+            if not checker(completion):
+                return {"ok": False, "lessons": [], "warnings": ["模型服务不可用"]}
+        except Exception:  # noqa: BLE001 —— 探测失败不应阻止尝试
+            pass
+    call = completion or llm_service.chat_completion
+    try:
+        choice = call(
+            [{"role": "system", "content": _TRADE_REFLECTION_SYSTEM},
+             {"role": "user", "content": _json.dumps(payload, ensure_ascii=False, default=str)}],
+            temperature=0.2, max_tokens=700)
+        text = str((((choice or {}).get("message") or {}).get("content")) or "")
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "lessons": [], "warnings": [f"反思调用失败（{type(exc).__name__}）"]}
+    if "AI 服务暂不可用" in text or "AI 服务未配置" in text:
+        reason = "用户未绑定自己的 API Key（个人中心可配置）" if "AI 服务未配置" in text \
+            else "模型服务占位响应"
+        return {"ok": False, "lessons": [], "warnings": [reason]}
+    warnings: list[str] = [] if text.strip() else ["模型返回空内容"]
+    lessons = _parse_weekly_lessons(text)[:_TRADE_REFLECTION_MAX]
+    return {"ok": True, "lessons": lessons, "warnings": warnings}
+
+
+@app.post("/api/v1/agent/trade-reflection")
+async def trade_reflection_endpoint(req: Request):
+    """**单笔大亏即时反思**：一笔深亏了结的当天结算后触发 → ≤1 条结构化教训。
+
+    请求体（Java PaperTradingService 在日线结算落库后组装，fail-open 旁路）：
+        {"strategy": {...}, "trade": {...含 roundTrip 的 maePct/mfePct/roundTripPct},
+         "experience": {...}?, "committee": [...]?}
+
+    触发阈值（亏损多深才反思、去重）全在 Java 侧的确定性代码里；本端点与
+    weekly-reflection 同一条纪律：结构化产物、解析保守优先、无教训写接口。
+    """
+    try:
+        data = await req.json()
+        data = await req.json()
+        payload = data if isinstance(data, dict) else {}
+        # BYOK：单笔反思记的是这个用户的教训，Key 也用他自己的
+        completion, _ = _llm_callables(payload, payload.get("user_id"))
+        result = await asyncio.to_thread(trade_reflection_run, payload, completion)
+        return result
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"trade reflection error: {e}", exc_info=True)
+        return {"ok": False, "lessons": [], "warnings": ["单笔反思端点异常"]}
 
 
 # ==================== 季度策略信（2026-10-15）====================
@@ -1308,10 +1723,11 @@ def quarterly_review_run(payload: dict, completion=None) -> dict:
 
     if not isinstance(payload, dict) or not isinstance(payload.get("strategy"), dict):
         return {"ok": False, "letter": None, "warnings": ["payload 缺少 strategy 字段"]}
-    checker = getattr(llm_service, "_is_available", None)
+    checker = getattr(llm_service, "completion_available", None) \
+        or getattr(llm_service, "_is_available", None)
     if callable(checker):
         try:
-            if not checker():
+            if not checker(completion):
                 return {"ok": False, "letter": None, "warnings": ["模型服务不可用"]}
         except Exception:  # noqa: BLE001 —— 探测失败不应阻止尝试
             pass
@@ -1324,8 +1740,10 @@ def quarterly_review_run(payload: dict, completion=None) -> dict:
         text = str((((choice or {}).get("message") or {}).get("content")) or "")
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "letter": None, "warnings": [f"季度评语调用失败（{type(exc).__name__}）"]}
-    if "AI 服务暂不可用" in text:
-        return {"ok": False, "letter": None, "warnings": ["模型服务占位响应"]}
+    if "AI 服务暂不可用" in text or "AI 服务未配置" in text:
+        reason = "用户未绑定自己的 API Key（个人中心可配置）" if "AI 服务未配置" in text \
+            else "模型服务占位响应"
+        return {"ok": False, "letter": None, "warnings": [reason]}
 
     import re as _re
     verdict, suggestions = None, None
@@ -1355,7 +1773,10 @@ async def quarterly_review_endpoint(req: Request):
     """
     try:
         data = await req.json()
-        result = await asyncio.to_thread(quarterly_review_run, data if isinstance(data, dict) else {})
+        payload = data if isinstance(data, dict) else {}
+        # BYOK：季度评语写给这个用户，Key 用他自己的（没配就"未生成评语"降级）
+        completion, _ = _llm_callables(payload, payload.get("user_id"))
+        result = await asyncio.to_thread(quarterly_review_run, payload, completion)
         return result
     except Exception as e:  # noqa: BLE001
         logger.error(f"quarterly review error: {e}", exc_info=True)
@@ -1388,10 +1809,43 @@ async def strategy_revision_endpoint(req: Request):
     """
     try:
         data = await req.json()
-        return await asyncio.to_thread(strategy_revision_run, data if isinstance(data, dict) else {})
+        payload = data if isinstance(data, dict) else {}
+        # BYOK：提案花的是这个用户的 Key（没配就 ok=false，Java 不生成待审批记录）
+        completion, _ = _llm_callables(payload, payload.get("user_id"))
+        return await asyncio.to_thread(strategy_revision_run, payload, completion)
     except Exception as e:  # noqa: BLE001
         logger.error(f"strategy revision error: {e}", exc_info=True)
         return {"ok": False, "error": "修订提案端点异常"}
+
+
+@app.post("/api/v1/llm/test")
+async def llm_test(req: Request):
+    """LLM 连通性探测（BYOK 配套，2026-10-25）：Java「保存前测试」按钮的后端。
+
+    请求体：{"providers": [{name, base_url, api_key, model, chat_path?}, ...],
+             "scope": "可选，冷却命名空间用（用户 id）"}
+    逐条独立探测（不走 _post_chat 的冷却/切换/退避——探测要的是"每一家各自
+    通不通"），单发 15s 超时、max_tokens=8。Key 只进请求头，错误信息截断
+    200 字符且不会带出 Key。内部 token 保护（中间件对 /api/v1/* 统一 fail-closed）。
+    """
+    import llm_service
+
+    try:
+        data = await req.json()
+    except Exception:  # noqa: BLE001
+        return {"results": []}
+    try:
+        providers = llm_service.user_providers(
+            data.get("providers"), data.get("scope") if isinstance(data, dict) else None)
+        if not providers:
+            return {"results": [], "error": "providers 不能为空"}
+        results = await asyncio.to_thread(llm_service.test_providers, providers)
+        return {"results": results}
+    except ValueError as e:
+        return {"results": [], "error": str(e)}
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"llm test error: {e}", exc_info=True)
+        return {"results": [], "error": "探测失败，请稍后重试"}
 
 
 # ==================== 同花顺扫码登录 ====================
@@ -1467,9 +1921,12 @@ def ths_qr_poll(qrSessionId: str = ""):
         QR_STORE.pop(qrSessionId, None)
         return _ths_error(e.message)
 
-    # 扫到了 —— 会话用完即弃
-    QR_STORE.pop(qrSessionId, None)
-    logger.info(f"ths qr confirmed: account={session['account']}")
+    # 扫到了 —— 会话用完即弃。
+    # 账号掩码（2026-10-15 安全测试 L3）：Java 侧日志只记前 3 后 2，Python 侧对齐
+    # —— 完整账号是凭证级敏感信息，不该全文进日志。
+    _acc = str(session["account"])
+    _masked = (_acc[:3] + "***" + _acc[-2:]) if len(_acc) > 5 else "***"
+    logger.info(f"ths qr confirmed: account={_masked}")
     return {"ok": True, "data": {"status": "ok", "session": session}}
 
 
@@ -1517,6 +1974,18 @@ def _news_error(message: str, status_code: int = 502):
 
 NEWS_TYPES = (news_client.LEVEL_NOTICE, news_client.LEVEL_MEDIA,
               news_client.LEVEL_REPORT, news_client.LEVEL_FORUM)
+
+
+@app.get("/api/v1/news/hot-rank")
+def news_hot_rank(limit: int = 20):
+    """个股人气榜 TopN（资讯雷达「热榜」视图）。5 分钟 TTL 共享缓存，fail-open。
+
+    中间件已按 `/api/v1/*` fail-closed 校验 X-Internal-Token（Java 代理调用）。
+    """
+    from akshare_client import get_hot_rank
+    rows = get_hot_rank(limit=max(1, min(int(limit), 50)))
+    return {"ok": bool(rows), "items": rows,
+            "note": "东方财富个股人气榜，分钟级更新（5 分钟缓存）；排名是市场关注度，不是买卖建议"}
 
 
 @app.post("/api/v1/news/fetch")

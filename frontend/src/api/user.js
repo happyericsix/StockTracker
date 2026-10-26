@@ -3,6 +3,9 @@ import request from './request.js'
 /** 获取个人信息 */
 export const getProfile = () => request.get('/user/profile')
 
+/** 新手引导完成（翻到最后一页点「开始使用」时调用；幂等） */
+export const completeOnboarding = () => request.post('/user/onboarding/complete')
+
 /** 修改个人信息（email/phone/pushChannel/pushTarget） */
 export const updateProfile = (data) => request.put('/user/profile', data)
 
@@ -14,3 +17,17 @@ export const testPush = (data) => request.post('/user/push/test', data)
 
 /** 最近推送状态（时间倒序）：回答"推送到底有没有发出去、成没成功" */
 export const getPushLog = (limit = 5) => request.get('/user/push/log', { params: { limit } })
+
+// ---- AI 模型 Key（BYOK：用户自带主/备 LLM Key，加密存储，接口只回脱敏形态） ----
+
+/** Key 配置状态：{enabled, configured, primary:{...maskedKey}, fallback, lastTestedAt, lastTestOk, lastError} */
+export const getLlmConfig = () => request.get('/user/llm/config')
+
+/** 保存配置（apiKey 留空 = 保留已存 Key，与推送 Key 同一语义） */
+export const saveLlmConfig = (data) => request.put('/user/llm/config', data)
+
+/** 连通性测试：body 可选——带 = 测表单值（保存前先测），不带 = 复测已存配置 */
+export const testLlmConfig = (data) => request.post('/user/llm/test', data || {})
+
+/** 清除全部 Key 配置（此后 AI 功能降级，直到重新配置） */
+export const clearLlmConfig = () => request.delete('/user/llm/config')

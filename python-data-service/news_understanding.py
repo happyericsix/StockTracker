@@ -264,6 +264,63 @@ def normalize_analysis(raw, item: dict) -> dict:
     }
 
 
+# ==================== 研报评级兜底（2026-10-16）====================
+# 缺口（ROADMAP 2026-09-19 记录，同类情报工具对比后决定补上）：研报只有标题+评级，
+# 正文是 PDF 未抓取，LLM 实测判不出方向（0/2）。但评级是券商的**正式表态**，
+# 按封闭映射表做确定性落向：子串匹配，命中即落，表外词不猜。
+
+#: 评级词表（子串匹配：源站写法有"维持买入""上调至增持"等变体）
+RATING_BULLISH_KEYS = ("买入", "强烈推荐", "增持", "推荐", "优于大市", "强于大市", "首次覆盖")
+RATING_BEARISH_KEYS = ("卖出", "减持", "回避", "落后大市")
+RATING_NEUTRAL_KEYS = ("中性", "持有", "观望", "同步大市", "综合")
+#: 兜底方向的置信度：过 MIN_CONFIDENCE（0.4）但明显低于 LLM 正常判定——
+#: 这是"映射"不是"判断"，宁可谦虚。
+RATING_FALLBACK_CONFIDENCE = 0.5
+
+
+def _report_rating_direction(rating: str) -> str | None:
+    """评级文本 → 方向（封闭映射，表外词返回 None 不猜）。"""
+    text = str(rating or "").strip()
+    if not text:
+        return None
+    if any(key in text for key in RATING_BULLISH_KEYS):
+        return "利好"
+    if any(key in text for key in RATING_BEARISH_KEYS):
+        return "利空"
+    if any(key in text for key in RATING_NEUTRAL_KEYS):
+        return "中性"
+    return None
+
+
+def _apply_report_rating_fallback(entries: dict[int, dict]) -> int:
+    """研报(L3)评级→方向兜底：只接管 direction 为空的条目，不改写 LLM 结论。
+
+    - 兜底条目标 `analyzed=True`：否则 Java 侧 applyAnalysis 会因"模型没看过"
+      跳过落库，评级就永远到不了用户眼前（这正是该兜底存在的意义）；
+    - impact 不抬高（默认 low）：评级是券商表态，不等于已证实的影响；
+    - plain_summary 前缀注明口径，前端一眼能看出"这是映射来的"。
+    返回兜底条数（给调用方记日志用）。
+    """
+    applied = 0
+    for entry in entries.values():
+        if entry.get("direction") is not None:
+            continue
+        if entry.get("source_level") != 3:
+            continue
+        rating = str(entry.get("event_type_raw") or "").strip()
+        mapped = _report_rating_direction(rating)
+        if mapped is None:
+            continue
+        note = f"（方向由研报评级映射：{rating} → {mapped}；研报正文为 PDF 未获取）"
+        summary = str(entry.get("plain_summary") or "").strip()
+        entry["direction"] = mapped
+        entry["confidence"] = RATING_FALLBACK_CONFIDENCE
+        entry["analyzed"] = True
+        entry["plain_summary"] = sanitize(f"{summary}{note}" if summary else note.strip("（）"))
+        applied += 1
+    return applied
+
+
 def passes_prefilter(item: dict) -> bool:
     """影响预筛（漏斗 L1 代码规则 + L2 相关度）。
 
@@ -435,6 +492,11 @@ def analyze_events(items: list[dict]) -> dict:
             result["analyzed"] += 1
     for original_index, entry in degraded_entries(unanalyzed):
         entries[original_index] = entry
+
+    # 研报评级兜底在可信度计算之前：方向落定后，批内交叉印证能把它当正常结论用
+    applied = _apply_report_rating_fallback(entries)
+    if applied:
+        logger.info("研报评级兜底：%d 条按评级映射落方向（LLM 未给方向）", applied)
 
     # 可信度（信源/内容/交叉印证）对**全部**条目生效，包括降级的：
     # "模型没配"不该连带把"这条是传闻"的警示也藏起来。批内做交叉印证。

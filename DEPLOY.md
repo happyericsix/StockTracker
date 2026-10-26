@@ -64,7 +64,8 @@ scp -r stock-tracker root@服务器IP:/opt/   # 只需要这些文件：
 docker load -i /root/st-images.tar
 cd /opt/stock-tracker
 cp .env.example .env
-vim .env    # 三个值都改成强随机：MYSQL_ROOT_PASSWORD / INTERNAL_API_TOKEN / DEEPSEEK_API_KEY
+vim .env    # 改成强随机：MYSQL_ROOT_PASSWORD / INTERNAL_API_TOKEN / LLM_AES_KEY（openssl rand -hex 24）
+            # DEEPSEEK_API_KEY 可选——2026-10-25 起用户 AI 花用户自己的 Key，它只服务新闻解读等系统级任务
 ```
 
 `secrets/` 里是 JWT 签名密钥（app.key/app.pub）。**要么从本机拷贝，要么在服务器重新生成**
@@ -95,9 +96,13 @@ curl -I http://localhost/                     # 200，前端页
 curl http://localhost/api/v1/market/status    # 401（未登录，说明 API 通了）
 ```
 
-然后浏览器开 `http://服务器IP/`：注册新账号 → 登录 → 自选股加 sh600519 → 行情能出
-→ 智能助手说一句话（验证 DEEPSEEK_API_KEY 生效，回复应是真分析不是模板）→ 让助手建
-一条策略并开模拟盘。
+然后浏览器开 `http://服务器IP/`：注册新账号 → 登录 → **个人中心 → AI 模型 Key 绑定你自己的
+DeepSeek Key（点「测试连通性」应通过）** → 自选股加 sh600519 → 行情能出 → 智能助手说一句话
+（回复应是真分析不是模板；没绑 Key 时会有横幅提示）→ 让助手建一条策略并开模拟盘。
+
+> 2026-10-25 起（BYOK）：用户触发的 AI（助手/委员会/盯盘/反思/记忆巩固）花用户自己在
+> 个人中心绑定的 Key；未绑定的用户降级为模板回复。存量用户升级后第一次进助手页会看到
+> 引导横幅——包括你自己，先去个人中心把 Key 配上。
 
 全部通过后，docker logs stock-tracker 里应能看到定时任务的日志（价格刷新每 5 分钟一条）。
 
@@ -106,9 +111,10 @@ curl http://localhost/api/v1/market/status    # 401（未登录，说明 API 通
 - [x] MySQL/Redis/Python 端口不对外（compose 已保证，只有 nginx 80 发布）
 - [x] 内部接口令牌无公开默认值：`.env` 未配置时 compose 拒绝启动（2026-10-05 安全检查修复）
 - [x] nginx 限流：`/api/v1/auth/` 1r/s（防爆破）、其余 API 10r/s，超限 429
-- [ ] `.env` 各项全部改掉示例值（MYSQL_ROOT_PASSWORD / INTERNAL_API_TOKEN / THS_AES_KEY 用 `openssl rand` 生成）
+- [ ] `.env` 各项全部改掉示例值（MYSQL_ROOT_PASSWORD / INTERNAL_API_TOKEN / THS_AES_KEY / LLM_AES_KEY 用 `openssl rand` 生成）
 - [ ] **注册开关**：先 `AUTH_REGISTRATION_ENABLED=true` 部署 → 注册自己的账号 → 改 `false` →
-      `docker compose up -d` 重建。开放注册 = 陌生人无限触发 LLM 调用烧你的额度
+      `docker compose up -d` 重建。（BYOK 后用户 AI 花自己的 Key；这条约束新闻解读等
+      系统级额度与注册滥用的资源面）
 - [ ] 防火墙只开 22/80（§1 的 ufw）
 - [ ] SSH 改密钥登录、关密码登录（云厂商控制台可配）
 

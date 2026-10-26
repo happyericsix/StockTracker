@@ -1,5 +1,5 @@
 """
-把 qrcode 库（纯 Python、无依赖）下载并解包到 stock-tracker/vendor/。
+把 qrcode 库（纯 Python、无依赖）下载并解包到 StockTracker/vendor/。
 
 为什么不 pip install：本沙箱 PowerShell/curl 的 TLS 被拦截，pip 也走同样的
 栈因而卡死；但 Python 的 urllib 能正常访问 PyPI。所以这里直接用 urllib 取

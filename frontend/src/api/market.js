@@ -22,3 +22,6 @@ export const getMarketStatus = () => request.get('/market/status')
  * ⚠️ 展示层必须带上验证结论与 disclaimer——未验证的情绪不许裸奔成"看多/看空"。
  */
 export const getSentiment = (symbol) => request.get('/market/sentiment', { params: { symbol } })
+
+/** 大盘主力资金流日线（净额亿元，升序）。软失败：资金卡缺席不挡首页。 */
+export const getFundFlow = (limit = 60) => request.get('/market/fund-flow', { params: { limit } })

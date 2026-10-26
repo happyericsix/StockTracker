@@ -184,8 +184,10 @@ public class PaperPeriodicReviewService {
     private String commentaryBlock(Strategy strategy, PaperAccount account, Period period, PeriodStats stats) {
         JsonNode letter = null;
         try {
+            // BYOK：评语花的是这个用户的 Key（未配置 → "未生成评语"，数字底座照发）
             letter = strategyClient.quarterlyReview(
-                    letterPayload(strategy, period, stats));
+                    letterPayload(strategy, period, stats),
+                    strategy.getUser() != null ? strategy.getUser().getId() : null);
         } catch (Exception e) {
             log.info("季度评语调用失败 strategy id={}（信仍发出，只带数字）：{}", strategy.getId(), e.toString());
         }

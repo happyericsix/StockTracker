@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import logging as _logging
+import os
 import re
 from datetime import datetime
 
@@ -82,6 +83,8 @@ SCOPE_MEMORY_READ_OWN = "memory:read:own"
 # 外部数据源单独授权：新闻/财报是第三方内容，将来按套餐开关时它是最该被单独控的一类
 SCOPE_NEWS_READ = "news:read"
 SCOPE_FUNDAMENTAL_READ = "fundamental:read"
+# 并行子调研单独授权：一次调用顶得上十几轮工具调用，是最贵的只读操作
+SCOPE_RESEARCH_FANOUT = "research:fanout"
 
 HISTORY_DEFAULT_DAYS = 60
 HISTORY_MAX_DAYS = 120
@@ -360,11 +363,59 @@ def _tool_backtest_strategy(args):
     return tc.ok({"valid": True, "backtest": run_backtest_realistic(cfg_json, records)})
 
 
+def _is_full_position(cfg) -> bool:
+    """满仓判定：type=full，或 percent 且 size_pct>=100。
+
+    schema 的默认值就是 full/100 —— 模型漏写 position 字段同样意味着满仓，
+    判定必须放在默认值已物化的**校验后对象**上做。
+    """
+    pos = getattr(cfg, "position", None)
+    if pos is None:
+        return False
+    if getattr(pos, "type", "") == "full":
+        return True
+    size = getattr(pos, "size_pct", None)
+    try:
+        return size is not None and float(size) >= 100
+    except (TypeError, ValueError):
+        return False
+
+
 def _tool_finalize_strategy(args):
     cfg_json = _require_strategy(args)
     cfg, err = validate_strategy_config(cfg_json)
     if err:
         return tc.ok({"valid": False, "error": err})
+    # 满仓硬门禁（2026-10-15 红队 F2 修复：静默满仓实战复现，提示词铁律挡不住）。
+    # 用户没在对话里明确确认过满仓时一律拒答；position_confirmed 只在用户
+    # 明确同意（或主动要求）满仓之后才允许带上 —— 见 SYSTEM_PROMPT 同步约束。
+    # 参数缺口问答（2026-10-16，②步）：agent 不用默认值替代用户没说的决定——
+    # 仓位缺失、止损缺失都先问，用户答过（gaps_confirmed=true）才放行落库。
+    # 与满仓门禁同一形状：宁可多问一句，不替用户做最重的决定。
+    if not bool(args.get("gaps_confirmed")):
+        questions = []
+        position = cfg_json.get("position") or {}
+        if position.get("size_pct") is None and position.get("type") != "full":
+            questions.append("仓位没写：默认半仓（50%）可以吗，还是你有想法？")
+        exit_types = [c.get("type") for c in ((cfg_json.get("exit") or {}).get("conditions") or [])]
+        if not any(x in exit_types for x in ("stop_loss_pct", "trailing_stop_pct")):
+            questions.append("止损没写：默认亏 8% 止损可以吗，还是你有自己的线？")
+        if questions:
+            return tc.ok({
+                "valid": False,
+                "needs_clarification": questions,
+                "error": ("策略参数有缺口，请先逐条问用户并把答案写进配置；"
+                          "用户明确表态后带 gaps_confirmed=true 重新调用。"
+                          "不要用默认值静默补齐——那是替用户做决定。"),
+            })
+    if _is_full_position(cfg) and not bool(args.get("position_confirmed")):
+        return tc.ok({
+            "valid": False,
+            "error": ("仓位为满仓（position.type=full 或 size_pct=100）。请先向用户披露"
+                      "“该策略会满仓买入，没有现金缓冲”，等用户明确确认满仓后，"
+                      "再带 position_confirmed=true 重新调用 finalize_strategy；"
+                      "用户没说仓位时请先询问，或改用已向用户披露的非满仓仓位（如 50%）。"),
+        })
     return tc.ok({"valid": True, "error": None, "strategy_json": cfg.model_dump()})
 
 
@@ -696,6 +747,71 @@ def _news_digest(item):
     }
 
 
+def _tool_hot_rank(args):
+    """个股人气榜（热榜，2026-10-16）：市场关注度 TopN。
+
+    与新闻类工具的边界（这是它不过 external_source 笼子的理由）：返回的是
+    **结构化数字**（排名/价格/涨跌幅，无正文、不能夹带指令），与行情同类；
+    5 分钟缓存由数据层（akshare_client.get_hot_rank）负责。注意口径：
+    排名是市场关注度，不是买卖建议——这句话也写进了返回体给模型看。
+    """
+    from akshare_client import get_hot_rank
+
+    limit = _int_arg(args, "limit", 10, maximum=20)
+    rows = get_hot_rank(limit)
+    if not rows:
+        return tc.fail(tc.SOURCE_UNAVAILABLE,
+                       "热榜暂不可用（人气榜取数失败），稍后再试", retryable=True)
+    return tc.ok({"items": rows,
+                  "note": "排名=市场关注度（东财人气榜），不是买卖建议；可结合 get_news/search_news 看这些票在发生什么"},
+                 source="em.hot_rank", source_label="东方财富·个股人气榜", trust="low")
+
+
+def _tool_get_market_fund_flow(args):
+    """大盘主力资金流日线（净额亿元，升序，最后一根最新）。
+
+    结构化数字（无正文，与行情同类不过外部源笼子）。口径提醒随返回体下发：
+    主力=超大单+大单；日频盘后更新，是"钱的冷热"语境不是买卖触发。
+    """
+    from akshare_client import get_market_fund_flow
+
+    limit = _int_arg(args, "days", 10, maximum=60)
+    rows = get_market_fund_flow(limit=limit)
+    if not rows:
+        return tc.fail(tc.SOURCE_UNAVAILABLE,
+                       "大盘资金流暂不可用（上游接口失败），稍后再试", retryable=True)
+    latest = rows[-1]
+    return tc.ok({
+        "items": rows,
+        "latest_date": latest["date"],
+        "main_net_yi_today": latest.get("main_net_yi"),
+        "note": "主力净流入=超大单+大单（亿元，正=流入）；日频盘后更新，是资金冷热语境，不是买卖触发信号",
+    }, source="em.market_fund_flow", source_label="东方财富·大盘资金流", trust="low")
+
+
+def _tool_get_my_alerts(args):
+    """用户最近的预警（价格/指标 ALERT + 新闻 NEWS_ALERT，新→旧）。
+
+    身份从 tool_scope 取（同 memory_search 的越权防线）。**只读**：agent 不能
+    替用户标记已读——回执是用户在消息中心的独占行为。回答纪律：预警是已发生
+    的提醒，答"几条未读/都是什么"，不要擅自给"该不该止损"之类的建议。
+    """
+    from agent import message_store, tool_scope
+
+    user_id = tool_scope.user_id()
+    if not user_id:
+        return tc.fail(tc.INVALID_ARGS,
+                       "当前会话没有用户身份，查不了预警；请先登录。", retryable=False)
+    limit = _int_arg(args, "limit", 10, maximum=30)
+    items = message_store.recent_alerts(user_id, limit)
+    unread = sum(1 for it in items if not it.get("read"))
+    return tc.ok({
+        "alerts": items,
+        "unread": unread,
+        "note": "含价格/指标预警（ALERT）与新闻预警（NEWS_ALERT）；标记已读请在消息中心操作",
+    }, source="java.messages", source_label="消息中心·预警", trust="high")
+
+
 def _tool_search_news(args):
     """多源资讯搜索（资讯雷达同款链路）+ 逐条可信度标注。
 
@@ -840,7 +956,9 @@ def _tool_memory_search(args):
     # 经验（"这类问题上次怎么解决的"）也一起给：它们不是事实，但同样能避免重复踩坑
     lessons = []
     try:
-        lessons = memory_store.search_lessons(user_id, query=query or None, limit=3)
+        # symbol 同传给教训检索（情境绑定）：聊某只票时，同票策略的教训优先浮上来
+        lessons = memory_store.search_lessons(user_id, query=query or None, limit=3,
+                                              symbol=symbol)
     except Exception:  # noqa: BLE001 —— 经验取不到不影响事实检索
         lessons = []
 
@@ -1014,6 +1132,33 @@ def _tool_get_stock_briefing(args):
     return tc.ok(payload)
 
 
+# ==================== 并行子调研（fanout，orchestrator-worker） ====================
+
+
+def _tool_fanout(args):
+    """fanout_research 的执行入口。
+
+    身份（user_id / scopes / epoch）一律来自服务端注入的 tool_scope 上下文，
+    **不接受模型传入**——模型能提供的只有 question 与 subtasks（与 memory_search
+    同一条越权防线）。真正的调度、预算与聚合纪律都在 `agent/fanout.py`。
+    """
+    from agent import fanout, tool_scope
+
+    ctx = tool_scope.context()
+    return fanout.run(
+        str(args.get("question") or "").strip(),
+        args.get("subtasks"),
+        user_id=ctx.user_id,
+        session_key=ctx.session_key,
+        scopes=ctx.scopes,
+        epoch=ctx.epoch,
+        # BYOK：子调研与汇总沿用主 agent 轮的 LLM 调用（用户自己的 Key），
+        # 不带就维持 env 行为（系统级调用）
+        completion=ctx.completion,
+        synthesis_completion=ctx.completion,
+    )
+
+
 # ==================== 声明表（唯一真相源） ====================
 
 REGISTRY = ToolRegistry()
@@ -1175,8 +1320,19 @@ _SPECS = (
     ToolSpec(
         name="finalize_strategy", namespace="strategy",
         description=("Finalize the complete strategy JSON and return a plain-language summary. Include "
-                     "schema_version=1.0, name, symbol, initial_capital, data, position, entry, exit, risk."),
-        parameters=_obj({"strategy_json": {"type": "object"}}, ["strategy_json"]),
+                     "schema_version=1.0, name, symbol, initial_capital, data, position, entry, exit, risk. "
+                     "Full position (position.type=full or size_pct=100) is gated: the call is rejected "
+                     "unless position_confirmed=true, which is ONLY allowed after the user explicitly "
+                     "confirmed or requested full position in this conversation — disclose the default "
+                     "and ask first."),
+        parameters=_obj({
+            "strategy_json": {"type": "object"},
+            "position_confirmed": {
+                "type": "boolean", "default": False,
+                "description": "True ONLY if the user explicitly confirmed/requested full position "
+                               "in this conversation. The tool rejects full-position strategies "
+                               "without it."},
+        }, ["strategy_json"]),
         handler=_tool_finalize_strategy,
         layer=LAYER_PURE, scopes=(SCOPE_STRATEGY_COMPUTE,),
         timeout_s=5.0, tags=("strategy",),
@@ -1188,7 +1344,7 @@ _SPECS = (
                     "symbol": "600519",
                     "initial_capital": 100000,
                     "data": {"period": "day", "lookback_days": 250},
-                    "position": {"type": "percent", "size_pct": 100},
+                    "position": {"type": "percent", "size_pct": 50},
                     "entry": {"logic": "all", "conditions": [
                         {"type": "ma_cross", "fast": 20, "slow": 60, "direction": "above"}]},
                     "exit": {"logic": "any", "conditions": [
@@ -1242,6 +1398,59 @@ _SPECS = (
         examples=(
             {"symbol": "600519", "limit": 5},
             {"limit": 10},
+        ),
+    ),
+    # 热榜（2026-10-16）：结构化数字（排名/价格/涨跌幅），与行情同类，
+    # 不过外部源笼子；助手用它答"现在市场在关注什么"。
+    ToolSpec(
+        name="get_hot_rank", namespace="news",
+        description=("Get the current stock attention hot rank (top N by market attention, "
+                     "eastmoney popularity board, 5-min cache). Use it for 'what is hot / what "
+                     "is the market watching' questions, then dig into a name with get_news or "
+                     "search_news. Rank measures ATTENTION only - it is not a buy/sell signal."),
+        parameters=_obj({"limit": {"type": "integer", "default": 10,
+                                   "minimum": 1, "maximum": 20}}, []),
+        handler=_tool_hot_rank,
+        layer=LAYER_INTEGRATION, scopes=(SCOPE_NEWS_READ,),
+        timeout_s=15.0, tags=("news",),
+        examples=(
+            {},
+            {"limit": 20},
+        ),
+    ),
+    # 大盘资金流（2026-10-16）：结构化数字，与行情同类。
+    ToolSpec(
+        name="get_market_fund_flow", namespace="market",
+        description=("Get daily market-wide main-force fund flow history (net inflow in "
+                     "100M CNY, newest last, eastmoney). Main force = super-large + large "
+                     "orders. Use it for 'is money flowing in or out of the market' "
+                     "context. Daily, updated after close - it is background context, "
+                     "NOT a trading trigger."),
+        parameters=_obj({"days": {"type": "integer", "default": 10,
+                                  "minimum": 1, "maximum": 60}}, []),
+        handler=_tool_get_market_fund_flow,
+        layer=LAYER_INTEGRATION, scopes=(SCOPE_MARKET_READ,),
+        timeout_s=15.0, tags=("market",),
+        examples=({}, {"days": 30}),
+    ),
+    # 用户预警（2026-10-16）：读消息中心的 ALERT + NEWS_ALERT。
+    # 身份来自 tool_scope（用户私读），只读不回执。
+    ToolSpec(
+        name="get_my_alerts", namespace="messages",
+        description=("Get the user's recent alerts (newest first): price/indicator alerts "
+                     "(ALERT) and high-impact news alerts on watched stocks (NEWS_ALERT). "
+                     "Use it when the user asks 'any alerts / what did I miss / unread "
+                     "messages'. Read-only: marking as read is the user's action in the "
+                     "message center, never the assistant's. Alerts are things that already "
+                     "happened - report them factually, do not turn them into trade advice."),
+        parameters=_obj({"limit": {"type": "integer", "default": 10,
+                                   "minimum": 1, "maximum": 30}}, []),
+        handler=_tool_get_my_alerts,
+        layer=LAYER_INTEGRATION, scopes=(SCOPE_NEWS_READ,),
+        timeout_s=10.0, tags=("messages",),
+        examples=(
+            {},
+            {"limit": 20},
         ),
     ),
     # 与 get_news 同一批外部工具，但数据集独立（news.search）：多源聚合搜索的
@@ -1301,6 +1510,9 @@ _SPECS = (
         layer=LAYER_INTEGRATION, scopes=(SCOPE_NEWS_READ,),
         cost_class=COST_EXPENSIVE,      # 未分析条目会现场补一次 deep 解读
         timeout_s=45.0, tags=("news",),
+        # 原文正文是第三方文本（2026-10-15 注入面修复：此前是唯一不包数据块的
+        # 外部正文工具——新闻体内藏指令会以普通 tool 消息进入上下文）
+        provenance=PROVENANCE_EXTERNAL, trust=TRUST_LOW, source="news.archive",
         result_budget_chars=3600,
         examples=({"event_id": 321},),
     ),
@@ -1320,7 +1532,10 @@ _SPECS = (
         }, ["symbol"]),
         handler=_tool_get_topic_story,
         layer=LAYER_INTEGRATION, scopes=(SCOPE_NEWS_READ,),
+        cost_class=COST_EXPENSIVE,
         timeout_s=12.0, tags=("news",),
+        # digest/story 由第三方报道合成，注入指令可能随之传播（同 2026-10-15 修复）
+        provenance=PROVENANCE_EXTERNAL, trust=TRUST_LOW, source="news.topics",
         result_budget_chars=3200,
         examples=({"symbol": "600519", "days": 7},),
     ),
@@ -1339,7 +1554,10 @@ _SPECS = (
         }, ["symbol"]),
         handler=_tool_get_stock_briefing,
         layer=LAYER_INTEGRATION, scopes=(SCOPE_NEWS_READ,),
+        cost_class=COST_EXPENSIVE,
         timeout_s=12.0, tags=("news",),
+        # 事件摘要同样源自第三方报道（同 2026-10-15 修复）
+        provenance=PROVENANCE_EXTERNAL, trust=TRUST_LOW, source="news.briefing",
         result_budget_chars=4200,
         examples=({"symbol": "600519", "days": 7},),
     ),
@@ -1425,6 +1643,41 @@ _SPECS = (
         layer=LAYER_INTEGRATION, scopes=(SCOPE_MEMORY_READ_OWN,),
         timeout_s=8.0, tags=("memory",),
     ),
+    ToolSpec(
+        name="fanout_research", namespace="research",
+        description=("Fan-out parallel research: split ONE decomposable question into 2-5 "
+                     "independent subtasks; each is researched in parallel by a sub-agent "
+                     "with a clean context (read-only market/news/fundamental tools), then "
+                     "merged into one brief. Use it for breadth questions one tool call "
+                     "cannot cover — e.g. comparing several symbols side by side, or "
+                     "surveying what happened across several sectors/themes. Do NOT use it "
+                     "for drilling into a single symbol (query market/news tools directly — "
+                     "faster and cheaper), nor when subtasks depend on each other's results. "
+                     "Subtasks must each name what to find out; results come back as worker "
+                     "summaries plus a merged brief, with per-worker token/tool usage."),
+        parameters=_obj({
+            "question": {"type": "string",
+                         "description": "The overall question being researched (context for every subtask)."},
+            "subtasks": {"type": "array", "minItems": 2, "maxItems": 5,
+                         "items": {"type": "object", "properties": {
+                             "objective": {"type": "string",
+                                           "description": "What this subtask should find out, as a self-contained question."},
+                             "focus_symbol": {"type": "string",
+                                              "description": "Optional A-share code/name this subtask focuses on."},
+                         }, "required": ["objective"]},
+                         "description": "2-5 mutually independent subtasks."},
+        }, ["question", "subtasks"]),
+        handler=_tool_fanout,
+        layer=LAYER_INTEGRATION, scopes=(SCOPE_RESEARCH_FANOUT,),
+        # 一次 fanout = 最多 5 个 worker × 各自的模型调用，是最贵的只读操作：
+        # 贵重配额（每轮 3 次）自动限频；不可重试——重试等于把这笔钱再花一遍。
+        cost_class=COST_EXPENSIVE, retryable=False,
+        timeout_s=240.0, tags=("research",),
+        result_budget_chars=6000,
+        examples=({"question": "白酒三巨头最近的基本面和消息面谁更稳",
+                   "subtasks": [{"objective": "茅台最近的基本面与消息面要点", "focus_symbol": "600519"},
+                                {"objective": "五粮液最近的基本面与消息面要点", "focus_symbol": "000858"}]},),
+    ),
 )
 
 for _spec in _SPECS:
@@ -1436,10 +1689,37 @@ TOOL_NAMES = REGISTRY.names()
 TOOL_TIMEOUTS = {spec.name: spec.timeout_s for spec in REGISTRY.specs()}
 _HANDLERS = {spec.name: spec.handler for spec in REGISTRY.specs()}
 
-# 普通用户默认被授予的能力（将来由 Java 按套餐下发覆盖即可实现套餐控制）
-DEFAULT_USER_SCOPES = frozenset(
-    scope for spec in REGISTRY.specs() for scope in (spec.scopes or ())
-)
+
+def _derive_default_scopes(specs) -> frozenset:
+    """普通用户默认被授予的能力（将来由 Java 按套餐下发覆盖即可实现套餐控制）。
+
+    `mcp:` 前缀的 scope（第三方 MCP 工具）默认**跟随放开**（2026-10-20 用户决策：
+    MCP 生态默认可用，与 news:read 的既有先例一致）；要收紧时设
+    MCP_DEFAULT_VISIBLE=0 即整体隐藏（第三方质量不可预知时的紧急闸）。
+    """
+    mcp_hidden = str(os.getenv("MCP_DEFAULT_VISIBLE") or "").strip().lower() in ("0", "false", "no", "off")
+    return frozenset(
+        scope for spec in specs for scope in (spec.scopes or ())
+        if not (mcp_hidden and scope.startswith("mcp:"))
+    )
+
+
+DEFAULT_USER_SCOPES = _derive_default_scopes(REGISTRY.specs())
+
+
+def _refresh_derived():
+    """挂载新工具（MCP）后重导模块级派生常量。
+
+    注意 `from tool_registry import TOOL_SCHEMAS` 这类绑定不会被刷新——
+    调用方（react_agent 等）只在"装填结果为空"的兜底分支用它，
+    正常路径走 `schemas(enabled=...)` 的动态查询，不受影响。
+    """
+    global TOOL_SCHEMAS, TOOL_NAMES, TOOL_TIMEOUTS, _HANDLERS, DEFAULT_USER_SCOPES
+    TOOL_SCHEMAS = [spec.schema() for spec in REGISTRY.specs()]
+    TOOL_NAMES = REGISTRY.names()
+    TOOL_TIMEOUTS = {spec.name: spec.timeout_s for spec in REGISTRY.specs()}
+    _HANDLERS = {spec.name: spec.handler for spec in REGISTRY.specs()}
+    DEFAULT_USER_SCOPES = _derive_default_scopes(REGISTRY.specs())
 
 
 # ==================== 查询与自检 ====================

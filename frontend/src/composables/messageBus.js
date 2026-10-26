@@ -2,6 +2,14 @@ import { reactive } from 'vue'
 import { getUnreadCount } from '../api/messages.js'
 
 /**
+ * 消息中心口径：只有这些类型的未读才进红点。
+ * 必须与后端 MessageService.CENTER_TYPES 保持一致（列表、未读数接口同源）——
+ * 这条 SSE 流上还有 CHAT_BOT/CHAT_USER 聊天消息（read=false 也照推，
+ * 聊天页实时回复靠它），无差别累加会造出"消息中心里看不见、也点不掉"的幽灵红点。
+ */
+export const CENTER_TYPES = ['ALERT', 'STRATEGY_SENTINEL', 'STRATEGY_REVIEW', 'NEWS_ALERT']
+
+/**
  * 站内消息总线（全局单例）
  * - 维护一条 SSE 长连接，接收服务端推送的新消息
  * - 维护未读数状态，供 Dashboard 角标与消息中心共用
@@ -31,6 +39,9 @@ export const messageBus = reactive({
     }
     this.es = new EventSource(`/api/v1/messages/stream?token=${encodeURIComponent(token)}`)
     this.es._token = token
+    // 未读数初值不能依赖"用户恰好先落在 Dashboard"（那只是目前碰巧调 refreshUnread
+    // 的页面之一）——连接真正建立时统一对一次账。
+    this.refreshUnread()
     this.es.onopen = () => {
       // 只有"断开过又恢复"才通知：首次连接时页面本来就刚拉过数据
       if (this._errored) {
@@ -41,7 +52,7 @@ export const messageBus = reactive({
     this.es.addEventListener('message', (e) => {
       try {
         const msg = JSON.parse(e.data)
-        if (msg && msg.read === false) this.unread += 1
+        if (msg && msg.read === false && CENTER_TYPES.includes(msg.type)) this.unread += 1
         this.latest = msg
         this.handlers.forEach((h) => h(msg))
       } catch (err) {

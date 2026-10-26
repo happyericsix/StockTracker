@@ -36,6 +36,9 @@ from datetime import date, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agent import trading_committee as tc  # noqa: E402
+from agent.revision import (  # noqa: E402
+    COMPLEXITY_BONUS_MAX_PT, COMPLEXITY_PENALTY_PT, complexity_penalty_pt,
+)
 from agent.strategy_engine import run_backtest_realistic  # noqa: E402
 from agent.strategy_schema import validate_strategy_config  # noqa: E402
 from akshare_client import get_history  # noqa: E402
@@ -46,6 +49,63 @@ from finetune.replay_factory import (  # noqa: E402
 
 WEEK_LEN = 5          # 多少个决策日算一个"周"
 MIN_BARS_FOR_GATE = 60  # 回测闸门需要的最少历史（否则提案暂缓）
+
+# ---- 沙盘证据对齐（2026-10-16）：生产委员会看估值/财务，沙盘此前只看价量 ----
+# 两块都按 as-of 切片：估值日线截到当日（晚于当日的行不存在）；财报按
+# "报告期 + 122 天已披露"口径过滤（见 akshare_client.get_financial_abstract）。
+# 取数函数是模块级的：测试可注入确定性桩，不需要网络。fail-open：缺席不挡回放。
+_SANDBOX_VALUATION_CACHE: dict = {}
+_SANDBOX_FUNDAMENTALS_CACHE: dict = {}
+
+
+def _fetch_valuation_quietly(symbol: str) -> list[dict]:
+    try:
+        from akshare_client import get_valuation_history
+        return get_valuation_history(symbol)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _fetch_fundamentals_quietly(symbol: str, as_of: str):
+    try:
+        from akshare_client import get_financial_abstract
+        return get_financial_abstract(symbol, periods=2, as_of=as_of)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _valuation_block(series: list[dict], as_of: str, window: int = 1250):
+    """估值日线序列 → as-of 估值语境块（与生产 market_context 同一分位口径）。"""
+    rows = [r for r in series if str(r.get("date"))[:10] <= str(as_of)[:10]]
+    if not rows:
+        return None
+    cur = float(rows[-1]["pe_ttm"])
+    win = [float(r["pe_ttm"]) for r in rows[max(0, len(rows) - window):]]
+    if len(win) < 250:
+        return None
+    return {"date": str(rows[-1]["date"])[:10], "pe_ttm": round(cur, 2),
+            "pe_percentile_5y": round(sum(1 for v in win if v <= cur) / len(win) * 100, 1),
+            "note": "沙盘估值语境（as-of 切片；口径同生产 valuation_context）"}
+
+
+def _evidence_extras(symbol: str, as_of: str) -> dict:
+    """沙盘逐日证据的生产对齐块（valuation_context / fundamentals）。
+
+    估值按 symbol 缓存一次（日线序列本身带日期，切片在纯函数里做）；
+    财报按（symbol, 月）缓存——as-of 过滤的结果只在披露边界变化，月粒度足够。
+    """
+    extras: dict = {}
+    if symbol not in _SANDBOX_VALUATION_CACHE:
+        _SANDBOX_VALUATION_CACHE[symbol] = _fetch_valuation_quietly(symbol)
+    block = _valuation_block(_SANDBOX_VALUATION_CACHE[symbol], as_of)
+    if block:
+        extras["valuation_context"] = block
+    fund_key = (symbol, str(as_of)[:7])
+    if fund_key not in _SANDBOX_FUNDAMENTALS_CACHE:
+        _SANDBOX_FUNDAMENTALS_CACHE[fund_key] = _fetch_fundamentals_quietly(symbol, as_of)
+    if _SANDBOX_FUNDAMENTALS_CACHE[fund_key]:
+        extras["fundamentals"] = _SANDBOX_FUNDAMENTALS_CACHE[fund_key]
+    return extras
 
 # 沙盘实验角色卡通道：2026-10-13 第二轮 A/B 验证通过的退出纪律卡
 # （持仓时评估"继续持有的证据是否仍成立"；评估卖出与持有同样认真）
@@ -66,6 +126,9 @@ PROPOSE_SYSTEM = (
     "- 可改的**不止入场**：出场条件（止盈/止损/均线离场）与仓位（size_pct）"
     "都在进化范围内——入场、出场、仓位是一个完整策略的三面，只优化入场是偏科；\n"
     "- 只改你认为有证据支撑的字段，其余原样保留；symbol 不许改（禁换标的是硬约束）；\n"
+    f"- 新增条件是有代价的：闸门对每条净增条件收 {COMPLEXITY_PENALTY_PT:.0f}pt 回测"
+    f"罚金（删条件最多奖励 {COMPLEXITY_BONUS_MAX_PT:.0f}pt）——加条件必须有独立证据，"
+    "能用调参数解决的事就不要加条件；\n"
     "- 提案会被历史数据回测验证，不如现版就会被否决——别为了改而改；\n"
     '只输出一个 JSON 对象（config 本身），不要任何其他文字。'
 )
@@ -101,7 +164,12 @@ def _llm_json(completion, system: str, user: str) -> dict | None:
 
 def _gate(records_so_far: list[dict], old_cfg: dict, new_cfg: dict,
           symbol: str) -> tuple[bool, str, dict, dict]:
-    """回测闸门：新 config 必须在截至当时的历史上跑赢旧版才放行。"""
+    """回测闸门：新 config 必须在截至当时的历史上跑赢旧版才放行。
+
+    跑赢的口径含复杂度罚金（与生产 revision_gate 同一把尺，agent.revision
+    里定义）：净增条件要先付罚金，剩下的领先才算领先——不然"叠条件拟合
+    近一年"在闸门这里是无代价的。
+    """
     if str(new_cfg.get("symbol") or "").strip() != symbol:
         return False, "提案试图换标的（硬约束）", {}, {}
     # 返回值是 (cfg, err) 元组：err 为 None 才算过（pilot 实测把元组当
@@ -113,9 +181,11 @@ def _gate(records_so_far: list[dict], old_cfg: dict, new_cfg: dict,
     new_bt = run_backtest_realistic(new_cfg, records_so_far)
     old_ret = float(old_bt.get("total_return_pct") or 0.0)
     new_ret = float(new_bt.get("total_return_pct") or 0.0)
-    verdict = new_ret > old_ret
-    reason = (f"回测对比（截至当时）：旧 {old_ret}% vs 新 {new_ret}% → "
-              + ("应用" if verdict else "否决"))
+    cx = complexity_penalty_pt(old_cfg, new_cfg)
+    verdict = (new_ret - cx["adjustment_pt"]) > old_ret
+    reason = (f"回测对比（截至当时）：旧 {old_ret}% vs 新 {new_ret}%"
+              + (f"，{cx['note']}" if cx["note"] else "")
+              + " → " + ("应用" if verdict else "否决"))
     return verdict, reason, old_bt, new_bt
 
 
@@ -190,6 +260,8 @@ def evolve_replay(symbol: str, start: str, end: str, freeze: str,
             "exit": cfg.get("exit"), "position": cfg.get("position"),
             "note": "本周生效的策略指令（你每周可能修改它）；可以偏离，但偏离要给理由。",
         }
+        # 生产对齐：估值/财务证据块（as-of 切片，fail-open）
+        evidence.update(_evidence_extras(symbol, as_of))
         result = tc.run_committee(symbol, as_of, evidence, list(warnings),
                                   completion=completion,
                                   role_system=SANDBOX_ROLE_OVERRIDES)

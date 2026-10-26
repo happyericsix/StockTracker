@@ -58,8 +58,10 @@ public class ThsController {
         try {
             return Result.success(thsQrService.createQr());
         } catch (Exception e) {
+            // 免登录接口：异常原文可能带上游 THS 响应片段与网络内部细节（2026-10-15
+            // 安全测试 L2），给调用方的永远是固定文案，细节进服务端日志。
             log.warn("ths qr create failed: {}", e.getMessage());
-            return Result.error(500, e.getMessage() == null ? "取二维码失败" : e.getMessage());
+            return Result.error(500, "取二维码失败，请稍后重试");
         }
     }
 
@@ -86,8 +88,9 @@ public class ThsController {
             Long currentUserId = currentUserId(authentication);
             return Result.success(thsQrService.pollQr(qrSessionId, currentUserId));
         } catch (Exception e) {
+            // 同上（2026-10-15 安全测试 L2）：异常细节只进日志，回固定文案
             log.warn("ths qr poll failed: {}", e.getMessage());
-            return Result.error(500, e.getMessage() == null ? "扫码状态查询失败" : e.getMessage());
+            return Result.error(500, "扫码状态查询失败，请重新生成二维码");
         }
     }
 

@@ -42,6 +42,10 @@ MAX_SUMMARY_CHARS = 1200
 NON_DIALOG_KINDS = frozenset({"usage"})
 # 不进摘要的来源：第三方内容属于"数据"，不是任何人的主张，不能变成长期记忆
 NON_DIALOG_PROVENANCE = frozenset({"external"})
+# 显著性门控没通过时的墓碑摘要（2026-10-20）：寒暄/单轮查询不值得前情提要，
+# 但必须落一个"处理过了"的标记——Java 的 pendingSessions 用"有没有 episode"
+# 判断会话是否处理过，不落的话每次跨天都会把这段寒暄重新提名、再烧一次 LLM。
+TOMBSTONE_SUMMARY = "（本段对话没有值得沉淀的内容）"
 
 
 def _is_subagent_event(event) -> bool:
@@ -78,6 +82,7 @@ SUMMARY_SYSTEM_PROMPT = """你是对话记忆整理器。把一段"用户 × 股
 
 严格输出下面这个 JSON（不要解释、不要代码块以外的任何文字）：
 {
+  "memorable": true,
   "summary": "3~5 句话。讲清楚用户关心什么、做过什么决定、得到什么结论。用'用户'作主语。",
   "key_points": ["最多 6 条，每条一句话"],
   "open_questions": ["最多 3 条：还没确定、下次可能需要确认的问题；没有就给空数组"],
@@ -99,6 +104,14 @@ source_refs / evidence_refs（记忆可回溯的关键）：这条 fact/lesson �
 填行号数组（行号是对话记录里 [n] 的 n）。依据跨多行就都写上；整段对话都不相关时给空数组。
 不要乱引 —— 用户会点开"查看来源"亲手核对。
 
+memorable（显著性判定，先于其它一切输出决定，2026-10-20 门控）：只有出现以下信号之一才给 true ——
+用户做出决定或设定（"就按这个来""止损改成 3%"）、表达偏好/约束/目标、修正之前的结论、
+陈述关于自己或持仓的新事实、出现"遇到问题 → 解决掉"的过程（经验的原料）。
+以下情形一律给 false：寒暄打招呼、单轮行情或新闻查询且没有后续讨论、纯客套闲聊、
+只有系统播报或助手单方面输出。memorable=false 时 summary 写空字符串，
+key_points/open_questions/entities/facts/lessons 全部给空数组 —— **不要**为了填格子
+把寒暄硬凑成"用户仅做了打招呼"这类摘要，那只是噪声。
+
 facts 是"值得跨会话记住的原子事实"，只在用户**明确说过**时才写：
 - subject：关于用户自己写 user；关于某只股票写它的代码（如 600519）；关于某策略写 strategy:名称
 - **风险设置类事实的 subject 默认写 user**：stop_loss_pct / take_profit_pct /
@@ -108,6 +121,11 @@ facts 是"值得跨会话记住的原子事实"，只在用户**明确说过**�
   如果这次记在 strategy:名称 下、下次记在 user 下，两条事实就是两个不同的键，
   取代关系会断掉，系统里会同时存在两个互相矛盾的止损值。
   只有当用户**明确说**"这个策略专用"时才写 strategy:名称。
+- **策略专用偏好是全局偏好的例外，要写全**（记忆分层 2026-10-15）：用户说"这只票/这个策略
+  不一样"（例如"中行就长拿，别按我平时的短线风格"）时，把例外完整写进 strategy:名称——
+  注入时会标注"标的层/策略层例外优先于全局偏好"，半句残缺的例外比没有更糟。
+  同时关于**某只股票**的态度（关注理由/持仓成本/特殊看法）subject 写股票代码，
+  它们是跨策略共享的标的层记忆。
 - predicate：只能用这些键——risk_preference（风险偏好）、investing_style（风格）、
   investment_horizon（投资周期）、capital（资金量）、position_size（仓位）、
   stop_loss_pct（止损）、take_profit_pct（止盈）、trailing_stop_pct（跟踪止盈）、
@@ -130,11 +148,18 @@ lessons 是"这类问题这次是怎么解决的"，用来避免以后重复踩�
 
 规则（必须遵守）：
 - 只写对话里**确实出现过**的内容。不要推测，不要补充常识，不要写投资建议，不要预测价格。
+- **"讨论过 X" ≠ "用户偏好 X"（2026-10-15 事故教训）**：用户在质疑、追问、纠正某个设定值
+  （例如"难道我应该全仓吗？这是不是默认值？"）时，绝不能把该值写成用户的 preference/constraint。
+  只有用户**亲口主张**（"我要/我喜欢/帮我设成 X"）才写偏好类事实；讨论默认值是否合理的内容
+  一条都不写。助手自己解释里提到的数值同样不是用户的偏好——facts 的 subject 是谁，
+  就必须是**那个人亲口说的**。
 - 任何不确定的信息放进 open_questions，**不要**写进 summary 当成事实。
 - facts 里**不要**写行情数据（价格、涨跌幅）——那些会变，属于可随时重查的信息，不是长期记忆。
 - lessons 的 reusable_rule **不要**写成投资结论（如"跌破均线就卖"），只能写成操作方法。
 - time_hint 必须原样照抄用户的说法，不要自己换算日期。
 - 时间一律写绝对日期（用下面给出的对话日期），不要写"昨天""前几天"。
+- facts 和 lessons 宁缺毋滥：没有值得写的就给空数组，不要硬凑 —— 一条平庸的记忆
+  比没有记忆更糟，它会挤占注入窗口、误导以后每一次对话。
 - entities 里只放对话中明确出现的股票代码/名称与策略名，没有就给空数组。"""
 
 
@@ -227,8 +252,13 @@ def _as_str_list(value, limit):
     return [str(item).strip() for item in value if str(item).strip()][:limit]
 
 
-def consolidate_session(user_id, session_key) -> dict:
-    """把一个会话总结成前情提要并写回 Java。返回结构化结果，不抛异常。"""
+def consolidate_session(user_id, session_key, completion=None) -> dict:
+    """把一个会话总结成前情提要并写回 Java。返回结构化结果，不抛异常。
+
+    `completion`（BYOK，2026-10-25）：可注入的 LLM 调用，None 走 llm_service
+    默认（env 供应商）。会话巩固记的是这个用户的账，用户自带 Key 时由 app.py
+    绑定传入——用户级任务不能烧部署者的全局 key。
+    """
     if not user_id or not session_key:
         return {"skipped": "user_id/session_key required"}
 
@@ -246,7 +276,8 @@ def consolidate_session(user_id, session_key) -> dict:
     ]
 
     try:
-        choice = llm_service.chat_completion(messages, temperature=0.1, max_tokens=900)
+        choice = (completion or llm_service.chat_completion)(
+            messages, temperature=0.1, max_tokens=900)
     except Exception as exc:  # noqa: BLE001
         logger.warning("会话摘要 LLM 调用失败 session=%s: %s", session_key, exc)
         return {"error": "llm unavailable"}
@@ -261,6 +292,14 @@ def consolidate_session(user_id, session_key) -> dict:
         return {"error": "invalid summary json"}
 
     summary = _clip(parsed.get("summary"), MAX_SUMMARY_CHARS).strip()
+
+    # 显著性门控：模型判"这段不值得留前情提要"→ 只落墓碑，不抽事实/经验。
+    # 缺字段（旧格式输出/异常）按值得记处理：宁可多总结一次，也不要漏记真实内容。
+    memorable = parsed.get("memorable")
+    if not isinstance(memorable, bool):
+        memorable = True
+    if not memorable:
+        return _save_tombstone(user_id, session_key, source_event_ids, timestamps)
     if not summary:
         return {"error": "empty summary"}
 
@@ -286,13 +325,8 @@ def consolidate_session(user_id, session_key) -> dict:
     fact_results = _save_facts(user_id, session_key, parsed.get("facts"), source_event_ids, line_ids)
     lesson_results = _save_lessons(user_id, session_key, parsed.get("lessons"), source_event_ids, line_ids)
 
-    # 语料变了，语义索引要失效：否则用户这一轮刚改的口令，下一轮语义召回还用旧向量
-    try:
-        from agent import vector_index
-
-        vector_index.invalidate(user_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("语义索引失效失败: %s", exc)
+    # 语料变了，语义索引要失效（墓碑路径同样需要：episode 也进索引语料）
+    _invalidate_semantic_index(user_id)
 
     logger.info("会话摘要已生成 session=%s v=%s events=%d facts=%d lessons=%d",
                 session_key, saved.get("version"), len(source_event_ids),
@@ -305,6 +339,50 @@ def consolidate_session(user_id, session_key) -> dict:
         "facts": fact_results,
         "lessons": lesson_results,
     }
+
+
+def _save_tombstone(user_id, session_key, source_event_ids, timestamps) -> dict:
+    """显著性门控未通过：落墓碑摘要，不抽事实/经验。
+
+    <h3>为什么墓碑也要落库</h3>
+    Java 的 pendingSessions 用"有没有 episode"判断会话是否处理过。不落的话，
+    这段寒暄每次跨天都会被重新提名、再烧一次 LLM 得出同一个"没什么可记"。
+    墓碑在记忆页可见（"系统看过这段对话，判定无可沉淀"），这正是白盒：
+    用户能看见系统**没有**偷偷把寒暄当经验。
+    """
+    saved = memory_store.save_episode(
+        user_id=user_id,
+        session_key=session_key,
+        summary=TOMBSTONE_SUMMARY,
+        key_points=[],
+        open_questions=[],
+        entities={},
+        source_event_ids=source_event_ids,
+        model=llm_service.MODEL,
+        started_at=timestamps[0] if timestamps else None,
+        ended_at=timestamps[-1] if timestamps else None,
+    )
+    if not saved:
+        return {"error": "failed to persist episode"}
+    _invalidate_semantic_index(user_id)
+    logger.info("会话无可沉淀内容，已落墓碑 session=%s v=%s events=%d",
+                session_key, saved.get("version"), len(source_event_ids))
+    return {
+        "sessionKey": session_key,
+        "version": saved.get("version"),
+        "memorable": False,
+        "events": len(source_event_ids),
+    }
+
+
+def _invalidate_semantic_index(user_id):
+    """语料变了语义索引就要失效：否则用户这一轮刚改的口令，下一轮语义召回还用旧向量。"""
+    try:
+        from agent import vector_index
+
+        vector_index.invalidate(user_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("语义索引失效失败: %s", exc)
 
 
 def _save_lessons(user_id, session_key, raw_lessons, source_event_ids, line_ids=None) -> list:

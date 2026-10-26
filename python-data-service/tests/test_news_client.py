@@ -141,6 +141,22 @@ def _patch(monkeypatch, name, value=None, error=None):
     monkeypatch.setattr(news_client.akshare, name, fake)
 
 
+# 财联社电报是**直连 HTTP 源**（不走 akshare 的 _patch 桩体系）：默认桩成空，
+# 免得既有用例在测试环境里真发网络请求（2026-10-16 接入 CLS 后抓出的口径问题）。
+# 专门测电报的用例用 _REAL_FETCH_CLS 换回真函数再自桩 requests。
+_REAL_FETCH_CLS = news_client.fetch_cls_telegraph
+
+
+_REAL_FETCH_LHB = news_client.fetch_lhb_events
+
+
+@pytest.fixture(autouse=True)
+def _stub_cls_by_default(monkeypatch):
+    monkeypatch.setattr(news_client, "fetch_cls_telegraph", lambda *a, **k: [])
+    # 龙虎榜（2026-10-16）同为直连源：默认桩空，专门测它的用例换回真函数
+    monkeypatch.setattr(news_client, "fetch_lhb_events", lambda *a, **k: [])
+
+
 def _patch_notices(monkeypatch, rows, error=None):
     """公告源桩：**两条内部分支一起打上**。
 
@@ -1181,3 +1197,176 @@ def test_search_news_without_symbol_includes_opinion(monkeypatch):
     monkeypatch.setattr(news_client, "fetch_market_news", lambda: [])
     out = news_client.search_news(symbol="", keyword="", types=[4], days=1)
     assert out["counts"]["forum"] == 1
+
+
+# ==================== 财联社电报（2026-10-16，直连源） ====================
+
+
+class _FakeResp:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+def test_cls_telegraph_shapes_rows(monkeypatch):
+    """电报行 → 统一事件结构：时间戳转北京时间、无标题剥正文、HTML 剥除。"""
+    monkeypatch.setattr(news_client, "fetch_cls_telegraph", _REAL_FETCH_CLS)
+    payload = {"data": {"roll_data": [
+        {"title": "电报甲", "content": "正文<b>加粗</b>内容", "ctime": 1760586000,
+         "shareurl": "https://www.cls.cn/detail/abc"},
+        {"title": "", "content": "【无标题条】这条从正文剥标题", "ctime": 1760586060,
+         "shareurl": ""},
+    ]}}
+    monkeypatch.setattr(news_client.requests, "get", lambda *a, **k: _FakeResp(payload))
+    rows = news_client.fetch_cls_telegraph()
+    assert len(rows) == 2
+    assert rows[0]["source_name"] == "财联社电报" and rows[0]["source_level"] == 2
+    assert "加粗" in rows[0]["content"] and "<b>" not in rows[0]["content"]
+    assert rows[0]["published_at"].startswith("2025-10-16")  # 1760586000 = 北京时间 2025-10-16
+    assert rows[1]["title"]  # 无标题条目从正文剥出标题，不留空（空标题会被 Java 落库丢弃）
+
+
+def test_cls_telegraph_fail_open(monkeypatch):
+    """网络失败返回 []：一家源挂了不拖垮其余 wire 源。"""
+    monkeypatch.setattr(news_client, "fetch_cls_telegraph", _REAL_FETCH_CLS)
+
+    def boom(*a, **k):
+        raise news_client.requests.RequestException("blocked")
+    monkeypatch.setattr(news_client.requests, "get", boom)
+    assert news_client.fetch_cls_telegraph() == []
+
+
+# ==================== 人气榜（2026-10-16，热榜数据原语） ====================
+
+
+def test_hot_rank_shapes_and_caches(monkeypatch):
+    """人气榜 → 排名升序的扁平结构；5 分钟窗口内共享缓存（不重复打源站）。"""
+    import akshare_client
+
+    calls = {"n": 0}
+
+    class FakeDf:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def iterrows(self):
+            return iter(enumerate(self.rows))
+
+    def fake_em():
+        calls["n"] += 1
+        return FakeDf([
+            {"当前排名": 2, "代码": "SZ000530", "股票名称": "冰山冷热", "最新价": 7.62, "涨跌幅": 9.96},
+            {"当前排名": 1, "代码": "SH600418", "股票名称": "江淮汽车", "最新价": 22.37, "涨跌幅": 9.98},
+            {"当前排名": "脏行", "代码": "SH000000", "股票名称": "坏数据", "最新价": None, "涨跌幅": None},
+        ])
+
+    monkeypatch.setattr(akshare_client.akshare, "stock_hot_rank_em", fake_em)
+    monkeypatch.setattr(akshare_client, "_hot_rank_cache", {"at": 0.0, "rows": []})
+    rows = akshare_client.get_hot_rank()
+    assert calls["n"] == 1
+    assert [r["rank"] for r in rows] == [1, 2]          # 排名升序，脏行剔除
+    assert rows[0]["symbol"] == "SH600418" and rows[0]["name"] == "江淮汽车"
+    again = akshare_client.get_hot_rank()
+    assert calls["n"] == 1                                # 命中缓存，源站零请求
+    assert again == rows
+
+
+def test_hot_rank_fail_open(monkeypatch):
+    import akshare_client
+
+    def boom():
+        raise RuntimeError("upstream down")
+    monkeypatch.setattr(akshare_client.akshare, "stock_hot_rank_em", boom)
+    monkeypatch.setattr(akshare_client, "_hot_rank_cache", {"at": 0.0, "rows": []})
+    assert akshare_client.get_hot_rank() == []
+
+
+# ==================== 大盘资金流（2026-10-16） ====================
+
+
+def test_market_fund_flow_shapes_and_caches(monkeypatch):
+    """净额元→亿元、升序、缓存复用；脏行（日期缺）剔除。"""
+    import akshare_client
+
+    calls = {"n": 0}
+
+    class FakeDf:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def iterrows(self):
+            return iter(enumerate(self.rows))
+
+    def fake_flow():
+        calls["n"] += 1
+        return FakeDf([
+            {"日期": __import__("datetime").date(2026, 10, 15),
+             "上证-收盘价": 3700.0, "上证-涨跌幅": 0.5,
+             "主力净流入-净额": -5_000_000_000.0, "超大单净流入-净额": 100_000_000.0,
+             "大单净流入-净额": -5_100_000_000.0, "中单净流入-净额": -2_000_000_000.0,
+             "小单净流入-净额": 7_000_000_000.0},
+            {"日期": "2026-10-16",  # 字符串日期也要认（不同源给法不一）
+             "上证-收盘价": 3716.28, "上证-涨跌幅": 0.24,
+             "主力净流入-净额": -4_936_298_496.0, "超大单净流入-净额": 112_631_808.0,
+             "大单净流入-净额": -5_048_930_304.0, "中单净流入-净额": -11_235_790_848.0,
+             "小单净流入-净额": 16_172_085_248.0},
+            {"日期": None, "主力净流入-净额": 1.0},  # 脏行：无日期剔除
+        ])
+
+    monkeypatch.setattr(akshare_client.akshare, "stock_market_fund_flow", fake_flow)
+    monkeypatch.setattr(akshare_client, "_fund_flow_cache", {"at": 0.0, "rows": []})
+    rows = akshare_client.get_market_fund_flow(limit=10)
+    assert calls["n"] == 1 and len(rows) == 2
+    assert rows[0]["date"] == "2026-10-15" and rows[1]["date"] == "2026-10-16"  # 升序
+    assert rows[1]["main_net_yi"] == round(-4_936_298_496.0 / 1e8, 2)  # 元→亿元
+    assert rows[1]["super_net_yi"] == 1.13
+    again = akshare_client.get_market_fund_flow(limit=10)
+    assert calls["n"] == 1 and again == rows  # 10 分钟窗口内共享缓存
+
+
+def test_market_fund_flow_fail_open(monkeypatch):
+    import akshare_client
+
+    def boom():
+        raise RuntimeError("upstream down")
+    monkeypatch.setattr(akshare_client.akshare, "stock_market_fund_flow", boom)
+    # 腾讯 fallback 也必须桩掉（2026-10-19 双源后）：不桩的话本机网络能真连上
+    # 腾讯，"fail-open"用例会拿到 50 行真数据——测试密闭性被环境网络决定。
+    monkeypatch.setattr(akshare_client, "_fetch_fund_flow_rows_tencent", lambda max_days=50: [])
+    monkeypatch.setattr(akshare_client, "_fund_flow_cache",
+                        {"at": 0.0, "tried_at": 0.0, "rows": [], "ok": False})
+    assert akshare_client.get_market_fund_flow() == []
+
+
+def test_lhb_events_shape(monkeypatch):
+    """龙虎榜源（2026-10-16）：行→事件结构（symbol 归一、日级时间、解读进标题）。"""
+    monkeypatch.setattr(news_client, "fetch_lhb_events", _REAL_FETCH_LHB)
+    class FakeDf:
+        empty = False   # _frame_rows 按 df.empty 判空，桩必须显式非空
+
+        def __init__(self, rows):
+            self.rows = rows
+        def iterrows(self):
+            return iter(enumerate(self.rows))
+    payload = FakeDf([
+        {"代码": "600418", "名称": "江淮汽车", "上榜日": "2026-10-16",
+         "解读": "2家机构买入，成功率65%"},
+        {"代码": "", "名称": "脏行", "上榜日": "x", "解读": ""},
+    ])
+    monkeypatch.setattr(news_client.akshare, "stock_lhb_detail_em", lambda **k: payload)
+    rows = news_client.fetch_lhb_events()
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "SH600418" and rows[0]["source_name"] == "东财·龙虎榜"
+    assert "江淮汽车" in rows[0]["title"] and "机构买入" in rows[0]["title"]
+    assert rows[0]["published_at"].startswith("2026-10-16")
+
+
+def test_lhb_fail_open(monkeypatch):
+    monkeypatch.setattr(news_client, "fetch_lhb_events", _REAL_FETCH_LHB)
+
+    def boom(**k):
+        raise RuntimeError("upstream")
+    monkeypatch.setattr(news_client.akshare, "stock_lhb_detail_em", boom)
+    assert news_client.fetch_lhb_events() == []

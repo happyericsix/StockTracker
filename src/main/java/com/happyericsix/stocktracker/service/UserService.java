@@ -38,7 +38,23 @@ public class UserService {
         profile.put("phone", user.getPhone());
         profile.put("pushChannel", pushChannelOrEmpty(user));
         profile.put("commissionPct", user.getCommissionPct());
+        // 三态折叠成布尔下发：null（上线前的老账号）当已读——前端只关心"要不要弹引导"
+        profile.put("onboardingCompleted", !Boolean.FALSE.equals(user.getOnboardingCompleted()));
         return profile;
+    }
+
+    /**
+     * 新手引导完成：翻到最后一页并点了「开始使用」才调用。
+     * 幂等——重复调用无害（老账号主动重温再关掉不会把状态改坏，本来就都是 true）。
+     */
+    @Transactional
+    public void completeOnboarding(String username) {
+        User user = userRepository.findByUsername(username)
+                .orElseThrow(() -> new BusinessException(404, "用户不存在"));
+        if (!Boolean.TRUE.equals(user.getOnboardingCompleted())) {
+            user.setOnboardingCompleted(true);
+            userRepository.save(user);
+        }
     }
 
     /** pushChannel 对外只回显通道名；pushTarget 是密钥级的东西，不随 profile 下发。 */

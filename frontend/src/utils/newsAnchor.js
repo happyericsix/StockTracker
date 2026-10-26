@@ -49,3 +49,42 @@ export const anchorDateFor = (publishedAt, tradingDays) => {
   if (timePart && timePart >= '15:00') return nextTradingDay()   // 规则 3：盘后 → 次日
   return raw
 }
+
+
+/**
+ * 分钟轴专用锚定（2026-10-16）：分时图上"全天事件吸到同一根柱"的修复。
+ *
+ * 规则（与日线版同源的精神，粒度不同）：
+ * 1. 事件带具体时刻（媒体快讯/电报）→ 锚到 <= 该时刻的最后一根分钟柱；
+ * 2. 日级事件（公告 00:00）→ 锚到当日第一根分钟柱（没有更细的信息，不猜）；
+ * 3. 当日无分钟柱（停牌/超出分时窗口）→ 回退到下一个有柱的日子的首根（盘后/周末公告影响次日的同一口径）。
+ *
+ * @param publishedAt 事件时间（ISO 含时刻，或纯日期）
+ * @param minuteBars 分钟轴序列（升序，形如 "2026-10-16 10:30:00"）
+ */
+export const anchorMinuteFor = (publishedAt, minuteBars) => {
+  const bars = (Array.isArray(minuteBars) ? minuteBars : [])
+    .filter((b) => typeof b === 'string' && b.length >= 16)
+  if (!bars.length) return ''
+  const raw = String(publishedAt ?? '').trim()
+  const day = dayOf(raw)
+  if (!DATE_SHAPE.test(day)) return ''
+  const hasTime = raw.length >= 16
+  const minuteOf = (bar) => bar.slice(0, 16)
+  const target = raw.replace('T', ' ').slice(0, 16)
+
+  let dayBars = bars.filter((b) => dayOf(b) === day)
+  if (!dayBars.length) {
+    // 回退：下一个有柱的交易日（含当日之后的任何柱）
+    dayBars = bars.filter((b) => dayOf(b) > day)
+      .reduce((acc, b) => { if (!acc.length || dayOf(acc[0]) === dayOf(b)) acc.push(b); return acc }, [])
+  }
+  if (!dayBars.length) return ''
+  if (!hasTime) return dayBars[0]
+  let hit = ''
+  for (const bar of dayBars) {
+    if (minuteOf(bar) <= target) hit = bar
+    else break
+  }
+  return hit || dayBars[0]
+}

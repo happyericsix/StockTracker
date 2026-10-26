@@ -44,14 +44,17 @@ public class PaperTradingJob {
      * 结算重试（2026-10-08）：日线源在 15:30 当口常还没出当天的 bar
      * （实测腾讯源 10-08 的日线 17:05 才有），当天结算会以 no_bar 失败 ——
      * 不补跑的话这一天就永远缺失（曲线少一格、委员会没开会、授权没落库）。
-     * 16:10 与 17:10 各补一次，覆盖慢发布的日子；只碰当天失败过的策略，
-     * 成功过的绝不重跑（不花第二次委员会成本）。日历明确说非交易日时跳过，
-     * 与主结算同一道闸。
+     * 只碰当天失败过的策略，成功过的绝不重跑（不花第二次委员会成本）。
+     * 日历明确说非交易日时跳过，与主结算同一道闸。
      *
-     * <p>16:10 是中间轮（bar 可能只是还没发布，报告继续等）；17:10 是终轮 ——
-     * 到这一刻还是 no_bar 就是当天定论，推系统告警而不是复盘（同件事只说一遍）。
+     * <p>16:10 / 17:10 是中间轮（bar 可能只是还没发布，报告继续等）；
+     * 20:10 是终轮 —— 到这一刻还是 no_bar / data_unavailable 就是当天定论，
+     * 推系统告警而不是复盘（同件事只说一遍）。
      * 2026-10-09 事故：15:30 首轮就把中间态 no_bar 推成了"这一天没有 K 线"，
      * 而当天 bar 17:10 后才发布、重试已停，日报成了永久假话。
+     * 2026-10-19/20 事故加第三轮：数据源连续两天 15:30~17:10+ 拒服，两轮全烧穿。
+     * fill_basis=close 下收盘价发布后不变，晚间补跑拿到的仍是当日官方收盘——
+     * 口径无损，只是把"当天放弃"的时点从 17:10 推到 20:10。
      */
     @Scheduled(cron = "0 10 16 * * MON-FRI", zone = "Asia/Shanghai")
     public void retryDailyPaperMid() {
@@ -59,6 +62,11 @@ public class PaperTradingJob {
     }
 
     @Scheduled(cron = "0 10 17 * * MON-FRI", zone = "Asia/Shanghai")
+    public void retryDailyPaperLate() {
+        runRetry(false);
+    }
+
+    @Scheduled(cron = "0 10 20 * * MON-FRI", zone = "Asia/Shanghai")
     public void retryDailyPaperFinal() {
         runRetry(true);
     }

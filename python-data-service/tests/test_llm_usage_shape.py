@@ -48,7 +48,7 @@ def _body_with_usage():
 
 
 def test_the_returned_choice_carries_the_usage(monkeypatch):
-    monkeypatch.setattr(llm_service, "_is_available", lambda: True)
+    monkeypatch.setattr(llm_service, "_is_available", lambda providers=None: True)
     _fake_post(monkeypatch, _body_with_usage())
 
     choice = llm_service.chat_completion([{"role": "user", "content": "在吗"}])
@@ -59,7 +59,7 @@ def test_the_returned_choice_carries_the_usage(monkeypatch):
 
 def test_an_existing_usage_on_the_choice_is_not_overwritten(monkeypatch):
     """有些兼容实现会把 usage 直接放在 choice 里；那就以它为准（不覆盖调用方看得见的东西）。"""
-    monkeypatch.setattr(llm_service, "_is_available", lambda: True)
+    monkeypatch.setattr(llm_service, "_is_available", lambda providers=None: True)
     body = _body_with_usage()
     body["choices"][0]["usage"] = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
     _fake_post(monkeypatch, body)
@@ -71,7 +71,7 @@ def test_an_existing_usage_on_the_choice_is_not_overwritten(monkeypatch):
 
 def test_a_response_without_usage_still_works(monkeypatch):
     """没有 usage 也不能炸：返回形状是契约，缺字段只是缺字段。"""
-    monkeypatch.setattr(llm_service, "_is_available", lambda: True)
+    monkeypatch.setattr(llm_service, "_is_available", lambda providers=None: True)
     _fake_post(monkeypatch, {"choices": [{"message": {"role": "assistant", "content": "x"}}]})
 
     choice = llm_service.chat_completion([{"role": "user", "content": "在吗"}])

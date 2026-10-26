@@ -1,5 +1,6 @@
 import { ref, computed } from 'vue'
 import { getMarketStatus } from '../api/market.js'
+import { swrRead, swrWrite } from '../utils/swrCache.js'
 import {
   buildRestNotice,
   formatDay,
@@ -28,7 +29,11 @@ import {
 /** 与后端 MarketStatusService 的缓存 TTL 对齐：超过它就该重新问一次 */
 const TTL_MS = 60_000
 
-const status = ref(null)
+// SWR 冷启动（2026-10-24）：PWA 首开/刷新后的第一秒 status 是空的，休市提示要等
+// 网络才有。模块初始化时先吃本地快照，提示立即出现；load() 的网络刷新随后照常
+// 换新（快照 TTL 只给 10 分钟：阶段信息过期太久宁可晚一秒显示，也不闪一个
+// 昨天盘中的错误状态）。loadedAt 保持 0，所以首次 load() 不会被快照挡住。
+const status = ref(swrRead('market:status', 10 * 60_000) ?? null)
 const loading = ref(false)
 /** 最近一次拉取失败。**不清空 status** —— 上一份状态（哪怕几分钟前的）也比"什么都不说"有用 */
 const failed = ref(false)
@@ -52,6 +57,7 @@ export function useMarketStatus() {
         status.value = data
         loadedAt = Date.now()
         failed.value = false
+        swrWrite('market:status', data)
       }
     } catch (e) {
       // 拿不到就保留上一份（可能没有）。**不把失败当成"今天开市"** ——

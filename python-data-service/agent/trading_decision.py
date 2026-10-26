@@ -16,6 +16,7 @@ TradingAgents 的做法值得学：辩论结束后由 `SignalProcessor` 产出 t
 - 解析结果自带 `warnings`（哪一步被归一化了），随痕迹一起落库 —— 归一化必须留痕。
 """
 from __future__ import annotations
+import dataclasses
 
 import json
 import logging
@@ -223,6 +224,38 @@ def _clean_authorization(raw: Any, warnings: list[str]) -> Optional[dict]:
     }
 
 
+#: 开仓护栏（2026-10-16，PROPOSAL 模式第一步）：策略 config 没有显式仓位声明时，
+#: agent 开仓的默认上限。"没写仓位就全仓买"是替用户做了最重的决定——真实事故：
+#: 用户模拟盘上策略未提仓位，agent 默认全盘买入。护栏不是终点（下一步是
+#: PROPOSAL 待确认模式），但它先把最坏情况从"全仓"压到"半仓"，且动作留痕。
+UNDECLARED_POSITION_OPEN_CAP = 0.5
+
+
+def apply_open_position_guard(decision, cfg: dict | None):
+    """策略未声明仓位时，开仓 size_fraction 上限 50%。
+
+    TradeDecision 是 frozen dataclass：返回 (新决策, 护栏说明)；None=未触发。
+
+    只压**开仓**（buy）不压卖出；只看 cfg["position"] 是否显式存在 size_pct，
+    存在（哪怕 100%）说明用户表过态，尊重之。护栏写进 rationale——
+    静默修改决策是这个项目的大忌，被拦这件事必须看得见。
+    """
+    if decision is None or getattr(decision, "decision", "") != "buy":
+        return None
+    position = ((cfg or {}).get("position") or {})
+    if position.get("size_pct") is not None:
+        return None
+    cap = UNDECLARED_POSITION_OPEN_CAP
+    if decision.size_fraction <= cap:
+        return None
+    original = decision.size_fraction
+    note = (f"〔仓位护栏〕策略未声明仓位，开仓上限压至 {cap:.0%}"
+            f"（模型原议 {original:.0%}）。如需全仓请在策略里写明 position.size_pct。")
+    rationale = f"{decision.rationale} {note}" if decision.rationale else note
+    guarded = dataclasses.replace(decision, size_fraction=cap, rationale=rationale)
+    return guarded, note
+
+
 def parse_trade_decision(text: str) -> TradeDecision:
     """把模型的输出解析成决策（**确定性、可测、保守优先**）。
 
@@ -326,6 +359,11 @@ def decision_prompt_contract() -> str:
         '"allow_open": true|false, "allow_close": true|false, '
         '"max_position_pct": 0.0-1.0, "notes": "一句话理由"}}\n'
         "约束：HOLD 的 size_fraction 必须为 0；读不懂或不一致时**宁可 HOLD**。\n"
+        "校准纪律：confidence 是这次方向判断的**校准概率**，不是气势分——"
+        "experience 的 winRatePct 是你的历史基准线：战绩低于 50% 时，同级别证据的"
+        " confidence 必须整体下调；证据强度没有明显超过基准线，给不出高置信。"
+        "size_fraction 不许超过 confidence（不该用超过自己胜率的仓位下注）。"
+        "calibration_hint 在场时按它给的口径执行。\n"
         "authorization 是**下一次开会之前**的盘中授权：规则引擎（策略 DSL）将在边界内"
         "自动执行买卖信号；intraday_execution=false 表示盘中不自动执行（只等日线开会）。"
         "给边界时依据今天的证据：趋势与波动支持规则执行就放行并给出仓位上限，"

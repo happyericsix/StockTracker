@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 TOOL_SETS = {
     "core": ("get_quote", "get_history", "memory_search", "get_news"),
     "market": ("search_stock", "get_quote", "get_quotes", "get_history",
-               "get_indicators", "get_risk_metrics"),
+               "get_indicators", "get_risk_metrics", "get_market_fund_flow"),
     "strategy": ("list_user_strategies", "review_strategy",
                  "validate_strategy", "backtest_strategy", "backtest_matrix", "finalize_strategy"),
     "memory": ("memory_search",),
@@ -40,8 +40,10 @@ TOOL_SETS = {
     # 2026-10-09 加三个知识工具（read_news_detail / get_topic_story /
     # get_stock_briefing）：读雷达**落库后的**分析、可信度与专题故事线，
     # 信息密度比原始快讯高一档 —— "聊聊这条新闻 / 这事后来怎样了"靠它们。
+    # 2026-10-16 加 get_hot_rank（人气榜）与 get_my_alerts（用户预警）：
+    # 答"现在什么股最热" / "我最近有什么预警"。
     "news": ("get_news", "search_news", "read_news_detail",
-             "get_topic_story", "get_stock_briefing"),
+             "get_topic_story", "get_stock_briefing", "get_hot_rank", "get_my_alerts"),
     "fundamental": ("get_financial_abstract",),
 }
 

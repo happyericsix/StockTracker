@@ -1,7 +1,8 @@
 """向量化：OpenAI 兼容的 embedding 接口 + 本地缓存（M2）。
 
-供应商：智谱（`.env.example` 里已经有 `ZHIPU_API_KEY` / `ZHIPU_EMBEDDING_MODEL=embedding-2`），
-或任何 OpenAI 兼容端点（硅基流动的 `BAAI/bge-m3` 等）。
+供应商：任何 OpenAI 兼容端点（如硅基流动的 `BAAI/bge-m3`），
+配齐 `EMBEDDING_API_KEY` / `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` 三个变量即启用。
+桌面版规划改为本地小模型（ONNX）进程内计算：届时这层接口不变，只换实现。
 
 三个刻意的设计：
 
@@ -26,9 +27,6 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
-_DEFAULT_MODEL = "embedding-2"
-
 _lock = threading.Lock()
 _cache: dict[str, list[float]] = {}
 _cache_loaded = False
@@ -36,17 +34,17 @@ _cache_loaded = False
 
 def _config() -> dict:
     # 延迟读取环境变量：.env 由 llm_service 在导入时加载，早读会拿到空值
-    api_key = (os.getenv("EMBEDDING_API_KEY") or os.getenv("ZHIPU_API_KEY") or "").strip()
-    model = (os.getenv("EMBEDDING_MODEL") or os.getenv("ZHIPU_EMBEDDING_MODEL")
-             or _DEFAULT_MODEL).strip()
-    base_url = (os.getenv("EMBEDDING_BASE_URL") or _DEFAULT_BASE_URL).rstrip("/")
+    api_key = (os.getenv("EMBEDDING_API_KEY") or "").strip()
+    model = (os.getenv("EMBEDDING_MODEL") or "").strip()
+    base_url = (os.getenv("EMBEDDING_BASE_URL") or "").rstrip("/")
     return {"api_key": api_key, "model": model, "base_url": base_url}
 
 
 def is_enabled() -> bool:
-    """配了 key 才算启用；没配就安静地退化（不报错、不刷日志）。"""
-    key = _config()["api_key"]
-    return bool(key) and key != "your-api-key-here"
+    """key、base_url、model 三者配齐才算启用；没配就安静地退化（不报错、不刷日志）。"""
+    config = _config()
+    return (bool(config["api_key"]) and config["api_key"] != "your-api-key-here"
+            and bool(config["base_url"]) and bool(config["model"]))
 
 
 def _cache_path() -> Path:

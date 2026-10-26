@@ -149,3 +149,23 @@ if __name__ == "__main__":
         if fn.__code__.co_argcount == 0:
             fn()
             print("PASS", fn.__name__)
+
+
+# ==================== 估值反方事实（2026-10-16，rich_valuation） ====================
+
+
+def test_rich_valuation_fact_fires_at_high_percentile():
+    from agent.dissent import bear_case_facts
+    evidence = {"valuation_context": {"pe_percentile_5y": 85.0}}
+    facts = bear_case_facts(evidence)
+    assert any(f["fact"] == "rich_valuation" for f in facts)
+
+
+def test_rich_valuation_fact_silent_when_moderate_or_absent():
+    from agent.dissent import bear_case_facts
+    # 70-80 之间的"偏贵"不进事实清单（留给委员会裁量），缺席更不当便宜
+    for evidence in ({"valuation_context": {"pe_percentile_5y": 60.0}},
+                     {"valuation_context": {"pe_percentile_5y": 75.0}},
+                     {}, {"valuation_context": {}}):
+        assert not any(f["fact"] == "rich_valuation"
+                       for f in bear_case_facts(evidence))

@@ -233,6 +233,7 @@ def run():
                        "action": out.get("decision") or out.get("signal"),
                        "size": out.get("size_fraction"),
                        "confidence": None, "degraded": out.get("degraded"),
+                       "skip_reason": out.get("skip_reason"),
                        "reason": ((out.get("committee", {}) or {}).get("summary")
                                   or out.get("reason") or json.dumps(out, ensure_ascii=False)[:300])[:400]}
         except Exception as e:  # noqa: BLE001
@@ -243,7 +244,24 @@ def run():
     print("\n\n========== 汇总 ==========")
     for r in results:
         mark = r.get("error") or f"{r.get('action')} size={r.get('size')}"
+        if r.get("degraded"):
+            mark += " [degraded]"
         print(f"- {r['scenario'][:46]:<48} → {mark}")
+
+    # 退出码门禁（2026-10-18，回归闭环）：本实验室是提示词/路由改动的验收场——
+    # ① 任何场景抛异常（error）或"没问成模型"（degraded）= 环境性失败，红；
+    # ② 委员会场景 skip_reason=agent_unparsable = 解析失败（reasoner 路由最需要盯的
+    #    风险），红。主动 HOLD 的 skip_reason 是 rule_not_met，**不是**失败。
+    # 刻意**不**门禁"决策对不对"：S5（除权假跳空）本来就允许答错，
+    # 那类判读归 eval_domain 金标集管，这里只拦基础设施性失败。
+    failures = [r for r in results
+                if r.get("error") or r.get("degraded")
+                or (r.get("target") == "委员会" and r.get("skip_reason") == "agent_unparsable")]
+    if failures:
+        print(f"\n[REGRESSION] {len(failures)}/{len(results)} 个场景未过门禁（异常/降级/不可解析）")
+        return 1
+    print(f"\n[REGRESSION] {len(results)} 个场景全部过门禁")
+    return 0
 
 
 if __name__ == "__main__":

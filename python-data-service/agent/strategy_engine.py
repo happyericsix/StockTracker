@@ -54,6 +54,71 @@ def compute_indicators(records):
     ind["macd_dea"] = dea
     return ind
 
+
+# ==================== 估值分位（pe_percentile 条件的数据通道） ====================
+
+def _fetch_valuation_history(symbol: str) -> list[dict]:
+    """取 PE-TTM 日线序列（akshare_client.get_valuation_history 的可注入包装）。
+
+    模块级函数（不是 import）：测试整体替换它，就能在不碰网络的前提下
+    驱动估值条件的回测——回测必须是纯函数，数据源缺席时返回 []。
+    """
+    try:
+        from akshare_client import get_valuation_history
+        return get_valuation_history(symbol)
+    except Exception:  # noqa: BLE001 —— 估值取不到：条件恒不成立（fail-closed），不挡回测
+        return []
+
+
+def _valuation_windows(cfg) -> set[int]:
+    """config 里 pe_percentile 条件用到的观察窗口集合（去重）。"""
+    windows: set[int] = set()
+    for rule in (getattr(cfg, "entry", None), getattr(cfg, "exit", None)):
+        for cond in getattr(rule, "conditions", None) or []:
+            if getattr(cond, "type", "") == "pe_percentile" and cond.window:
+                windows.add(int(cond.window))
+    return windows
+
+
+#: 分位最少观测数：PE 序列不足这个行数时分位无意义（fail-closed），与 schema 的
+#: 最小窗口 250 对齐——窗口写 2500 但数据只有 3 年时，按可用数据算但不得少于这个底
+PE_PCT_MIN_OBS = 250
+
+
+def _attach_valuation(ind: dict, cfg) -> None:
+    """把 PE 分位按 as-of 对齐到每根 bar，写入 ind[f"pe_pct_{window}"]。
+
+    分位口径与 agent.market_context 的估值语境**同一个**（<= 当前值的占比×100）：
+    委员会看到的分位和规则算出的分位必须对得上，否则两套决策模式各说各话。
+    as-of 对齐：bar 日期 d 取序列里 <= d 的最后一行 PE——晚于 bar 的估值行
+    即使已经在序列里也不参与（沙盘回放 2025 年时，2026 年的估值不存在）。
+    """
+    windows = _valuation_windows(cfg)
+    n = len(ind["dates"])
+    for w in windows:
+        ind[f"pe_pct_{w}"] = np.full(n, np.nan)
+    if not windows:
+        return
+    series = _fetch_valuation_history(cfg.symbol)
+    if not series:
+        return
+    sdates = [str(r.get("date"))[:10] for r in series]
+    spes = [float(r.get("pe_ttm")) for r in series]
+    for w in windows:
+        j = 0  # as-of 指针：bar 与序列都升序，每个窗口一趟扫完成（O(bars + rows)）
+        arr = ind[f"pe_pct_{w}"]
+        for i, d in enumerate(ind["dates"]):
+            while j < len(sdates) and sdates[j] <= str(d)[:10]:
+                j += 1
+            k = j - 1
+            if k < 0:
+                continue
+            window_pes = spes[max(0, k - w + 1):k + 1]
+            if len(window_pes) < PE_PCT_MIN_OBS:
+                continue
+            cur = spes[k]
+            arr[i] = sum(1 for v in window_pes if v <= cur) / len(window_pes) * 100.0
+
 def _ma_for(ind, w):
     key = f"ma_{w}"
     arr = ind.get(key)
@@ -150,6 +215,15 @@ def _cond_met(c, ind, i, position):
             return False
         ratio = float(vols[i]) / base
         return ratio >= c.value if c.direction == "above" else ratio <= c.value
+    if t == "pe_percentile":
+        # 估值分位是**状态过滤**（偏贵/偏便宜），不是事件：适合与事件条件
+        # （如 price_cross_ma）组合当闸门，或放进出场规则当"太贵了先走"。
+        # 序列缺席/窗口不足时恒不成立（fail-closed）——估值数据坏掉的表现
+        # 应该是"没有估值信号"，绝不是"估值信号永远满足"
+        arr = ind.get(f"pe_pct_{c.window}")
+        if arr is None or i >= len(arr) or np.isnan(arr[i]):
+            return False
+        return arr[i] >= c.value if c.direction == "above" else arr[i] <= c.value
     if position is None:
         return False
     entry = position.get("entry_price")
@@ -180,6 +254,7 @@ def run_backtest(config: dict, records: list[dict]) -> dict:
             "trade_log": [],
         }
     ind = compute_indicators(records)
+    _attach_valuation(ind, cfg)
     cash = float(cfg.initial_capital)
     shares = 0.0
     entry_price = 0.0
@@ -450,6 +525,7 @@ def evaluate_bar(config: dict, records: list[dict], date: str, position: dict | 
     cfg = StrategyConfig.model_validate(config)
     cfg_dict = cfg.model_dump(exclude_none=True)
     ind = compute_indicators(records)
+    _attach_valuation(ind, cfg)
     idx = next((i for i, d in enumerate(ind["dates"]) if d == date), None)
     if idx is None:
         # 请求的 bar（如"今天"）在数据里不存在 → 说明不是交易日/数据未出，
@@ -593,6 +669,7 @@ def run_backtest_realistic(
         return False
 
     ind = compute_indicators(records)
+    _attach_valuation(ind, cfg)
 
     for i in range(20, len(records)):
         price = float(closes[i])

@@ -1,5 +1,6 @@
 package com.happyericsix.stocktracker.controller;
 
+import com.happyericsix.stocktracker.dto.MemoryLessonRequest;
 import com.happyericsix.stocktracker.dto.Result;
 import com.happyericsix.stocktracker.entity.User;
 import com.happyericsix.stocktracker.repository.UserRepository;
@@ -77,6 +78,7 @@ class MemoryControllerTest {
         assertEquals(401, controller.persona(null).getCode());
         assertEquals(401, controller.episodes(null).getCode());
         assertEquals(401, controller.retractFact(null, 1L).getCode());
+        assertEquals(401, controller.reviseLesson(null, 1L, new MemoryLessonRequest()).getCode());
 
         verify(memory, never()).overview(any());
     }
@@ -135,6 +137,29 @@ class MemoryControllerTest {
 
         assertEquals(200, controller.activateLesson(ALICE, 31L).getCode());
         assertEquals(404, controller.retireLesson(ALICE, 32L).getCode());
+    }
+
+    /**
+     * 人工修订（方案一 2026-10-16）：走 reviseLesson 且 provenance=user
+     * （继承原 status）；目标不存在/不属于本人必须 404，不能静默成功。
+     */
+    @Test
+    void lessonRevisionRequiresOwnershipAndMarksUserProvenance() {
+        MemoryLessonService lessons = Mockito.mock(MemoryLessonService.class);
+        MemoryLessonRequest patch = new MemoryLessonRequest();
+        patch.setReusableRule("首仓不超过现金 40%");
+        when(lessons.reviseLesson(eq(7L), eq(31L), any(), eq("user")))
+                .thenReturn(new MemoryLessonService.LessonWriteResult(
+                        55L, "weekly_reflection", "追高被套", "revised", 1L));
+        when(lessons.reviseLesson(eq(7L), eq(99L), any(), eq("user"))).thenReturn(null);
+
+        MemoryController controller = controller(usersOf(7L), Mockito.mock(MemoryFactService.class),
+                lessons, Mockito.mock(MemoryService.class));
+
+        assertEquals(200, controller.reviseLesson(ALICE, 31L, patch).getCode());
+        verify(lessons).reviseLesson(eq(7L), eq(31L), any(), eq("user"));
+        // 修订别人的/不存在的经验：404，与 activate/retire 同一条纪律
+        assertEquals(404, controller.reviseLesson(ALICE, 99L, patch).getCode());
     }
 
     @Test

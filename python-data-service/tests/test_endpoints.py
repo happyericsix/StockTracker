@@ -247,6 +247,38 @@ def test_evaluate_bar_endpoint_without_data_still_reports_the_basis(monkeypatch)
     assert body["fingerprint"]["fill_basis"] == ec.FILL_CLOSE
 
 
+def test_evaluate_bar_empty_history_carries_machine_readable_detail(monkeypatch):
+    """失败信封带 error_detail（2026-10-19/20 事故）：Java 把它原样落进痕迹快照，
+    排查"哪只票、哪一层失败"不用再翻两边容器日志。"""
+    monkeypatch.setattr(akshare_client, "get_history", lambda symbol, *a, **k: None)
+
+    c = TestClient(main.app)
+    r = c.post("/api/v1/strategies/evaluate-bar", headers=HEADERS,
+               json={"strategy_json": VALID_STRATEGY, "settlement_kind": "daily",
+                     "symbol": "601988"})
+
+    body = r.json()
+    assert body["error_detail"]["type"] == "history_empty"
+    assert body["error_detail"]["symbol"] == "601988"
+
+
+def test_evaluate_bar_exception_carries_the_exception_type(monkeypatch):
+    """异常分支同样回机器可读细节：异常类名 + 截断的消息（沿用盯盘端点 reason 的先例）。"""
+    def boom(symbol, *a, **k):
+        raise RuntimeError("boom from source")
+
+    monkeypatch.setattr(akshare_client, "get_history", boom)
+
+    c = TestClient(main.app)
+    r = c.post("/api/v1/strategies/evaluate-bar", headers=HEADERS,
+               json={"strategy_json": VALID_STRATEGY, "settlement_kind": "daily"})
+
+    body = r.json()
+    assert body["skip_reason"] == "data_unavailable"
+    assert body["error_detail"]["type"] == "RuntimeError"
+    assert "boom from source" in body["error_detail"]["message"]
+
+
 # ==================== backtest-matrix：样本外验证的入口 ====================
 
 def _matrix_payload(**overrides):

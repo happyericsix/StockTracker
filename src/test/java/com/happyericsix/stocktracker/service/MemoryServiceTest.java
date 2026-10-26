@@ -49,6 +49,9 @@ class MemoryServiceTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
 
+    /** 与 MemoryService.CHAT_EVENT_KINDS 同一口径：巩固节奏只数对话事件 */
+    private static final List<String> CHAT_KINDS = List.of("chat_user", "chat_bot");
+
     private MemoryService service;
 
     @BeforeEach
@@ -166,8 +169,8 @@ class MemoryServiceTest {
         when(eventRepo.findRecentOtherSessionKeys(eq(1L), anyString(), any(Pageable.class)))
                 .thenReturn(List.of("1:2026-09-15", "1:2026-09-14", "1:2026-09-13"));
         when(episodeRepo.existsByUserIdAndSessionKey(1L, "1:2026-09-15")).thenReturn(true);
-        when(eventRepo.countByUserIdAndSessionKey(1L, "1:2026-09-14")).thenReturn(5L);
-        when(eventRepo.countByUserIdAndSessionKey(1L, "1:2026-09-13")).thenReturn(1L);
+        when(eventRepo.countByUserIdAndSessionKeyAndKindIn(1L, "1:2026-09-14", CHAT_KINDS)).thenReturn(5L);
+        when(eventRepo.countByUserIdAndSessionKeyAndKindIn(1L, "1:2026-09-13", CHAT_KINDS)).thenReturn(1L);
 
         List<String> pending = service.pendingSessions(1L, "1:2026-09-16");
 
@@ -184,7 +187,7 @@ class MemoryServiceTest {
         when(episodeRepo.findByUserIdOrderByCreatedAtDesc(eq(1L), any(Pageable.class))).thenReturn(List.of());
         when(eventRepo.findRecentOtherSessionKeys(eq(1L), anyString(), any(Pageable.class)))
                 .thenReturn(List.of("1:2026-09-15"));
-        when(eventRepo.countByUserIdAndSessionKey(1L, "1:2026-09-15")).thenReturn(2L);
+        when(eventRepo.countByUserIdAndSessionKeyAndKindIn(1L, "1:2026-09-15", CHAT_KINDS)).thenReturn(2L);
         when(eventRepo.findByUserIdAndSessionKeyOrderByIdAsc(1L, "1:2026-09-15")).thenReturn(List.of(
                 MemoryEvent.builder().role("user").content("帮我做一个20日上穿60日买入的策略")
                         .occurredAt(LocalDateTime.of(2026, 9, 15, 10, 0)).build(),
@@ -263,7 +266,7 @@ class MemoryServiceTest {
         when(eventRepo.findRecentOtherSessionKeys(eq(1L), anyString(), any(Pageable.class)))
                 .thenReturn(List.of("1:2026-09-15"));
         when(episodeRepo.existsByUserIdAndSessionKey(1L, "1:2026-09-15")).thenReturn(false);
-        when(eventRepo.countByUserIdAndSessionKey(1L, "1:2026-09-15")).thenReturn(4L);
+        when(eventRepo.countByUserIdAndSessionKeyAndKindIn(1L, "1:2026-09-15", CHAT_KINDS)).thenReturn(4L);
 
         service.ensurePreviousSessionConsolidated(1L, "1:2026-09-16");
 
@@ -277,7 +280,7 @@ class MemoryServiceTest {
     void consolidationFailureIsSwallowed() {
         when(eventRepo.findRecentOtherSessionKeys(eq(1L), anyString(), any(Pageable.class)))
                 .thenReturn(List.of("1:2026-09-15"));
-        when(eventRepo.countByUserIdAndSessionKey(1L, "1:2026-09-15")).thenReturn(4L);
+        when(eventRepo.countByUserIdAndSessionKeyAndKindIn(1L, "1:2026-09-15", CHAT_KINDS)).thenReturn(4L);
         when(memoryClient.consolidate(1L, "1:2026-09-15")).thenThrow(new RuntimeException("python down"));
 
         assertDoesNotThrow(() -> service.ensurePreviousSessionConsolidated(1L, "1:2026-09-16"));
@@ -300,7 +303,7 @@ class MemoryServiceTest {
      */
     @Test
     void warmupTriggersAfterTheFirstExchange() {
-        when(eventRepo.countByUserIdAndSessionKey(1L, "1:2026-09-16")).thenReturn(3L);
+        when(eventRepo.countByUserIdAndSessionKeyAndKindIn(1L, "1:2026-09-16", CHAT_KINDS)).thenReturn(3L);
         when(episodeRepo.findFirstByUserIdAndSessionKeyOrderByVersionDesc(1L, "1:2026-09-16"))
                 .thenReturn(Optional.empty());
 
@@ -311,7 +314,7 @@ class MemoryServiceTest {
 
     @Test
     void warmupSecondTriggerIsAtFourEvents() {
-        when(eventRepo.countByUserIdAndSessionKey(1L, "1:2026-09-16")).thenReturn(5L);
+        when(eventRepo.countByUserIdAndSessionKeyAndKindIn(1L, "1:2026-09-16", CHAT_KINDS)).thenReturn(5L);
         when(episodeRepo.findFirstByUserIdAndSessionKeyOrderByVersionDesc(1L, "1:2026-09-16"))
                 .thenReturn(Optional.of(MemoryEpisode.builder().version(1).build()));
 
@@ -320,12 +323,12 @@ class MemoryServiceTest {
         verify(memoryClient, times(1)).consolidate(1L, "1:2026-09-16");
     }
 
-    /** 稳定阶段：version=3 时阈值是 24 条，9 条不该触发（省 LLM 调用）。 */
+    /** 稳定阶段：version=3 时阈值是 24 条对话事件（约 12 轮问答），9 条不该触发（省 LLM 调用）。 */
     @Test
     void steadyStateDoesNotTriggerBeforeTheThreshold() {
         when(episodeRepo.findFirstByUserIdAndSessionKeyOrderByVersionDesc(1L, "1:2026-09-16"))
                 .thenReturn(Optional.of(MemoryEpisode.builder().version(3).build()));
-        when(eventRepo.countByUserIdAndSessionKey(1L, "1:2026-09-16")).thenReturn(9L);
+        when(eventRepo.countByUserIdAndSessionKeyAndKindIn(1L, "1:2026-09-16", CHAT_KINDS)).thenReturn(9L);
 
         service.maybeConsolidateCurrentSession(1L, "1:2026-09-16");
 
@@ -334,7 +337,7 @@ class MemoryServiceTest {
 
     @Test
     void steadyStateTriggersOnceThresholdIsReached() {
-        when(eventRepo.countByUserIdAndSessionKey(1L, "1:2026-09-16")).thenReturn(25L);
+        when(eventRepo.countByUserIdAndSessionKeyAndKindIn(1L, "1:2026-09-16", CHAT_KINDS)).thenReturn(25L);
         when(episodeRepo.findFirstByUserIdAndSessionKeyOrderByVersionDesc(1L, "1:2026-09-16"))
                 .thenReturn(Optional.of(MemoryEpisode.builder().version(3).build()));
 
@@ -346,7 +349,7 @@ class MemoryServiceTest {
     /** 冷却：异步巩固还没写完摘要时，紧接着的消息不能重复触发。 */
     @Test
     void cooldownPreventsDuplicateConsolidation() {
-        when(eventRepo.countByUserIdAndSessionKey(1L, "1:2026-09-16")).thenReturn(3L);
+        when(eventRepo.countByUserIdAndSessionKeyAndKindIn(1L, "1:2026-09-16", CHAT_KINDS)).thenReturn(3L);
         when(episodeRepo.findFirstByUserIdAndSessionKeyOrderByVersionDesc(1L, "1:2026-09-16"))
                 .thenReturn(Optional.empty());
 
@@ -359,11 +362,42 @@ class MemoryServiceTest {
 
     @Test
     void warmupFailureIsSwallowed() {
-        when(eventRepo.countByUserIdAndSessionKey(1L, "1:2026-09-16")).thenReturn(3L);
+        when(eventRepo.countByUserIdAndSessionKeyAndKindIn(1L, "1:2026-09-16", CHAT_KINDS)).thenReturn(3L);
         when(episodeRepo.findFirstByUserIdAndSessionKeyOrderByVersionDesc(1L, "1:2026-09-16"))
                 .thenReturn(Optional.empty());
         when(memoryClient.consolidate(1L, "1:2026-09-16")).thenThrow(new RuntimeException("python down"));
 
         assertDoesNotThrow(() -> service.maybeConsolidateCurrentSession(1L, "1:2026-09-16"));
+    }
+
+    /**
+     * 跨天补总结的在途去重：巩固要几秒才落库，这期间"还没摘要"对并发线程
+     * 同时成立（2026-10-20 线上实测同一会话 1.9 秒内生成了 v1/v2 两版摘要）。
+     * 一个线程在巩固中时，另一个线程的补总结必须跳过同一段会话。
+     */
+    @Test
+    void backfillDeduplicatesInFlightCandidate() throws Exception {
+        when(eventRepo.findRecentOtherSessionKeys(eq(1L), anyString(), any(Pageable.class)))
+                .thenReturn(List.of("1:2026-09-15"));
+        when(eventRepo.countByUserIdAndSessionKeyAndKindIn(1L, "1:2026-09-15", CHAT_KINDS)).thenReturn(4L);
+
+        java.util.concurrent.CountDownLatch consolidating = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        when(memoryClient.consolidate(1L, "1:2026-09-15")).thenAnswer(inv -> {
+            consolidating.countDown();
+            // 模拟 LLM 巩固耗时：卡住直到测试放行，制造"摘要还没落库"的窗口
+            release.await(5, java.util.concurrent.TimeUnit.SECONDS);
+            return null;
+        });
+
+        Thread first = new Thread(() -> service.ensurePreviousSessionConsolidated(1L, "1:2026-09-16"));
+        first.start();
+        assertTrue(consolidating.await(5, java.util.concurrent.TimeUnit.SECONDS));
+        // 第一个线程还没写完摘要，第二个线程此时触发补总结
+        service.ensurePreviousSessionConsolidated(1L, "1:2026-09-16");
+        release.countDown();
+        first.join(5000);
+
+        verify(memoryClient, times(1)).consolidate(1L, "1:2026-09-15");
     }
 }

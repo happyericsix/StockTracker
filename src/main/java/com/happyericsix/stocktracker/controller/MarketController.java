@@ -32,6 +32,7 @@ public class MarketController {
 
     private final MarketStatusService marketStatusService;
     private final MarketSentimentService marketSentimentService;
+    private final com.happyericsix.stocktracker.client.MarketFundFlowClient marketFundFlowClient;
 
     @GetMapping("/status")
     public Result<MarketStatusResponse> status() {
@@ -48,5 +49,19 @@ public class MarketController {
     @GetMapping("/sentiment")
     public Result<JsonNode> sentiment(@RequestParam("symbol") String symbol) {
         return Result.success(marketSentimentService.getSentiment(symbol));
+    }
+
+    /**
+     * 大盘主力资金流日线（2026-10-16）：Dashboard 资金卡的数据源，代理 Python
+     * （东财口径，10 分钟缓存）。失败回「暂不可用」而不是 500——资金卡缺席
+     * 首页照常。个股/板块口径上游接口暂不可用，见 Python 侧数据层注释。
+     */
+    @GetMapping("/fund-flow")
+    public Result<JsonNode> fundFlow(@RequestParam(defaultValue = "60") int limit) {
+        JsonNode data = marketFundFlowClient.getFundFlow(limit);
+        if (data == null || !data.path("ok").asBoolean(false)) {
+            return Result.error(503, "资金流向暂不可用，稍后再试");
+        }
+        return Result.success(data);
     }
 }

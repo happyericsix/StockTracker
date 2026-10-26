@@ -580,6 +580,68 @@ def fetch_ths_flash() -> list[dict]:
     ) for _, row in _frame_rows(df)][:THS_MAX]
 
 
+#: 财联社电报单次条数（与新浪/同花顺同档；rn 上限 30，克制获取不做轰炸）
+CLS_MAX = 20
+
+
+def fetch_cls_telegraph(limit: int = CLS_MAX) -> list[dict]:
+    """财联社电报（大盘口径，直连 Web 端公开接口）。失败返回 `[]`，从不抛异常。
+
+    <h3>为什么直连（2026-10-16 多源化补时效）</h3>
+    电报是 A 股盘中最快的新闻专线，同类情报工具（TrendRadar 等）默认内置；
+    本地 akshare 1.18.64 没有该接口（stock_telegraph_cls 不存在），按财联社
+    Web 端的公开签名算法直连：`sign = md5(sha1(按 key 排序的 urlencode 串))`。
+
+    <h3>防反爬姿态</h3>
+    rn 限 20、常规 UA、单次 8s 超时、失败即退不做重试；进入 wire 轮询
+    （5 分钟一趟、休市 30 分钟一趟），节奏与其它源一致。
+    """
+    import hashlib
+    from urllib.parse import urlencode
+
+    params = {"app": "CailianpressWeb", "category": "", "last_time": "",
+              "os": "web", "refresh_type": 1,
+              "rn": max(1, min(int(limit or CLS_MAX), 30)), "sv": "8.4.6"}
+    query = urlencode(sorted(params.items()))
+    sign = hashlib.md5(hashlib.sha1(query.encode("utf-8")).hexdigest().encode("utf-8")).hexdigest()
+    try:
+        resp = requests.get(
+            "https://www.cls.cn/v1/roll/get_roll_list",
+            params={**params, "sign": sign},
+            headers={"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                    "Chrome/124.0 Safari/537.36")},
+            timeout=8)
+        rows = ((resp.json() or {}).get("data") or {}).get("roll_data") or []
+    except Exception as exc:  # noqa: BLE001 —— 一家挂了不拖垮其余源
+        logger.warning("财联社电报取数失败: %s", exc)
+        return []
+
+    items: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        content = re.sub(r"<[^>]+>", "", str(row.get("content") or "")).strip()
+        title = str(row.get("title") or "").strip() or _clip_text(content, 60)
+        if not title:
+            continue
+        published = ""
+        try:
+            published = datetime.fromtimestamp(int(row.get("ctime") or 0), tz=CN_TZ).strftime(
+                "%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError, OSError):
+            pass
+        items.append(_event(
+            title=title,
+            content=content,
+            url=str(row.get("shareurl") or ""),
+            source_level=LEVEL_MEDIA,
+            source_name="财联社电报",
+            published_at=published,
+        ))
+    return items[:CLS_MAX]
+
+
 def fetch_futu_flash() -> list[dict]:
     """富途快讯（大盘口径，含海外宏观观点）。失败返回 `[]`，从不抛异常。
 
@@ -692,6 +754,52 @@ def fetch_research_reports(symbol: str, days: int = 30) -> list[dict]:
         ))
     items.sort(key=_sort_key, reverse=True)
     return items[:REPORT_MAX]
+
+
+#: 龙虎榜单日全市场上限（实测 ~130 行/日；截前 60 够看，量级友好）
+LHB_MAX = 60
+
+
+def fetch_lhb_events() -> list[dict]:
+    """东财龙虎榜（当日全市场，2026-10-16 新源）。失败返回 `[]`，从不抛异常。
+
+    龙虎榜是**资金面事件**（谁在异动席位买卖），与新闻互补：它回答"钱在哪些票上
+    异动"。作为 L2 媒体级进事件库（source_name 区分），让时间线、新闻预警、
+    委员会简报都能吃到。`上榜日` 是纯日期（日级事件，dateOnly 语义成立）。
+    """
+    from datetime import datetime as _dt
+    now_cn = _dt.now(CN_TZ)
+    today = now_cn.strftime("%Y%m%d")
+    yesterday = (now_cn - timedelta(days=1)).strftime("%Y%m%d")
+    try:
+        df = akshare.stock_lhb_detail_em(start_date=yesterday, end_date=today)
+    except Exception as exc:  # noqa: BLE001 —— 一家挂了不拖垮其余 wire 源
+        logger.warning("龙虎榜取数失败: %s", exc)
+        return []
+
+    items: list[dict] = []
+    for _, row in _frame_rows(df):
+        code = str(_row_get(row, "代码") or "").strip()
+        name = str(_row_get(row, "名称") or "").strip()
+        day = str(_row_get(row, "上榜日") or "").strip()
+        read = _clip_text(str(_row_get(row, "解读") or "").strip(), 120)
+        if not code or len(day) != 10:
+            continue
+        title = f"{name} 登上龙虎榜" + (f"：{read}" if read else "")
+        # content 写足上下文（上榜日+来源说明）：龙虎榜无原文可抓，content 就是它的"正文"
+        content = f"{read or '龙虎榜数据'}；{name}（{code}）于 {day} 登上龙虎榜，数据来自东方财富龙虎榜。"
+        items.append(_event(
+            symbol=_out_symbol(code),
+            name=name,
+            title=title,
+            content=content,
+            url="",
+            source_level=LEVEL_MEDIA,
+            source_name="东财·龙虎榜",
+            published_at=f"{day} 00:00:00",
+        ))
+    items.sort(key=_sort_key, reverse=True)
+    return items[:LHB_MAX]
 
 
 # ==================== 公告正文（按需补抓）====================
@@ -1140,11 +1248,13 @@ def search_news(symbol: str = "", keyword: str = "", types: list[int] | None = N
             collected.extend(news)
             counts["news"] = len(news)
         else:
-            # 大盘口径：东财快讯 + 新浪/同花顺 + 新闻联播（多源化，2026-10-09；
-            # 2026-10-12 富途移出——JS 空壳页抓不到原文，见 FUTU_MAX 处注释）。
+            # 大盘口径：东财快讯 + 新浪/同花顺/财联社电报 + 新闻联播（多源化，2026-10-09；
+            # 2026-10-12 富途移出——JS 空壳页抓不到原文，见 FUTU_MAX 处注释；
+            # 2026-10-16 财联社电报补入——盘中最快专线，对比同类情报工具后补的时效缺口）。
             # 每家独立失败（fetch_* 内 warning + 返回 []），一家挂了不拖垮其余。
             # 同一通稿的跨源重复在下面的 merge_cross_source 里归并。
-            for fetch_flash in (fetch_market_news, fetch_sina_flash, fetch_ths_flash):
+            for fetch_flash in (fetch_market_news, fetch_sina_flash, fetch_ths_flash,
+                                fetch_cls_telegraph, fetch_lhb_events):
                 flash = fetch_flash()
                 collected.extend(flash)
                 counts["market"] += len(flash)

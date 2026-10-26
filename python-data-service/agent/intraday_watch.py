@@ -321,7 +321,7 @@ def _watch_system_prompt() -> str:
     return (
         "你是职业盯盘交易员，正在替一条既定策略盯一只 A 股。你的任务是："
         "在事件发生后的几秒内，判断**现在该不该动**。\n"
-        "只输出一个 JSON 对象（不要任何其它文字）：\n"
+        "只输出一个 json 对象（不要任何其它文字）：\n"
         '{"action": "hold|buy|sell|partial_sell|flag", '
         '"size_fraction": 0.0-1.0, "confidence": 0.0-1.0, "reason": "一句话（不超过60字）"}\n'
         "动作语义：\n"
@@ -353,7 +353,8 @@ def _watch_user_prompt(symbol: str, events: list[dict], panel: dict,
                        config: dict | None, news_alert: dict | None = None,
                        experience: dict | None = None,
                        today_context: dict | None = None,
-                       market_context: dict | None = None) -> str:
+                       market_context: dict | None = None,
+                       lessons: dict | None = None) -> str:
     payload = {
         "symbol": symbol,
         "strategy_intent": {
@@ -380,6 +381,9 @@ def _watch_user_prompt(symbol: str, events: list[dict], panel: dict,
     # 大盘语境（2026-10-14）：指数/成交/涨跌家数（全市场共用 TTL 缓存，近零成本）
     if isinstance(market_context, dict) and market_context:
         payload["market_context"] = market_context
+    # 复盘教训（2026-10-18）：委员会同款证据块（lessons_block），软参考语义一致
+    if isinstance(lessons, dict) and lessons:
+        payload["trading_lessons"] = lessons
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
@@ -433,7 +437,8 @@ def intraday_decide(symbol: str, events: list[dict], position: dict | None,
                     news_alert: dict | None = None,
                     experience: dict | None = None,
                     today_context: dict | None = None,
-                    market_context: dict | None = None) -> dict:
+                    market_context: dict | None = None,
+                    lessons: list | None = None) -> dict:
     """盯盘交易员的一次判断。**永不抛异常**：任何故障都退化成可执行的结论。
 
     返回 {action, size_fraction, confidence, reason, warnings, degraded, watch_tokens}：
@@ -447,6 +452,9 @@ def intraday_decide(symbol: str, events: list[dict], position: dict | None,
     `experience`（P4，经验回流）：这条策略自己的成交成绩单（轻量版）——
     盯盘交易员在"这次事件值不值得动手"之前先看自己的过往战绩。
     None = 不带（fail-open，与 news_alert 同一条纪律）。
+
+    `lessons`（2026-10-18，交易教训知识库）：周反思复盘教训（Java 教训库检索），
+    委员会同款证据块（软参考语义）。None = 不带（fail-open）。
     """
     import llm_service
 
@@ -454,10 +462,12 @@ def intraday_decide(symbol: str, events: list[dict], position: dict | None,
     if not events:
         return {**_watch_result(ACTION_HOLD, 0.0, None, "无事件", []), "watch_tokens": 0}
 
-    checker = getattr(llm_service, "_is_available", None)
+    # BYOK（2026-10-25）：completion 绑定了用户供应商时按用户的 Key 判定可用性
+    checker = getattr(llm_service, "completion_available", None) \
+        or getattr(llm_service, "_is_available", None)
     if callable(checker):
         try:
-            if not checker():
+            if not checker(completion):
                 return {**_watch_result(ACTION_HOLD, 0.0, None, "模型服务不可用",
                                         ["盯盘前探测：LLM 不可用"]),
                         "degraded": True, "watch_tokens": 0}
@@ -465,14 +475,26 @@ def intraday_decide(symbol: str, events: list[dict], position: dict | None,
             pass
 
     call = completion or llm_service.chat_completion
+    # 复盘教训证据块（与委员会 lessons_block 同一份注记，语义不分叉）
+    lesson_block = None
+    if lessons:
+        from agent.trading_committee import lessons_block
+        lesson_block = lessons_block(lessons)
     try:
-        choice = call(
-            [{"role": "system", "content": _watch_system_prompt()},
-             {"role": "user", "content": _watch_user_prompt(symbol, events, panel,
-                                                           position, authorization, config,
-                                                           news_alert, experience,
-                                                           today_context, market_context)}],
-            temperature=0.1, max_tokens=WATCH_MAX_TOKENS)
+        messages = [{"role": "system", "content": _watch_system_prompt()},
+                    {"role": "user", "content": _watch_user_prompt(
+                        symbol, events, panel, position, authorization, config,
+                        news_alert, experience, today_context, market_context,
+                        lesson_block)}]
+        if completion is None:
+            # API 层 JSON 模式（2026-10-18）：盯盘输出是单个 JSON 对象，此前只靠
+            # 提示词约束 + 解析器兜底，解析失败会**静默降级成 hold**。JSON 模式把
+            # 这类失败在 API 层就防住（不支持的备用端点会被 llm_service 剥掉重试）。
+            # 只在生产默认路径开启：测试替身的签名是历史契约。
+            choice = call(messages, temperature=0.1, max_tokens=WATCH_MAX_TOKENS,
+                          response_format={"type": "json_object"})
+        else:
+            choice = call(messages, temperature=0.1, max_tokens=WATCH_MAX_TOKENS)
     except Exception as exc:  # noqa: BLE001 —— 调用异常 = 没问成 → 降级
         logger.warning("盯盘调用失败 symbol=%s: %s", symbol, exc)
         return {**_watch_result(ACTION_HOLD, 0.0, None, "调用失败",

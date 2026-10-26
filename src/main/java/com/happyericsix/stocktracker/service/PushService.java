@@ -54,12 +54,19 @@ public class PushService {
             .connectTimeout(Duration.ofSeconds(5))
             .build();
 
+    /** Bark 私网放行开关：自托管 Bark 部署在局域网（NAS 等）时才显式打开。
+     *  默认 false —— target 是用户自填 URL，服务器替用户发请求，默认必须
+     *  拒绝环回/内网/链路本地地址（SSRF 栏，2026-10-15 安全测试 L1）。 */
+    private final boolean barkAllowPrivate;
+
     public PushService(UserRepository userRepository,
                        PushLogRepository pushLogRepository,
-                       ObjectMapper objectMapper) {
+                       ObjectMapper objectMapper,
+                       @org.springframework.beans.factory.annotation.Value("${push.bark.allow-private-addresses:false}") boolean barkAllowPrivate) {
         this.userRepository = userRepository;
         this.pushLogRepository = pushLogRepository;
         this.objectMapper = objectMapper;
+        this.barkAllowPrivate = barkAllowPrivate;
     }
 
     /** 给某用户推一条。任何失败都静默（旁路语义，见类注释）。 */
@@ -125,6 +132,18 @@ public class PushService {
         if (channel == null || target == null || target.isBlank()
                 || !KNOWN_CHANNELS.contains(channel)) {
             return false;
+        }
+        // Bark 的 target 是用户自填 URL，而服务器会替用户发 GET 并把响应摘要写进
+        // 推送日志（可读回 200 字符）——不设栏就是一个内网探测器（SSRF，2026-10-15
+        // 安全测试 L1）。自托管 Bark 是合法需求，所以栏是"scheme 限 http/https +
+        // 主机解析结果拒绝内网/保留地址"，与 Python 侧 article_fetcher 同一条纪律。
+        if ("bark".equals(channel)) {
+            String reject = validateBarkServer(target);
+            if (reject != null) {
+                log.warn("bark target rejected (SSRF guard): {}", reject);
+                recordLog(userId, channel, title, body, false, reject);
+                return false;
+            }
         }
         boolean ok = false;
         String error = null;
@@ -212,6 +231,51 @@ public class PushService {
                 .timeout(Duration.ofSeconds(8))
                 .GET()
                 .build();
+    }
+
+    /**
+     * Bark 目标服务器 SSRF 栏。返回 null = 通过；非空 = 拒绝原因（写进推送日志，
+     * 用户能在"测试推送"里看到为什么没推出去）。
+     *
+     * <p>域名解析全部地址都要是公网地址：任一解析结果落在环回/站内/链路本地/
+     * 任播/组播就拒绝。显式配置 {@code push.bark.allow-private-addresses=true}
+     * （自托管 Bark 在局域网）时跳过地址栏，scheme 栏始终生效。
+     * Java 的 HttpClient 默认不跟随重定向，所以只需栏第一跳。
+     */
+    String validateBarkServer(String server) {
+        URI base;
+        try {
+            base = URI.create(server.replaceAll("/+$", ""));
+        } catch (IllegalArgumentException e) {
+            return "Bark 地址不是合法 URL";
+        }
+        String scheme = base.getScheme();
+        if (scheme == null || !(scheme.equalsIgnoreCase("http")
+                || scheme.equalsIgnoreCase("https"))) {
+            return "Bark 地址只支持 http/https";
+        }
+        String host = base.getHost();
+        if (host == null || host.isBlank()) {
+            return "Bark 地址没有主机名";
+        }
+        if (barkAllowPrivate) {
+            return null;
+        }
+        java.net.InetAddress[] addresses;
+        try {
+            addresses = java.net.InetAddress.getAllByName(host);
+        } catch (java.net.UnknownHostException e) {
+            return "Bark 地址无法解析：" + host;
+        }
+        for (java.net.InetAddress addr : addresses) {
+            if (addr.isLoopbackAddress() || addr.isSiteLocalAddress()
+                    || addr.isLinkLocalAddress() || addr.isAnyLocalAddress()
+                    || addr.isMulticastAddress()) {
+                return "Bark 地址解析到内网/保留地址，已拒绝（自托管 Bark 请部署在公网，"
+                        + "或在配置中显式开启 push.bark.allow-private-addresses）";
+            }
+        }
+        return null;
     }
 
     /** Server酱：POST https://sctapi.ftqq.com/{sendkey}.send（微信服务号推送）。 */

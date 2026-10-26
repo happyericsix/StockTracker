@@ -53,9 +53,21 @@ public class StrategyService {
         this.eventPublisher = eventPublisher;
     }
 
-    @Transactional
+    // 不包 @Transactional：校验要先调 Python（阻塞 HTTP），包进事务会占着一个
+    // 数据库连接等网络 —— 与结算侧"决策调用不进事务"同一条纪律（updateStrategy 同款）。
+    // 单条 save() 自身原子，不需要外层事务。
     public StrategyResponse createStrategy(String username, StrategyRequest request) {
         User user = getUser(username);
+        // 创建与编辑同一道门（2026-10-15 补）：此前只有编辑路径 fail-closed 校验，
+        // 坏 config 能从创建进来 —— 最危险的是符号写反的风控参数：stop_loss_pct 写成
+        // +8 在引擎里是"涨幅 ≤ 8%"恒真，而止损走硬通道不等模型，等于入场即卖的碎钞机。
+        if (request.getConfigJson() == null || request.getConfigJson().isBlank()) {
+            throw new IllegalArgumentException("configJson 不能为空：策略 DSL（entry/exit）与风控参数是必填的");
+        }
+        String createError = validateConfigOrReject(request.getConfigJson());
+        if (createError != null) {
+            throw new IllegalArgumentException("规则校验未通过：" + createError);
+        }
         Strategy strategy = Strategy.builder()
                 .name(request.getName())
                 .symbol(request.getSymbol())
@@ -584,7 +596,7 @@ public class StrategyService {
         );
     }
 
-    @Transactional
+    // 同 createStrategy：校验要调 Python，不进事务（阻塞 HTTP 不占数据库连接）。
     public StrategyResponse createFromAgent(String username, JsonNode strategyJson) {
         User user = getUser(username);
         JsonNode safeJson = strategyJson != null ? strategyJson : null;
@@ -593,12 +605,27 @@ public class StrategyService {
         String symbol = textOr(safeJson == null ? null : safeJson.get("symbol"), "");
         String configJson = safeJson == null ? "{}" : safeJson.toString();
 
+        // AI 输出是 schema 偏差率最高的一类 config（2026-10-15 前这里零校验直接落库），
+        // 与手建路径同一道 fail-closed 门：坏 config 的策略比没有策略更糟。
+        if (symbol.isBlank()) {
+            throw new IllegalArgumentException("AI 生成的策略缺少标的代码（symbol），无法保存");
+        }
+        String agentError = validateConfigOrReject(configJson);
+        if (agentError != null) {
+            throw new IllegalArgumentException("AI 生成的策略未通过规则校验：" + agentError);
+        }
+
         Strategy strategy = Strategy.builder()
                 .name(name)
                 .symbol(symbol)
                 .configJson(configJson)
                 .user(user)
                 .paperEnabled(false)
+                // 与 createStrategy 同一条纪律（2026-10-15 起无纯 rule 模式）：AI 建的策略
+                // 同样由 agent 委员会决策。此前漏设 → decisionMode=null 按 rule 读，
+                // 启动后既无首会也无授权，盘中只能哑等到出事。
+                .decisionMode(ExecutionContract.DECISION_MODE_AGENT)
+                .decisionModeSince(LocalDate.now(ZoneId.of("Asia/Shanghai")))
                 .build();
 
         strategy = strategyRepository.save(strategy);

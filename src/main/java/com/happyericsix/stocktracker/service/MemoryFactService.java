@@ -4,6 +4,7 @@ import com.happyericsix.stocktracker.dto.MemoryFactRequest;
 import com.happyericsix.stocktracker.dto.MemoryFactsRequest;
 import com.happyericsix.stocktracker.entity.MemoryFact;
 import com.happyericsix.stocktracker.repository.MemoryFactRepository;
+import com.happyericsix.stocktracker.repository.StrategyRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.PageRequest;
@@ -68,9 +69,11 @@ public class MemoryFactService {
     private static final Pattern ASCII_TOKEN = Pattern.compile("[a-zA-Z0-9_]{2,}");
 
     private final MemoryFactRepository factRepo;
+    private final StrategyRepository strategyRepository;
 
-    public MemoryFactService(MemoryFactRepository factRepo) {
+    public MemoryFactService(MemoryFactRepository factRepo, StrategyRepository strategyRepository) {
         this.factRepo = factRepo;
+        this.strategyRepository = strategyRepository;
     }
 
     // ==================== 写入：同键即取代 ====================
@@ -97,7 +100,11 @@ public class MemoryFactService {
             if (!isUsable(item)) {
                 continue;
             }
-            String subject = item.getSubject().trim();
+            // 策略键统一（记忆分区 2026-10-15）：LLM 按提示词写 strategy:名称，
+            // 客观事实通道写 strategy:{id}——同一个策略若两个键并存，取代链与分区都会断。
+            // 这里在写入前把"名称键"归一成"id 键"；解析不到（策略已删/名字记错）保持原样，
+            // 宁可当独立主体存着，也不能错并到别的策略。
+            String subject = canonicalSubject(request.getUserId(), item.getSubject().trim());
             String predicate = item.getPredicate().trim();
             String value = item.getObject().trim();
 
@@ -228,6 +235,36 @@ public class MemoryFactService {
         }
         String normalized = type.trim().toLowerCase(Locale.ROOT);
         return ALLOWED_TYPES.contains(normalized) ? normalized : "observation";
+    }
+
+    /** 策略主体键前缀（与 ObjectiveFactKeys.strategySubject 同一约定）。 */
+    private static final String STRATEGY_SUBJECT_PREFIX = "strategy:";
+
+    /**
+     * subject 归一：{@code strategy:非数字} 视为"LLM 写的策略名"，在该用户的策略里
+     * 按名称解析成 {@code strategy:{id}}；数字键与其它主体原样返回。
+     * 名称匹配对大小写与首尾空白宽容，多个同名取最近更新的那个（旧同名当已废弃）。
+     */
+    String canonicalSubject(Long userId, String subject) {
+        if (subject == null || !subject.startsWith(STRATEGY_SUBJECT_PREFIX)) {
+            return subject;
+        }
+        String rest = subject.substring(STRATEGY_SUBJECT_PREFIX.length()).trim();
+        if (rest.isEmpty() || rest.chars().allMatch(Character::isDigit)) {
+            return subject;   // 已经是 id 键，或畸形的裸前缀
+        }
+        if (strategyRepository == null || userId == null) {
+            return subject;
+        }
+        try {
+            return strategyRepository.findByUserIdOrderByUpdatedAtDesc(userId).stream()
+                    .filter(s -> rest.equals(s.getName() == null ? "" : s.getName().trim()))
+                    .findFirst()
+                    .map(s -> STRATEGY_SUBJECT_PREFIX + s.getId())
+                    .orElse(subject);   // 解析不到：保持原名独立成键，绝不猜
+        } catch (Exception e) {
+            return subject;
+        }
     }
 
     private String toJsonIds(List<Long> ids) {

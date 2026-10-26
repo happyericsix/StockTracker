@@ -58,6 +58,73 @@ def test_size_cap_aborts_before_parsing(monkeypatch):
         fetch_article_body("https://finance.eastmoney.com/a.html")
 
 
+# ==================== 重定向逐跳复检（2026-10-15 SSRF 修复） ====================
+
+def _redirect_response(location):
+    """构造一个 302 假响应（带 headers 与 close，模拟真实 Response）。"""
+    class _RedirectResp:
+        status_code = 302
+        encoding = "utf-8"
+        headers = {"Location": location}
+        closed = False
+        def raise_for_status(self): pass
+        def close(self): self.closed = True
+        def iter_content(self, chunk_size): return iter(())
+    return _RedirectResp()
+
+
+def _content_response(html):
+    class _Resp:
+        status_code = 200
+        encoding = "utf-8"
+        headers = {}
+        def raise_for_status(self): pass
+        def iter_content(self, chunk_size):
+            yield html.encode("utf-8")
+    return _Resp()
+
+
+def test_redirect_to_non_whitelisted_domain_is_blocked(monkeypatch):
+    """白名单信源 302 到 evil.io：第二跳必须重新过白名单（allow_redirects=True 的老行为是直接跟）。"""
+    monkeypatch.setattr(af.socket, "getaddrinfo",
+                        lambda host, *a: [(2, 1, 6, "", ("203.107.1.1", 0))])
+    monkeypatch.setattr(af.requests, "get",
+                        lambda *a, **k: _redirect_response("https://evil.io/steal.html"))
+    with pytest.raises(FetchError, match="白名单"):
+        fetch_article_body("https://finance.eastmoney.com/a.html")
+
+
+def test_redirect_to_private_ip_is_blocked(monkeypatch):
+    """白名单信源 302 到"域名过白名单但 DNS 指向内网"的目标：解析结果这一关拦下。"""
+    monkeypatch.setattr(af.socket, "getaddrinfo",
+                        lambda host, *a: [(2, 1, 6, "", ("10.0.0.5", 0))])
+    monkeypatch.setattr(af.requests, "get",
+                        lambda *a, **k: _redirect_response("https://sina.com.cn/meta-data"))
+    with pytest.raises(FetchError, match="内网"):
+        fetch_article_body("https://finance.eastmoney.com/a.html")
+
+
+def test_redirect_within_whitelist_is_followed(monkeypatch):
+    """合法的站内跳转（东财 → 巨潮）不受影响：逐跳复检通过后正常抽正文。"""
+    html = "<html><body><div class='txtinfos'>" + "正文段落。" * 120 + "</div></body></html>"
+    calls = iter([_redirect_response("https://www.cninfo.com.cn/new/disclosure/detail.html"),
+                  _content_response(html)])
+    monkeypatch.setattr(af.requests, "get", lambda *a, **k: next(calls))
+    monkeypatch.setattr(af.socket, "getaddrinfo",
+                        lambda host, *a: [(2, 1, 6, "", ("203.107.1.1", 0))])
+    assert "正文段落" in fetch_article_body("https://finance.eastmoney.com/a.html")
+
+
+def test_redirect_chain_over_limit_is_aborted(monkeypatch):
+    """重定向环/超长链：到达 MAX_REDIRECTS 上限后明确失败，而不是无限跟随。"""
+    monkeypatch.setattr(af.requests, "get",
+                        lambda *a, **k: _redirect_response("https://finance.eastmoney.com/loop.html"))
+    monkeypatch.setattr(af.socket, "getaddrinfo",
+                        lambda host, *a: [(2, 1, 6, "", ("203.107.1.1", 0))])
+    with pytest.raises(FetchError, match="重定向"):
+        fetch_article_body("https://finance.eastmoney.com/a.html")
+
+
 # ==================== 抽取 ====================
 
 _ARTICLE_HTML = """

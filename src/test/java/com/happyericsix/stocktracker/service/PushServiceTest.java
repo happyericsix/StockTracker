@@ -64,7 +64,9 @@ class PushServiceTest {
             exchange.close();
         });
         server.start();
-        service = new PushService(userRepository, pushLogRepository, new ObjectMapper());
+        // barkAllowPrivate=true：下面这些用例考察"发出去的请求与编码对不对"，
+        // 假 Bark 就架在 127.0.0.1 上——SSRF 栏的拒绝行为由专门用例钉（默认 false）。
+        service = new PushService(userRepository, pushLogRepository, new ObjectMapper(), true);
     }
 
     @AfterEach
@@ -188,5 +190,36 @@ class PushServiceTest {
                 .thenThrow(new RuntimeException("db down"));
         assertThat(service.pushTest("alice", "bark", barkBase(), "标题", "正文")).isTrue();
         assertThat(paths).hasSize(1);
+    }
+
+    // ==================== Bark SSRF 栏（2026-10-15 安全测试 L1） ====================
+
+    /** 默认（barkAllowPrivate=false）：环回/内网目标必须拒绝，原因要能读回给用户。 */
+    @Test
+    void barkGuardRejectsPrivateTargetsByDefault() {
+        PushService guard = new PushService(userRepository, pushLogRepository,
+                new ObjectMapper(), false);
+        assertThat(guard.validateBarkServer("http://127.0.0.1:8080/x")).contains("内网");
+        assertThat(guard.validateBarkServer("http://localhost:8080/x")).contains("内网");
+        assertThat(guard.validateBarkServer("http://192.168.1.10/x")).contains("内网");
+        assertThat(guard.validateBarkServer("http://10.0.0.5/x")).contains("内网");
+        assertThat(guard.validateBarkServer("http://169.254.169.254/meta")).contains("内网");
+        // scheme 栏与主机栏
+        assertThat(guard.validateBarkServer("file:///etc/passwd")).contains("http");
+        assertThat(guard.validateBarkServer("not a url")).isNotNull();
+        // 拒绝时不能真的发请求（paths 空），且留下可见的失败痕迹（推送日志行）
+        stubUser("bark", "http://127.0.0.1:9/x");
+        assertThat(guard.pushTest("alice", "bark", "http://127.0.0.1:9/x", "t", "b")).isFalse();
+        assertThat(paths).isEmpty();
+        verify(pushLogRepository).save(any(PushLog.class));
+    }
+
+    /** 显式放行（自托管 Bark 在局域网）：地址栏跳过，但 scheme 栏仍然生效。 */
+    @Test
+    void barkGuardAllowsPrivateWhenExplicitlyConfigured() {
+        PushService guard = new PushService(userRepository, pushLogRepository,
+                new ObjectMapper(), true);
+        assertThat(guard.validateBarkServer("http://127.0.0.1:8080/x")).isNull();
+        assertThat(guard.validateBarkServer("file:///etc/passwd")).contains("http");
     }
 }

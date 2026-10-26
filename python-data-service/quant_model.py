@@ -12,6 +12,7 @@ import pandas as pd
 import lightgbm as lgb
 from deep_models import MiniTransformer, DQNAgent
 import pickle
+import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -388,8 +389,23 @@ MODEL_DIR.mkdir(exist_ok=True)
 DISK_MODEL_MAX_AGE = 6 * 3600  # Retrain if model older than 6 hours (covers daily market close at 15:00)
 
 
+def _safe_symbol_filename(symbol: str) -> str:
+    """pickle 文件名的路径安全栏（2026-10-15 安全测试 L4）。
+
+    模型落盘路径由 symbol 直接拼接，而 symbol 是 HTTP 路径参数原样透传的：
+    一个 `..\\` 或 `/` 就是**路径穿越 + pickle 反序列化**（RCE 级陷阱，
+    当前 include_models=False 不可达，栏子先行——将来打开开关时不会再裸奔）。
+    白名单：字母数字与 `._-`，≤16 字符，且不许 `..`。
+    """
+    s = str(symbol or "")
+    if ".." in s or not re.fullmatch(r"[0-9A-Za-z._-]{1,16}", s):
+        raise ValueError(f"illegal symbol for model path: {symbol!r}")
+    return s
+
+
 def _try_load_disk(symbol: str, prices: list):
     try:
+        symbol = _safe_symbol_filename(symbol)
         multi = MultiWindowPredictor()
         all_found = True
         for label in ["short", "mid", "long"]:
@@ -435,6 +451,7 @@ def _try_load_disk(symbol: str, prices: list):
 
 def _save_to_disk(symbol: str, multi: MultiWindowPredictor, tf, dqn):
     try:
+        symbol = _safe_symbol_filename(symbol)
         for label, predictor in multi.predictors.items():
             if predictor.trained:
                 path = MODEL_DIR / (symbol + "_lgb_" + label + ".pkl")

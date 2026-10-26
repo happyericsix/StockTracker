@@ -103,6 +103,30 @@ public class NewsClient {
     }
 
     /**
+     * 个股人气榜 TopN（资讯雷达「热榜」视图，2026-10-16）。
+     * Python 侧 5 分钟 TTL 缓存 + fail-open；这里同样降级：取不到返回 null，
+     * 控制器据此回「暂不可用」而不是 500——热榜是增强视图，缺席不是故障。
+     */
+    public JsonNode getHotRank(int limit) {
+        try {
+            return webClient.get()
+                    .uri(uri -> uri.path("/api/v1/news/hot-rank")
+                            .queryParam("limit", Math.max(1, Math.min(limit, 50)))
+                            .build())
+                    .retrieve()
+                    .bodyToMono(JsonNode.class)
+                    .block(REQUEST_TIMEOUT);
+        } catch (WebClientResponseException e) {
+            log.warn("hot-rank 调用失败（{}）: {}", e.getStatusCode().value(),
+                    e.getResponseBodyAsString());
+            return null;
+        } catch (Exception e) {
+            log.warn("hot-rank 调用失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
      * 结构化抽取（N2）。
      *
      * @param items 原始事件结构（键名与 N1 的输出一致，spec §6 的输入侧）

@@ -6,10 +6,15 @@
    送给内网的探测器（SSRF）。
 2. **私网拦截**：白名单通过后仍要解析 IP——DNS 重绑定可以把白名单域名
    指到 127.0.0.1/10.x/169.254.x（云元数据端点）。域名骗得过白名单，
-   骗不过解析结果。
-3. **限额**：单篇 8 秒超时、响应体上限 2MB。否则一个慢站/巨页就能占死
+   骗不过解析结果。（残余风险：解析与连接之间理论上有 DNS 重绑定的
+   TOCTOU 窗口，完整消除需 IP 级绑定连接，对 CDN 信源不现实，记录在案。）
+3. **重定向逐跳复检**（2026-10-15 SSRF 修复）：requests 的
+   allow_redirects=True 只校验第一跳，302 目标不再过任何栏——白名单域名
+   上的开放重定向可以跳到内网/云元数据。现在禁自动重定向，手动跟随
+   且**每一跳**重新过 1+2 两道栏，上限 3 跳。
+4. **限额**：单篇 8 秒超时、响应体上限 2MB。否则一个慢站/巨页就能占死
    工作线程。
-4. **长度与失败语义**：抽不出正文返回明确错误（调用方软降级为摘要+原文
+5. **长度与失败语义**：抽不出正文返回明确错误（调用方软降级为摘要+原文
    链接），绝不返回半截 HTML 让前端渲染。
 
 <h2>抽取策略（bs4 + lxml，无新依赖）</h2>
@@ -22,7 +27,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import socket
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -39,6 +44,7 @@ ALLOWED_DOMAIN_SUFFIXES = (
 )
 
 FETCH_TIMEOUT_S = 8
+MAX_REDIRECTS = 3          # 正常信源 1~2 跳足够；更多多半是重定向环/开放重定向
 MAX_BYTES = 2 * 1024 * 1024
 MAX_PDF_BYTES = 5 * 1024 * 1024   # 研报 PDF 普遍 0.5~3MB
 MIN_BODY_CHARS = 200
@@ -93,6 +99,37 @@ def _reject_private_ip(url: str) -> None:
             raise FetchError(f"信源域名解析到内网/保留地址，已拦截：{host} -> {ip}")
 
 
+def _request_checked(url: str):
+    """发请求并处理重定向：**每一跳**重新过白名单 + 私网栏（2026-10-15 SSRF 修复）。
+
+    requests 的 allow_redirects=True 只校验传进去的第一个 URL，302 的目标
+    不会再过任何栏——白名单域名上的开放重定向（或被篡改的信源页）可以
+    一路跳到 169.254.169.254 / localhost。这里禁自动重定向、手动跟随，
+    每跳 _check_url + _reject_private_ip，跳数上限 MAX_REDIRECTS。
+
+    测试桩兼容：最小假响应可能没有 status_code/headers/close（生产
+    Response 恒有），缺 status_code 按普通 200 响应对待。
+    """
+    for _ in range(MAX_REDIRECTS + 1):
+        response = requests.get(url, headers=_HEADERS, timeout=FETCH_TIMEOUT_S,
+                                allow_redirects=False, stream=True)
+        status = getattr(response, "status_code", 200)
+        headers = getattr(response, "headers", None) or {}
+        if status not in (301, 302, 303, 307, 308):
+            return response
+        location = headers.get("Location")
+        if not location:
+            # 声称重定向却没给 Location：当普通响应对待，让调用方自己消化
+            return response
+        next_url = urljoin(url, str(location))
+        closer = getattr(response, "close", None)
+        if closer:
+            closer()
+        url = _check_url(next_url)
+        _reject_private_ip(next_url)
+    raise FetchError("重定向次数超过上限，放弃抓取")
+
+
 def _extract_text(html: str) -> str:
     soup = BeautifulSoup(html, "lxml")
     for tag in soup(["script", "style", "nav", "header", "footer", "aside"]):
@@ -142,8 +179,7 @@ def fetch_article_body(url: str) -> str:
         raise FetchError("公告正文 API 未返回内容")
 
     try:
-        response = requests.get(safe_url, headers=_HEADERS, timeout=FETCH_TIMEOUT_S,
-                                allow_redirects=True, stream=True)
+        response = _request_checked(safe_url)
         response.raise_for_status()
         # getattr 兼容测试桩（最小响应对象没有 headers）；生产路径恒有
         resp_headers = getattr(response, "headers", None) or {}

@@ -28,12 +28,25 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# .env 兜底（2026-10-18，回归实测发现）：本脚本独立运行（不经过 llm_service）
+# 时 DEEPSEEK_API_KEY 不会自动进环境——401 会让全部用例"调用失败"，而失败在
+# 判分里长得像"拒答"（refusal_rate 反而满分）。比报错更危险的正是这种假结果，
+# 所以这里主动触发一次 llm_service 的 .env 加载（import 副作用）。
+sys.path.insert(0, os.path.dirname(HERE))
+try:
+    import llm_service  # noqa: F401
+except Exception:  # noqa: BLE001 —— 加载失败不挡评测（--token 显式传参仍可用）
+    pass
+
 # 与 build_dataset.py 同源的短指令（评估必须用与训练一致的提示分布，
 # 否则量的是"提示词鲁棒性"而不是"模型能力"）
 SYSTEM_ANALYZE = (
     "你是A股资讯分析师。读给定的股票资讯，只输出JSON："
     '{"event_type":…, "direction":…, "confidence":…, "impact_level":…, '
-    '"plain_summary":…}。direction只能是利好/利空/中性之一；'
+    '"plain_summary":…}。'
+    "event_type 只能是以下之一：业绩预告、重大合同、回购、增减持、监管处罚、"
+    "重组、宏观政策、行业动态、其他（更细的分类请归入最近的一档，如「股份回购」"
+    "归「回购」）；direction只能是利好/利空/中性之一；"
     "信息不足时direction为null且confidence低于0.4，不要编造方向。"
 )
 VALID_DIRECTIONS = {"利好", "利空", "中性"}
@@ -65,7 +78,10 @@ def load_cases() -> list[dict]:
             line = line[2:]
         if current is None or not line.strip() or line.lstrip().startswith("#"):
             continue
-        if line.startswith("  ") and ":" in line and not line.strip().startswith("- "):
+        # 2026-10-18 修：此前要求 startswith("  ")，而 "- id:" 剥掉前缀后的
+        # "id: seed-001" 没有缩进——**每条 case 的 id 都被丢掉**，报告里全是
+        # "None [direction]"，无法对行。现在只认"含冒号且不是列表项"的行。
+        if ":" in line and not line.strip().startswith("- "):
             key, _, value = line.strip().partition(":")
             value = value.strip().strip('"').strip("'")
             current[key.strip()] = value

@@ -41,7 +41,8 @@ def test_rrf_score_matches_the_formula():
 
 def test_embeddings_are_disabled_without_a_key(monkeypatch):
     monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
-    monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
+    monkeypatch.delenv("EMBEDDING_BASE_URL", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
 
     assert embeddings.is_enabled() is False
     # 关键：不报错，只是返回 None，调用方退化成关键词检索
@@ -50,6 +51,8 @@ def test_embeddings_are_disabled_without_a_key(monkeypatch):
 
 def test_embedding_result_is_cached_and_normalized(monkeypatch, tmp_path):
     monkeypatch.setenv("EMBEDDING_API_KEY", "test-key")
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "https://embedding.test/v1")
+    monkeypatch.setenv("EMBEDDING_MODEL", "test-embedding")
     monkeypatch.setenv("EMBEDDING_CACHE_PATH", str(tmp_path / "emb.jsonl"))
     embeddings.reset_cache_for_tests()
 
@@ -81,6 +84,8 @@ def test_embedding_result_is_cached_and_normalized(monkeypatch, tmp_path):
 
 def test_embedding_failure_returns_none_instead_of_raising(monkeypatch, tmp_path):
     monkeypatch.setenv("EMBEDDING_API_KEY", "test-key")
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "https://embedding.test/v1")
+    monkeypatch.setenv("EMBEDDING_MODEL", "test-embedding")
     monkeypatch.setenv("EMBEDDING_CACHE_PATH", str(tmp_path / "emb.jsonl"))
     embeddings.reset_cache_for_tests()
 

@@ -107,5 +107,12 @@ public class NewsIngestJob {
         log.debug("资讯全量趟开始（公告 + 舆情，复用手动刷新链路）");
         jobRunService.runWithHeartbeat(JobRunService.JOB_NEWS_REFRESH,
                 () -> newsService.refresh(null));
+        // 自选股研报定向补拉（2026-10-16）：研报是按 symbol 拉的源，wire 拉不到；
+        // 挂在全量趟里，跟随早/收盘后/晚间的既有节奏（不再加新定时器）
+        try {
+            newsService.refreshReportsForFavorites();
+        } catch (Exception e) {
+            log.debug("自选研报补拉跳过: {}", e.toString());
+        }
     }
 }

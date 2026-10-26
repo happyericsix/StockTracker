@@ -273,7 +273,7 @@ def test_consolidation_skips_usage_and_external_events():
          "occurredAt": "2026-09-16T10:00:07", "provenance": "model"},
     ]
 
-    dialog, used_ids, _timestamps = consolidate._build_dialog(events)
+    dialog, used_ids, _timestamps, _line_ids = consolidate._build_dialog(events)
 
     assert "止损我想改成 5%" in dialog
     assert "已按 5% 记录" in dialog
@@ -292,7 +292,7 @@ def test_consolidation_still_keeps_tool_failures_from_internal_tools():
          "occurredAt": "2026-09-16T10:00:00", "provenance": "tool"},
     ]
 
-    dialog, used_ids, _ = consolidate._build_dialog(events)
+    dialog, used_ids, _, _line_ids = consolidate._build_dialog(events)
 
     assert "历史数据不足" in dialog
     assert used_ids == [1]

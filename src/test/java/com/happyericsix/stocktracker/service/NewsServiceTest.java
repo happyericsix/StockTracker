@@ -94,6 +94,9 @@ class NewsServiceTest {
     @Mock
     private AkshareStockClient stockClient;
 
+    @Mock
+    private NewsAlertService newsAlertService;
+
     /** 事务模板用的是它的 mock：{@code TransactionTemplate} 在 getTransaction 返回 null 时照常执行回调。 */
     @Mock
     private PlatformTransactionManager transactionManager;
@@ -112,7 +115,8 @@ class NewsServiceTest {
     void setUp() {
         newsService = new NewsService(
                 newsEventRepository, newsStockRelRepository, favoriteStockRepository,
-                userRepository, newsClient, stockClient, transactionManager, Runnable::run);
+                userRepository, newsClient, stockClient, newsAlertService,
+                transactionManager, Runnable::run);
     }
 
     private final ObjectMapper mapper = new ObjectMapper();
@@ -876,7 +880,8 @@ class NewsServiceTest {
 
         NewsService gatedService = new NewsService(
                 newsEventRepository, newsStockRelRepository, favoriteStockRepository,
-                userRepository, newsClient, stockClient, transactionManager, gated);
+                userRepository, newsClient, stockClient, newsAlertService,
+                transactionManager, gated);
         try {
             when(newsEventRepository.findTimeline(anyList(), any(), any()))
                     .thenReturn(List.of(analyzed, pending));
@@ -926,7 +931,8 @@ class NewsServiceTest {
 
         NewsService gatedService = new NewsService(
                 newsEventRepository, newsStockRelRepository, favoriteStockRepository,
-                userRepository, newsClient, stockClient, transactionManager, gated);
+                userRepository, newsClient, stockClient, newsAlertService,
+                transactionManager, gated);
         try {
             NewsEvent fresh = event(1L, "SH600519", "今日公告", LocalDate.now().atTime(9, 0));
             when(newsEventRepository.findTimeline(anyList(), any(), any())).thenReturn(List.of(fresh));
@@ -976,7 +982,8 @@ class NewsServiceTest {
 
         NewsService gatedService = new NewsService(
                 newsEventRepository, newsStockRelRepository, favoriteStockRepository,
-                userRepository, newsClient, stockClient, transactionManager, gated);
+                userRepository, newsClient, stockClient, newsAlertService,
+                transactionManager, gated);
         try {
             NewsEvent analyzed = event(1L, "SH600519", "回购公告", LocalDate.now().atTime(9, 0));
             analyzed.setPlainSummary("公司拟回购 10 亿元");

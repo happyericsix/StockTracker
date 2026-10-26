@@ -50,7 +50,7 @@ def patch_llm(monkeypatch, replies, available=True):
         return {"message": {"role": "assistant", "content": reply}}
 
     monkeypatch.setattr(llm_service, "chat_completion", fake_completion)
-    monkeypatch.setattr(llm_service, "_is_available", lambda: available)
+    monkeypatch.setattr(llm_service, "_is_available", lambda providers=None: available)
     return calls
 
 
@@ -770,3 +770,40 @@ def test_analyze_endpoint_requires_internal_token(monkeypatch):
     monkeypatch.setattr(nu, "analyze_events", lambda items: pytest.fail("未鉴权不该进入业务逻辑"))
     r = TestClient(main.app).post("/api/v1/news/analyze", json={"items": [make_item()]})
     assert r.status_code == 401
+
+
+# ==================== 研报评级兜底（2026-10-16） ====================
+
+
+def test_report_rating_direction_mapping():
+    """封闭映射：买入系→利好、卖出系→利空、中性系→中性；表外词不猜。"""
+    from news_understanding import _report_rating_direction
+    assert _report_rating_direction("买入") == "利好"
+    assert _report_rating_direction("维持增持") == "利好"      # 子串匹配吸收"维持/上调至"变体
+    assert _report_rating_direction("下调至卖出") == "利空"
+    assert _report_rating_direction("中性") == "中性"
+    assert _report_rating_direction("") is None
+    assert _report_rating_direction("神秘评级") is None       # 表外词：宁缺毋滥
+
+
+def test_rating_fallback_takes_over_only_directionless_reports():
+    """兜底只接管"研报 + 无方向"的条目：LLM 已给结论的不动，媒体条目不碰。"""
+    from news_understanding import _apply_report_rating_fallback
+    entries = {
+        0: {"source_level": 3, "event_type_raw": "买入", "direction": None,
+            "plain_summary": "信息不足，不判断方向", "confidence": 0.0, "analyzed": False},
+        1: {"source_level": 3, "event_type_raw": "减持", "direction": "利好",
+            "plain_summary": "模型已判利好", "confidence": 0.8, "analyzed": True},
+        2: {"source_level": 2, "event_type_raw": "买入", "direction": None,
+            "plain_summary": "媒体条目", "confidence": 0.0, "analyzed": False},
+    }
+    applied = _apply_report_rating_fallback(entries)
+    assert applied == 1
+    # 研报无方向 → 评级接管，标 analyzed 让 Java 落库，摘要注明口径
+    assert entries[0]["direction"] == "利好" and entries[0]["analyzed"] is True
+    assert entries[0]["confidence"] >= 0.4
+    assert "评级映射" in entries[0]["plain_summary"]
+    # LLM 已给结论（哪怕是"减持却判利好"）：不改写——那是模型的责任，不是兜底的
+    assert entries[1]["direction"] == "利好" and entries[1]["analyzed"] is True
+    # 媒体条目即使带"买入"字样也不兜底：那不是正式评级表态
+    assert entries[2]["direction"] is None and entries[2]["analyzed"] is False

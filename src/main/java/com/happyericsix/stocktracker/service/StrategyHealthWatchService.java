@@ -111,6 +111,9 @@ public class StrategyHealthWatchService {
         checkDrawdownBreach(strategy, account, today).ifPresent(fired::add);
         checkVerificationFailed(strategy, today).ifPresent(fired::add);
         checkNewsMaterial(strategy, today).ifPresent(fired::add);
+        // 情绪哨兵（2026-10-16 ③步）：龙虎榜=关注度异动。确定性查库、零网络、fail-open；
+        // 只告知不提案——情绪没有资格直接触发任何动作（防过拟合的第一道闸）
+        checkLhbAttention(strategy, today).ifPresent(fired::add);
         checkConcentrationFull(strategy, account, today).ifPresent(fired::add);
         return fired;
     }
@@ -220,6 +223,24 @@ public class StrategyHealthWatchService {
      * 标的近 48 小时"已解读 + 高影响 + 高可信 + 方向非中性"的资讯。
      * **只告知，永不据此建议改策略**（信息类事件没有提案权——Phase 3 的治理规则）。
      */
+    /** 情绪哨兵：标的近 48 小时登上龙虎榜（关注度异动）。 */
+    private java.util.Optional<StrategyHealthEvent> checkLhbAttention(Strategy strategy, LocalDate today) {
+        return guard(StrategyHealthEvent.TYPE_LHB_ATTENTION, strategy, today, () -> {
+            LocalDateTime since = today.atStartOfDay().minusDays(1);
+            List<NewsEvent> hits = newsEventRepository.findTimeline(
+                    symbolCandidates(strategy.getSymbol()), since, PageRequest.of(0, 20));
+            NewsEvent lhb = hits.stream()
+                    .filter(e -> "东财·龙虎榜".equals(e.getSourceName()))
+                    .findFirst().orElse(null);
+            if (lhb == null) {
+                return null;
+            }
+            String evidence = "该标的近 48 小时登上龙虎榜（关注度异动）：" + lhb.getTitle()
+                    + "。上榜只说明资金在异动，方向要看解读；这是提醒不是买卖建议。";
+            return event(strategy, StrategyHealthEvent.TYPE_LHB_ATTENTION, evidence, today);
+        });
+    }
+
     private java.util.Optional<StrategyHealthEvent> checkNewsMaterial(Strategy strategy, LocalDate today) {
         return guard(StrategyHealthEvent.TYPE_NEWS_MATERIAL, strategy, today, () -> {
             LocalDateTime since = today.atStartOfDay().minusDays(1);
@@ -322,6 +343,7 @@ public class StrategyHealthWatchService {
             case StrategyHealthEvent.TYPE_DRAWDOWN_BREACH -> cooldownDrawdownDays;
             case StrategyHealthEvent.TYPE_VERIFICATION_FAILED -> cooldownVerificationDays;
             case StrategyHealthEvent.TYPE_NEWS_MATERIAL -> cooldownNewsDays;
+            case StrategyHealthEvent.TYPE_LHB_ATTENTION -> cooldownNewsDays;
             case StrategyHealthEvent.TYPE_CONCENTRATION_FULL -> cooldownConcentrationDays;
             default -> 7;
         };

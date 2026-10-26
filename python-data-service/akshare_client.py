@@ -441,6 +441,18 @@ MAX_PAGES = 6
 # 元旦连休可以到 9 天，所以给 10 天。
 COVERAGE_GRACE_DAYS = 10
 
+# <h3>K 线取数的同源退避重试（2026-10-19/20 事故）</h3>
+# 连续两天 15:30 日线结算时段腾讯 ifzq 对本机拒绝服务 100+ 分钟，单次请求直接判死，
+# 结算以 data_unavailable 跳过。这里补的是**同源重试**——不换源、不碰复权口径
+# （qfq 单一真相源的约束见上方 ADJUST_MODE 与行情源降级区的"宁可不兜，不可错兜"），
+# 只对网络类异常多试几次，写法沿用 llm_service._post_with_retry。
+# 只重试异常（超时/连接/JSON 解析失败），**不重试"正常返回但为空"**：
+# 空是源的正常回答（新股、超出源头历史），重试只会加倍延迟。
+# 延迟预算：单页最坏 15s 超时 × 3 次 + 退避 2s + 4s ≈ 51s，仍在 Java evaluate-bar
+# 的 60s 超时内；多页区间查询最坏耗时约增 3 倍，但那只发生在源整段宕掉时（原本也失败）。
+KLINE_RETRY_ATTEMPTS = int(os.getenv("KLINE_RETRY_ATTEMPTS", "3"))
+KLINE_RETRY_BACKOFF_S = float(os.getenv("KLINE_RETRY_BACKOFF_S", "2.0"))
+
 
 def _days_between(start: str, end: str) -> int:
     try:
@@ -510,13 +522,34 @@ def _windows_for(start_date: str, end_date: str) -> list[tuple[str, str]]:
     return windows
 
 
+def _retry_kline_fetch(what: str, fetch):
+    """K 线取数的同源退避重试（参数与理由见 `KLINE_RETRY_ATTEMPTS` 注释）。
+
+    只重试网络类异常（超时 / 连接 / JSON 解析失败——requests 的 JSONDecodeError
+    是 ValueError 子类）；fetch 正常返回（包括空结果）不重试：空是源的正常回答，
+    判断"空"并决定怎么办是调用方的事。其余异常（如参数错误）原样抛出。
+    """
+    for attempt in range(max(1, KLINE_RETRY_ATTEMPTS)):
+        try:
+            return fetch()
+        except (requests.Timeout, requests.ConnectionError, ValueError) as e:
+            if attempt >= KLINE_RETRY_ATTEMPTS - 1:
+                raise
+            wait = KLINE_RETRY_BACKOFF_S * (2 ** attempt)
+            logger.warning("%s 取数异常（第 %d 次 %s），%.1fs 后重试",
+                           what, attempt + 1, type(e).__name__, wait)
+            time.sleep(wait)
+    raise RuntimeError("unreachable")
+
+
 def _fetch_page(code: str, period: str, start_date: str, end_date: str,
                 limit: int) -> list[dict]:
     """取一页 K 线（腾讯 ifzq）。接口给的原始行 → `{date, open, close, high, low, volume}`。"""
     url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
     params = {"param": f"{code},{period},{start_date},{end_date},{limit},{ADJUST_MODE}"}
-    r = requests.get(url, params=params, headers=HEADERS, timeout=15)
-    payload = r.json()
+    payload = _retry_kline_fetch(
+        f"腾讯K线 {code}",
+        lambda: requests.get(url, params=params, headers=HEADERS, timeout=15).json())
 
     code_key = code.lower()
     klines = None
@@ -641,8 +674,29 @@ def get_history(symbol: str, start_date: str = "", end_date: str = "",
         return None
 
 
+def _minute_bar_start_label(label: str, period: int) -> str:
+    """新浪分钟柱的时间标签是窗口**结束**时刻（5分K 的 `11:25` 覆盖 11:20-11:25），
+    统一回退为窗口**起点**（open-time 口径，TradingView 同款）。
+
+    为什么必须改：未走完的最后一根柱因此带着"未来时间"——11:22 打开页面，
+    分时图最后一根蜡烛标着 11:25（60分K 会标到 13:30），这就是"价格比现在
+    时间还快"的来源。回退到起点后标签永远 <= 当前时刻，且**同一窗口跨请求
+    标签稳定**（这条被 evaluate_bar 的日期精确匹配依赖：标签随取数时刻漂移
+    的话，结算重试会找不到自己的 bar）。
+    """
+    text = str(label)
+    try:
+        end = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return text   # 解析不了的脏值原样透传，交给下游过滤
+    return (end - timedelta(minutes=period)).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def get_minute_kline(symbol: str, period: int = 5) -> Optional[list[dict]]:
     """获取分钟 K 线（akshare），带 30 秒缓存。
+
+    时间标签为窗口起点（见 `_minute_bar_start_label`），最后一根是**正在走**
+    的当前柱——它的 close 是最新价，前端 SSE 补丁会持续更新它。
 
     Args:
         symbol: 股票代码（如 600519 / sh600519 / 茅台）
@@ -674,7 +728,11 @@ def get_minute_kline(symbol: str, period: int = 5) -> Optional[list[dict]]:
             return None
 
         # use raw prices: qfq merge makes today's unfinished bars NaN, hiding the current price
-        df = akshare.stock_zh_a_minute(symbol=code, period=str(period), adjust="")
+        # （同源退避重试与日线同参：分钟线是另一条独立源，此前同样裸奔——
+        #  盘中结算依赖它，抖一下就白白损失一整天的盘中评估。）
+        df = _retry_kline_fetch(
+            f"新浪分钟K {code}",
+            lambda: akshare.stock_zh_a_minute(symbol=code, period=str(period), adjust=""))
         if df is None or df.empty:
             logger.warning("分钟 K 数据为空: %s (period=%s)", symbol, period)
             return None
@@ -682,7 +740,7 @@ def get_minute_kline(symbol: str, period: int = 5) -> Optional[list[dict]]:
         records = []
         for _, row in df.iterrows():
             records.append({
-                "date": str(row["day"]),
+                "date": _minute_bar_start_label(row["day"], period),
                 "open": str(row["open"]),
                 "close": str(row["close"]),
                 "high": str(row["high"]),
@@ -920,12 +978,17 @@ def _to_yi(value):
         return None
 
 
-def get_financial_abstract(symbol: str, periods: int = 4) -> Optional[dict]:
+def get_financial_abstract(symbol: str, periods: int = 4, as_of: str = "") -> Optional[dict]:
     """取财务摘要（东方财富），只保留少数关键指标与最近若干报告期。
 
     上游是 80 行 × 100+ 列的宽表（每个报告期一列，最早到 1998 年）——
     原样进上下文既烧钱又没用。这里做两件事：挑关键指标、只取最近几个报告期，
     并顺手算两个同比（归母净利润、营业总收入），因为"同比"才是看财报的第一个问题。
+
+    `as_of`（YYYY-MM-DD，可空）：as-of 回放（沙盘）用——只保留**当时已披露**的
+    报告期。财报没有披露日字段，按"报告期 + 122 天（≈ 一个季度 + 一个月缓冲）"
+    近似视为已披露：所有法定披露截止日（一季/三季报、半年报，年报次年 4 月末）
+    都落在这个缓冲之后——宁可晚看到一个月，绝不偷看未披露的报告期。
     """
     if not symbol or not str(symbol).strip():
         return None
@@ -942,6 +1005,13 @@ def get_financial_abstract(symbol: str, periods: int = 4) -> Optional[dict]:
         return None
 
     columns = [str(c) for c in df.columns if str(c).isdigit() and len(str(c)) == 8]
+    if as_of:
+        try:
+            cutoff = datetime.strptime(str(as_of)[:10].replace("-", ""), "%Y%m%d").date()
+            columns = [c for c in columns
+                       if datetime.strptime(c, "%Y%m%d").date() + timedelta(days=122) <= cutoff]
+        except ValueError:
+            pass  # as_of 格式坏 → 不过滤（按最新处理），不因调用方笔误挡数据
     latest = sorted(columns, reverse=True)[:size]
     if not latest:
         return None
@@ -983,6 +1053,383 @@ def get_financial_abstract(symbol: str, periods: int = 4) -> Optional[dict]:
         "note": ("按报告期披露的财务摘要（东方财富）；yoy_pct 是与去年同期的同比增速。"
                  "财报是已发生的事实，不能用来预测股价。"),
     }
+
+
+# ==================== 估值历史（DSL pe_percentile 条件与沙盘估值语境的数据原语） ====================
+
+#: 估值日频更新：12h TTL 足够新鲜（与 agent.market_context 的 VALUATION_TTL 同口径）
+VALUATION_HISTORY_TTL = 12 * 3600
+_valuation_history_cache: dict = {}
+
+
+def get_valuation_history(symbol: str) -> list[dict]:
+    """东财数据中心 stock_value_em → PE-TTM 日线序列（升序）。
+
+    返回 [{"date": "YYYY-MM-DD", "pe_ttm": float}]。负 PE（亏损期）与脏行剔除：
+    亏损期的 PE 无序可言，混进分位会同时污染"贵"与"便宜"两端。12h TTL 按
+    symbol 缓存。fail-open：取不到返回 []（调用方的估值条件恒不成立）。
+    """
+    code = str(resolve_symbol(str(symbol or "").strip()) or "").strip()
+    if not code or not is_a_share(code):
+        return []
+    now = time.time()
+    cached = _valuation_history_cache.get(code)
+    if cached and now - cached[0] < VALUATION_HISTORY_TTL:
+        return cached[1]
+    rows: list[dict] = []
+    try:
+        df = akshare.stock_value_em(symbol=code)
+        if df is not None and not getattr(df, "empty", True):
+            for _, r in df.iterrows():
+                try:
+                    pe = float(r.get("PE(TTM)"))
+                except (TypeError, ValueError):
+                    continue
+                if pe != pe or pe <= 0:  # NaN / 亏损期剔除
+                    continue
+                d = str(r.get("数据日期"))[:10]
+                if len(d) == 10:
+                    rows.append({"date": d, "pe_ttm": pe})
+    except Exception as exc:  # noqa: BLE001 —— 估值是增强证据，缺席不挡任何主流程
+        logger.info("估值历史取数失败 symbol=%s: %s", code, type(exc).__name__)
+        return []
+    rows.sort(key=lambda x: x["date"])
+    _valuation_history_cache[code] = (now, rows)
+    return rows
+
+
+# ==================== 个股人气榜（资讯雷达「热榜」的数据原语，2026-10-16） ====================
+
+#: 人气榜分钟级更新：5 分钟缓存足够新鲜（同类情报工具的热榜也是分钟粒度）
+HOT_RANK_TTL = 5 * 60
+_hot_rank_cache: dict = {"at": 0.0, "rows": []}
+
+
+def get_hot_rank(limit: int = 20) -> list[dict]:
+    """东财个股人气榜（stock_hot_rank_em）→ 热榜 TopN。
+
+    实测列（2026-10-16）：当前排名 / 代码（SH600418）/ 股票名称 / 最新价 /
+    涨跌额 / 涨跌幅。返回升序排名的 [{rank, symbol, name, price, change_pct}]，
+    5 分钟 TTL 共享缓存（所有调用方看到同一份）。fail-open：取不到返回 []。
+    """
+    now = time.time()
+    cached = _hot_rank_cache.get("rows")
+    if cached and now - _hot_rank_cache.get("at", 0.0) < HOT_RANK_TTL:
+        return cached[:max(1, int(limit))]
+    rows: list[dict] = []
+    try:
+        df = akshare.stock_hot_rank_em()
+        for _, r in df.iterrows():
+            try:
+                rank = int(r.get("当前排名"))
+            except (TypeError, ValueError):
+                continue
+            rows.append({
+                "rank": rank,
+                "symbol": str(r.get("代码") or "").upper(),
+                "name": str(r.get("股票名称") or "").strip(),
+                "price": _clean_number(r.get("最新价")),
+                "change_pct": _clean_number(r.get("涨跌幅")),
+            })
+        rows.sort(key=lambda x: x["rank"])
+    except Exception as exc:  # noqa: BLE001 —— 热榜是增强视图，缺席不挡任何主流程
+        logger.info("人气榜取数失败: %s", type(exc).__name__)
+        return []
+    _hot_rank_cache["at"], _hot_rank_cache["rows"] = now, rows
+    return rows[:max(1, int(limit))]
+
+
+# ==================== 大盘资金流（Dashboard 资金卡与委员会证据的数据原语，2026-10-16） ====================
+
+#: 资金流日频更新（盘后出全天数）：10 分钟 TTL 足够新鲜
+MARKET_FUND_FLOW_TTL = 10 * 60
+#: 失败的负缓存窗口：刚失败过就别再打上游，一分钟后再试。
+#: 原实现失败**不写**缓存、命中判断又是 `if cached and ...`（空列表是假值），
+#: 于是上游一旦失败，每个请求都重新冷启动撞一遍 —— 那就是资金卡"每次打开都慢"的根因。
+FUND_FLOW_NEG_TTL = 60
+#: 旧值最多回多久（stale-while-revalidate 的上限）。日频数据：三天还没刷新成功，
+#: 宁可让前端走"暂不可用"，也不把三天前的数当今天的给。
+FUND_FLOW_MAX_STALE = 3 * 24 * 3600
+#: at=上次**成功**取数时刻（驱动 TTL 与旧值年龄）；tried_at=上次**尝试**时刻
+#: （成功失败都推进，驱动负缓存与刷新节流）；ok=rows 是否可用。
+_fund_flow_cache: dict = {"at": 0.0, "tried_at": 0.0, "rows": [], "ok": False}
+_fund_flow_cache_lock = threading.Lock()
+#: 取数 single-flight：冷启动/后台刷新共用一把锁，同一时刻只有一个线程真打上游
+_fund_flow_fetch_lock = threading.Lock()
+
+#: stock_market_fund_flow 的净额列（元）→ 统一换算亿元输出；占比列直接透传
+_FUND_NET_COLUMNS = {
+    "main": "主力净流入-净额", "super": "超大单净流入-净额",
+    "big": "大单净流入-净额", "mid": "中单净流入-净额", "small": "小单净流入-净额",
+}
+
+
+def _yi(value) -> Optional[float]:
+    """元 → 亿元（None/NaN 安全）：资金流两个源的净额字段单位都是元。
+    pandas 的缺失值是 float('nan')，float() 转换不报错——不挡的话 NaN 会一路
+    进 JSON（非标准字面量），前端比较和渲染全都会出错。"""
+    try:
+        v = float(value) / 1e8
+    except (TypeError, ValueError):
+        return None
+    if v != v:   # NaN 判等自身不成立
+        return None
+    return round(v, 2)
+
+
+def _fetch_fund_flow_rows_em() -> list[dict]:
+    """东财源（stock_market_fund_flow）：120 日 × 四档历史，口径最全。失败返回 []。"""
+    try:
+        df = akshare.stock_market_fund_flow()
+    except Exception as exc:  # noqa: BLE001 —— 失败交给上层落腾讯源，不重试
+        logger.info("东财大盘资金流取数失败: %s", type(exc).__name__)
+        return []
+    rows: list[dict] = []
+    for _, r in df.iterrows():
+        d = str(r.get("日期"))[:10]
+        if len(d) != 10:
+            continue
+        row = {"date": d,
+               "sh_close": _clean_number(r.get("上证-收盘价")),
+               "sh_pct": _clean_number(r.get("上证-涨跌幅"))}
+        for key, column in _FUND_NET_COLUMNS.items():
+            row[f"{key}_net_yi"] = _yi(r.get(column))
+        rows.append(row)
+    rows.sort(key=lambda x: x["date"])
+    return rows
+
+
+def _fetch_fund_flow_tencent(code: str, max_days: int = 50) -> list[dict]:
+    """腾讯源（proxy.finance.qq.com 的 hsfundtab，gu.qq.com 资金流向页同款接口）。
+
+    `code` 是腾讯格式代码：大盘 sh000001 / 个股 sh600519——同一接口换代码即个股口径
+    （2026-10-19 实测），这也是个股资金流从"东财端点全挂、做不了"变可行的原因。
+
+    <h3>为什么需要它（2026-10-19 生产实测）</h3>
+    东财 push2his 对阿里云机房 IP 持续拒连（家宽正常、服务器 RemoteDisconnected），
+    生产上资金卡因此长期"暂不可用"。腾讯这条在机房可达，且与本项目行情/K线同源。
+    口径：主力=超大单+大单（成交额 ≥20 万元或 ≥6 万股）。
+
+    <h3>局限（前端按此降级）</h3>
+    ① 日级历史最多 50 根（klineNeedDay>50 直接 HTTP 400）；
+    ② 日级只有主力净流入，四档（超大/大/中/小）仅 todayFundFlow 一份**当日**快照——
+       只在"最后一根就是今天"时合并进去，休市日不硬补（宁可缺档也不把旧快照贴错日）。
+    返回行带中性的 close/pct 键（大盘调用方再映射成 sh_close/sh_pct 保持旧契约）。
+    """
+    try:
+        r = requests.get(
+            "https://proxy.finance.qq.com/cgi/cgi-bin/fundflow/hsfundtab",
+            params={"code": code,
+                    "type": "historyFundFlow,fiveDayFundFlow,todayFundTrend,todayFundFlow",
+                    "klineNeedDay": str(max(1, min(max_days, 50)))},
+            headers={"User-Agent": HEADERS["User-Agent"],
+                     "Referer": f"https://gu.qq.com/{code}/zjjl"},
+            timeout=10)
+        r.raise_for_status()
+        data = (r.json() or {}).get("data") or {}
+    except Exception as exc:  # noqa: BLE001 —— 两源都挂才走负缓存
+        logger.info("腾讯资金流取数失败 code=%s: %s", code, type(exc).__name__)
+        return []
+    hist = ((data.get("historyFundFlow") or {}).get("oneDayKlineList")) or []
+    rows: list[dict] = []
+    prev_close = None
+    for item in hist:
+        d = str(item.get("date", ""))[:10]
+        if len(d) != 10:
+            continue
+        close = _clean_number(item.get("price"))
+        pct = None
+        if close is not None and prev_close is not None:
+            pct = round((close / prev_close - 1) * 100, 2)   # 涨跌幅：源里没有，用前收现算
+        prev_close = close if close is not None else prev_close
+        rows.append({"date": d, "close": close, "pct": pct,
+                     "main_net_yi": _yi(item.get("mainNetIn")),
+                     "super_net_yi": None, "big_net_yi": None,
+                     "mid_net_yi": None, "small_net_yi": None})
+    today = data.get("todayFundFlow") or {}
+    if rows and rows[-1]["date"] == time.strftime("%Y-%m-%d"):
+        for key, field in (("super_net_yi", "superFlow"), ("big_net_yi", "bigFlow"),
+                           ("mid_net_yi", "normalFlow"), ("small_net_yi", "smallFlow")):
+            v = _yi(today.get(field))
+            if v is not None:
+                rows[-1][key] = v
+    return rows
+
+
+def _fetch_fund_flow_rows_tencent(max_days: int = 50) -> list[dict]:
+    """大盘口径的腾讯源：中性键映射回 sh_close/sh_pct（既有大盘契约，市场卡与
+    market_context 共用，不为个股复用它）。"""
+    rows = _fetch_fund_flow_tencent("sh000001", max_days)
+    return [{"date": r["date"], "sh_close": r["close"], "sh_pct": r["pct"],
+             "main_net_yi": r["main_net_yi"], "super_net_yi": r["super_net_yi"],
+             "big_net_yi": r["big_net_yi"], "mid_net_yi": r["mid_net_yi"],
+             "small_net_yi": r["small_net_yi"]} for r in rows]
+
+
+def _fetch_market_fund_flow_rows() -> list[dict]:
+    """资金流取数链：东财优先（口径全），机房被拒/上游挂掉时落腾讯源。
+    两个源各自内部已吞异常，这里再兜一层——源函数抛错按"该源失败"处理，
+    链路永远不向缓存层抛异常。"""
+    try:
+        rows = _fetch_fund_flow_rows_em()
+    except Exception as exc:  # noqa: BLE001 —— 防御：源内部异常不炸整条链
+        logger.info("东财源异常兜底: %s", type(exc).__name__)
+        rows = []
+    if rows:
+        return rows
+    logger.info("东财大盘资金流不可用，改用腾讯源")
+    try:
+        return _fetch_fund_flow_rows_tencent()
+    except Exception as exc:  # noqa: BLE001
+        logger.info("腾讯源异常兜底: %s", type(exc).__name__)
+        return []
+
+
+def _fund_flow_refresh() -> None:
+    """后台刷新（stale-while-revalidate 的下半场）：拿 fetch 锁防与冷启动并发，
+    **成功才覆盖** rows/at；失败只推进 tried_at —— 旧值继续服务，重试被负缓存节流。"""
+    try:
+        with _fund_flow_fetch_lock:
+            fetched = _fetch_market_fund_flow_rows()
+        with _fund_flow_cache_lock:
+            _fund_flow_cache["tried_at"] = time.time()
+            if fetched:
+                _fund_flow_cache["at"] = time.time()
+                _fund_flow_cache["rows"] = fetched
+                _fund_flow_cache["ok"] = True
+    except Exception as exc:  # noqa: BLE001 —— 刷新失败不影响已回给前端的旧值
+        logger.info("大盘资金流后台刷新异常: %s", type(exc).__name__)
+    finally:
+        with _fund_flow_cache_lock:
+            _fund_flow_cache["refreshing"] = False
+
+
+def get_market_fund_flow(limit: int = 60) -> list[dict]:
+    """大盘主力资金流日线（东财 stock_market_fund_flow），净额统一成"亿元"。
+
+    <h3>缓存语义（2026-10-19 重写）</h3>
+    ① 新鲜（成功后 10 分钟内）：直接回；
+    ② 过期但旧值未超 FUND_FLOW_MAX_STALE：**先回旧值**，后台线程刷新
+       （stale-while-revalidate）——页面打开不再同步等上游；刷新尝试被
+       tried_at 节流到至多每分钟一次，上游挂掉也不会每请求一撞；
+    ③ 无可用旧值：失败结果负缓存 FUND_FLOW_NEG_TTL（60 秒），期间不打上游；
+    ④ 冷启动：single-flight 同步取 —— 并发的后来者在 fetch 锁上排队，
+       第一个取完后直接读缓存，不再重复打上游。
+
+    <h3>为什么只有大盘口径（2026-10-16 实测）</h3>
+    个股（stock_individual_fund_flow / _rank）与板块（stock_sector_fund_flow_*）的
+    东财端点在本机与服务器双网络都 ConnectionError——akshare 1.18.64 的这批端点
+    已失效。资金流不造假数据：个股口径等上游修复后在此接入（列名见
+    _FUND_NET_COLUMNS，个股源只是多一个代码维度）。
+
+    <h3>双源（2026-10-19）</h3>
+    东财优先（120 日 × 四档历史）；机房 IP 被东财拒连时落腾讯 hsfundtab
+    （50 日主力 + 当日四档，见 _fetch_fund_flow_rows_tencent）。两个源各自的
+    失败与成功统一走同一套缓存语义（下述①-④），成功后**整批替换**，不跨源拼接。
+
+    fail-open：取不到返回 []。升序按日期，最后一根是最新交易日。
+    """
+    limit = max(1, int(limit))
+    now = time.time()
+    with _fund_flow_cache_lock:
+        ok = bool(_fund_flow_cache.get("ok"))
+        rows = _fund_flow_cache.get("rows") or []
+        data_age = now - _fund_flow_cache.get("at", 0.0)
+        tried_age = now - _fund_flow_cache.get("tried_at", 0.0)
+        if ok and rows and data_age < MARKET_FUND_FLOW_TTL:
+            return rows[-limit:]
+        if ok and rows and data_age <= FUND_FLOW_MAX_STALE:
+            if tried_age >= FUND_FLOW_NEG_TTL and not _fund_flow_cache.get("refreshing"):
+                _fund_flow_cache["refreshing"] = True
+                threading.Thread(target=_fund_flow_refresh, daemon=True,
+                                 name="fund-flow-refresh").start()
+            return rows[-limit:]   # 旧值先回，新值后台追
+        if tried_age < FUND_FLOW_NEG_TTL:
+            return []              # 刚试过且没有可用数据：负缓存窗口内不再打上游
+
+    # 冷路径（进程首调 / 一直失败 / 旧值超龄）：排队取数，双检后真打上游
+    with _fund_flow_fetch_lock:
+        with _fund_flow_cache_lock:
+            tried_age = time.time() - _fund_flow_cache.get("tried_at", 0.0)
+            if (_fund_flow_cache.get("ok") and _fund_flow_cache.get("rows")
+                    and time.time() - _fund_flow_cache.get("at", 0.0) < MARKET_FUND_FLOW_TTL):
+                return (_fund_flow_cache["rows"] or [])[-limit:]   # 排队期间已被取好
+            if tried_age < FUND_FLOW_NEG_TTL:
+                return []                                          # 排队期间别人刚试过且失败
+        fetched = _fetch_market_fund_flow_rows()
+        with _fund_flow_cache_lock:
+            _fund_flow_cache["tried_at"] = time.time()
+            if fetched:
+                _fund_flow_cache["at"] = time.time()
+                _fund_flow_cache["rows"] = fetched
+                _fund_flow_cache["ok"] = True
+                return fetched[-limit:]
+            _fund_flow_cache["ok"] = False
+            return []
+
+
+# ==================== 个股资金流（腾讯源，K 线页主力资金卡，2026-10-19） ====================
+
+#: 盘中"今日主力净流入"快照在动，2 分钟足够跟上；日级历史部分本来就不变
+STOCK_FUND_FLOW_TTL = 120
+#: 失败/空结果负缓存：坏代码或上游挂时，不至于每次打开 K 线页都真打一遍
+STOCK_FUND_FLOW_NEG_TTL = 60
+_stock_fund_flow_cache: dict = {}
+_stock_fund_flow_lock = threading.Lock()
+
+
+def get_stock_fund_flow(symbol: str, limit: int = 30) -> list[dict]:
+    """个股主力资金流日线（腾讯 hsfundtab——与大盘同一接口，换代码即个股口径）。
+
+    行形状：{date, close, pct, main_net_yi, super/big/mid/small_net_yi}，升序，
+    最后一根最新；四档只有**当日**那根有值（腾讯日级只有主力，见
+    _fetch_fund_flow_tencent 的局限说明）。个股的东财端点本就全挂（见
+    get_market_fund_flow 注释），这里腾讯单源。fail-open：取不到返回 []。
+    """
+    limit = max(1, min(int(limit), 50))
+    resolved = resolve_symbol(symbol)
+    if not resolved:
+        logger.info("个股资金流：无法识别代码 %s", symbol)
+        return []
+    code = normalize_symbol(resolved)
+    now = time.time()
+    with _stock_fund_flow_lock:
+        entry = _stock_fund_flow_cache.get(code) or {}
+        rows = entry.get("rows") or []
+        age = now - entry.get("at", 0.0)
+        if rows and age < STOCK_FUND_FLOW_TTL:
+            return rows[-limit:]
+        if not rows and 0 <= age < STOCK_FUND_FLOW_NEG_TTL:
+            return []
+    fetched = _fetch_fund_flow_tencent(code, max_days=50)
+    with _stock_fund_flow_lock:
+        _stock_fund_flow_cache[code] = {"at": time.time(), "rows": fetched}
+    return fetched[-limit:]
+
+
+def get_valuation_percentile_series(symbol: str, window: int = 1250) -> list[dict]:
+    """PE-TTM 与其滚动历史分位的日线序列（升序），K 线页估值副图用。
+
+    复用 get_valuation_history 的缓存（同一份原始行，不重复打上游）；
+    每个日期的分位 = 该日 PE 在此前 window 根（含当日）中的分位，
+    与 market_context 估值语境、DSL pe_percentile 条件**同一口径**——
+    三处看到的分位必须是同一个数。窗口不足 PE_PCT_MIN_OBS(250) 根的
+    早期日期分位为 None（前端断线）。fail-open：取不到返回 []。
+    """
+    rows = get_valuation_history(symbol)
+    if not rows:
+        return []
+    pes = [r["pe_ttm"] for r in rows]
+    out = []
+    for i, r in enumerate(rows):
+        lo = max(0, i - window + 1)
+        slice_ = pes[lo:i + 1]
+        pct = None
+        if len(slice_) >= 250:
+            cur = pes[i]
+            pct = round(sum(1 for v in slice_ if v <= cur) / len(slice_) * 100.0, 1)
+        out.append({"date": r["date"], "pe": r["pe_ttm"], "pct": pct})
+    return out
 
 
 def _clean_number(value):

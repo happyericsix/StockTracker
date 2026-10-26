@@ -4,7 +4,7 @@
 Set-Location -Path $PSScriptRoot
 
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host " Stock Tracker Python Data Service" -ForegroundColor Cyan
+Write-Host " StockTracker Python Data Service" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 

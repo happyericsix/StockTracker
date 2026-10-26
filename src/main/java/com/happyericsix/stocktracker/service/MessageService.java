@@ -69,7 +69,7 @@ public class MessageService {
      * 策略信是用户点名要的"提醒"——频率是每策略每月最多一条，不属于日报级噪声；
      * 而且它不是"页面上能看的东西再说一遍"，复盘页面并不展示它。
      */
-    private static final List<String> CENTER_TYPES = List.of("ALERT", "STRATEGY_SENTINEL", "STRATEGY_REVIEW");
+    private static final List<String> CENTER_TYPES = List.of("ALERT", "STRATEGY_SENTINEL", "STRATEGY_REVIEW", "NEWS_ALERT");
 
     /**
      * 分页查询（消息中心主用）
@@ -174,13 +174,13 @@ public class MessageService {
                             new org.springframework.transaction.support.TransactionSynchronization() {
                                 @Override
                                 public void afterCommit() {
-                                    chatService.processAsync(user.getId(), username, request.getMessage(),
+                                    chatService.submitChat(user.getId(), username, request.getMessage(),
                                             request.getFocus());
                                 }
                             });
         } else {
             // 无事务上下文（单测直调）时保持原行为
-            chatService.processAsync(user.getId(), username, request.getMessage(), request.getFocus());
+            chatService.submitChat(user.getId(), username, request.getMessage(), request.getFocus());
         }
     }
 

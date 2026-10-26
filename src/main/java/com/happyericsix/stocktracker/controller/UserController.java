@@ -29,6 +29,17 @@ public class UserController {
         return Result.success(userService.updateProfile(authentication.getName(), updates));
     }
 
+    /**
+     * 新手引导完成标记：翻到最后一页点「开始使用」时调用一次。
+     * 独立端点而不是塞进 profile PUT——"读完引导"是状态迁移，不是资料编辑，
+     * 不该被 profile 表单的半更新语义裹挟。
+     */
+    @PostMapping("/api/v1/user/onboarding/complete")
+    public Result<String> completeOnboarding(Authentication authentication) {
+        userService.completeOnboarding(authentication.getName());
+        return Result.success("ok");
+    }
+
     @PostMapping("/api/v1/user/change-password")
     public Result<String> changePassword(
             @RequestBody Map<String, String> body,

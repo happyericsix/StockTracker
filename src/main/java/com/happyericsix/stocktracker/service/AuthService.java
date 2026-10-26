@@ -42,6 +42,8 @@ public class AuthService {
                         ? request.getEmail() : request.getUsername() + "@stocktracker.local")
                 .phone(request.getPhone())
                 .role(Role.USER)
+                // 新账号显式落 false：首次登录要过一遍使用说明（null 留给上线前的老账号）
+                .onboardingCompleted(false)
                 .build();
 
         userRepository.save(user);

@@ -42,6 +42,9 @@ public class StrategyHealthEvent {
     public static final String TYPE_DRAWDOWN_BREACH = "drawdown_breach";
     public static final String TYPE_VERIFICATION_FAILED = "verification_failed";
     public static final String TYPE_NEWS_MATERIAL = "news_material";
+
+    /** 情绪哨兵（2026-10-16 ③步）：标的登上龙虎榜——关注度异动提醒，只告知不提案。 */
+    public static final String TYPE_LHB_ATTENTION = "lhb_attention";
     /** 满仓单票（持仓市值占总净值 ≥ 阈值）：集中度观察，只报事实不建议。 */
     public static final String TYPE_CONCENTRATION_FULL = "concentration_full";
 

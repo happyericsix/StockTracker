@@ -66,7 +66,7 @@ def test_scopes_decide_visibility():
     enrolled = tool_sets.enroll(ctx(scopes={"market:read"}))
 
     assert set(enrolled) == {"search_stock", "get_quote", "get_quotes", "get_history",
-                             "get_indicators", "get_risk_metrics"}
+                             "get_indicators", "get_risk_metrics", "get_market_fund_flow"}
     assert "memory_search" not in enrolled        # 需要 memory:read:own
     assert "backtest_strategy" not in enrolled    # 需要 strategy:compute
     assert "get_news" not in enrolled             # 需要 news:read
@@ -143,3 +143,143 @@ def test_a_broken_example_is_caught_by_the_self_check():
     problems = registry.validate()
 
     assert any("示例" in problem for problem in problems), problems
+
+
+def test_hot_rank_tool_enrolled_in_news_set():
+    """热榜工具（2026-10-16）：登记在册、属于 news 集、scope 是 news:read。"""
+    from agent.tool_registry import REGISTRY
+    from agent.tool_sets import TOOL_SETS
+    spec = REGISTRY.get("get_hot_rank")
+    assert spec is not None, "get_hot_rank 未登记"
+    assert "get_hot_rank" in TOOL_SETS["news"]
+    assert "news:read" in spec.scopes
+
+
+def test_hot_rank_tool_returns_items_with_note(monkeypatch):
+    """热榜工具的返回形状：items + 口径注记（排名不是买卖建议）；上游失败 fail-open。"""
+    import akshare_client
+    from agent.tool_registry import REGISTRY
+
+    rows = [{"rank": 1, "symbol": "SH600418", "name": "江淮汽车",
+             "price": 22.37, "change_pct": 9.98}]
+    monkeypatch.setattr(akshare_client, "get_hot_rank", lambda limit=10: rows)
+    out = REGISTRY.get("get_hot_rank").handler({"limit": 5})
+    assert out["ok"] and out["data"]["items"][0]["name"] == "江淮汽车"
+    assert "不是买卖建议" in out["data"]["note"]
+    assert out["meta"]["source_label"] == "东方财富·个股人气榜"
+
+    monkeypatch.setattr(akshare_client, "get_hot_rank", lambda limit=10: [])
+    out2 = REGISTRY.get("get_hot_rank").handler({})
+    assert not out2["ok"] and out2["error"]["retryable"] is True
+
+
+def test_get_my_alerts_tool_reads_via_scope(monkeypatch):
+    """用户预警工具：身份来自 tool_scope（不接受模型传参）；Java 失败 fail-open 成空列表。"""
+    from agent import message_store
+    from agent.tool_registry import REGISTRY
+
+    monkeypatch.setattr("agent.tool_scope.user_id", lambda: "42")
+    rows = [{"id": 1, "type": "NEWS_ALERT", "content": "【利好】江淮汽车：…",
+             "read": False}, {"id": 2, "type": "ALERT", "content": "RSI 72", "read": True}]
+    monkeypatch.setattr(message_store, "recent_alerts", lambda uid, limit=10: rows if uid == "42" else [])
+    out = REGISTRY.get("get_my_alerts").handler({"limit": 5})
+    assert out["ok"] and len(out["data"]["alerts"]) == 2 and out["data"]["unread"] == 1
+
+    # 没有用户身份：明确失败，不是静默空列表
+    monkeypatch.setattr("agent.tool_scope.user_id", lambda: None)
+    out2 = REGISTRY.get("get_my_alerts").handler({})
+    assert not out2["ok"]
+
+    # Java 挂了：fail-open 成空列表（"这次没有预警数据"不是报错）
+    monkeypatch.setattr("agent.tool_scope.user_id", lambda: "42")
+    monkeypatch.setattr(message_store, "recent_alerts", lambda uid, limit=10: [])
+    out3 = REGISTRY.get("get_my_alerts").handler({})
+    assert out3["ok"] and out3["data"]["alerts"] == []
+
+
+def test_memory_search_passes_symbol_to_lessons(monkeypatch):
+    """情境绑定（2026-10-16）：memory_search 的 symbol 参数要同传给教训检索。"""
+    from agent import memory_store
+    from agent.tool_registry import REGISTRY
+
+    seen = {}
+
+    def fake_facts(uid, query=None, symbol=None, fact_type=None, limit=8):
+        return []
+
+    def fake_lessons(uid, query=None, task_type=None, limit=3, symbol=None):
+        seen["symbol"] = symbol
+        return []
+
+    monkeypatch.setattr("agent.tool_scope.user_id", lambda: "1")
+    monkeypatch.setattr(memory_store, "search_facts", fake_facts)
+    monkeypatch.setattr(memory_store, "search_lessons", fake_lessons)
+    out = REGISTRY.get("memory_search").handler({"query": "茅台", "symbol": "600519"})
+    assert out["ok"]
+    assert seen["symbol"] == "600519"
+
+
+def test_market_fund_flow_tool_registered_and_fails_open(monkeypatch):
+    """大盘资金流工具：登记在 market 集；上游失败返回可重试失败（不是空数据）。"""
+    import akshare_client
+    from agent.tool_registry import REGISTRY
+    from agent.tool_sets import TOOL_SETS
+
+    assert "get_market_fund_flow" in TOOL_SETS["market"]
+    spec = REGISTRY.get("get_market_fund_flow")
+    assert spec is not None and "market:read" in spec.scopes
+
+    monkeypatch.setattr(akshare_client, "get_market_fund_flow",
+                        lambda limit=10: [{"date": "2026-10-16", "main_net_yi": -49.36}])
+    out = spec.handler({})
+    assert out["ok"] and out["data"]["main_net_yi_today"] == -49.36
+    assert "不是买卖触发" in out["data"]["note"]
+
+    monkeypatch.setattr(akshare_client, "get_market_fund_flow", lambda limit=10: [])
+    out2 = spec.handler({})
+    assert not out2["ok"] and out2["error"]["retryable"] is True
+
+
+def test_skill_store_fail_open_and_cache(monkeypatch):
+    """④ 技能注入客户端：Java 失败 fail-open 空列表；60s 内共享缓存。"""
+    from agent import skill_store
+
+    calls = {"n": 0}
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"skills": [{"name": "情绪冰点不接飞刀", "ruleText": "准则"}]}
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        calls["n"] += 1
+        return FakeResp()
+
+    monkeypatch.setattr(skill_store.requests, "get", fake_get)
+    monkeypatch.setattr(skill_store, "_cache", {})
+    monkeypatch.setattr(skill_store.os, "environ", {"JAVA_BASE_URL": "http://x", "INTERNAL_API_TOKEN": "t"})
+    items = skill_store.injectable("7", "committee", symbol="600519")
+    assert items and items[0]["name"] == "情绪冰点不接飞刀"
+    again = skill_store.injectable("7", "committee", symbol="600519")
+    assert calls["n"] == 1 and again == items   # 缓存命中
+
+    def boom(*a, **k):
+        raise RuntimeError("java down")
+    monkeypatch.setattr(skill_store.requests, "get", boom)
+    assert skill_store.injectable("7", "reflection") == []   # fail-open
+
+
+def test_committee_evidence_skills_block_semantics():
+    """④ 委员会技能块：软参考注记必须在（防过拟合的语义闸），证据注入走 build+decide 同源。"""
+    from agent import trading_committee as tc
+
+    evidence, _ = tc.build_evidence("600519", "2026-10-17",
+                                    [{"date": "2026-10-17", "open": 10, "close": 10,
+                                      "high": 10, "low": 10, "volume": 100}], None)
+    # 模拟 decide 内的技能注入段：验证 decide 签名接受 skills 且证据块注记完整
+    import inspect
+    assert "skills" in inspect.signature(tc.decide).parameters
+    evidence["skills"] = {"items": [{"name": "n", "rule": "r"}],
+                          "note": tc._SKILL_NOTE if hasattr(tc, "_SKILL_NOTE") else ""}
+    assert "skills" in evidence

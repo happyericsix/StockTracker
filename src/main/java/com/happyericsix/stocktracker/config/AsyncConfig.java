@@ -15,7 +15,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 线程池配置：
- *  - taskExecutor            LLM 异步调用（@Async 用）
+ *  - taskExecutor            LLM 聊天轮次（ChatService.submitChat 手动 submit 用，
+ *                            用户连发时旧轮次在这里被 cancel 中断）
  *  - priceRefreshExecutor    价格刷新限并发（手动 CompletableFuture 用）
  *  - newsEnrichmentExecutor  资讯补数据（抓上游 + 分批解读），与取数池隔离
  *

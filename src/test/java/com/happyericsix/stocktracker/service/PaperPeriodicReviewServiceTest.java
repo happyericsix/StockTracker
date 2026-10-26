@@ -151,7 +151,7 @@ class PaperPeriodicReviewServiceTest {
         service.runPeriodicReports(LocalDate.of(2026, 11, 20));   // 上月 = 10 月（非季末）
 
         verify(messageService, never()).saveReport(any(), anyString(), anyString(), anyString(), anyString());
-        verify(strategyClient, never()).quarterlyReview(any());
+        verify(strategyClient, never()).quarterlyReview(any(), any());
         verify(pushService, never()).push(anyString(), anyString(), anyString());
     }
 
@@ -169,7 +169,7 @@ class PaperPeriodicReviewServiceTest {
         assertTrue(key.getValue().startsWith("periodic:monthly:1:2026-10"));
         assertTrue(content.getValue().contains("月度小结"));
         assertTrue(content.getValue().contains("区间收益"));       // 数字底座在场
-        verify(strategyClient, never()).quarterlyReview(any());  // 月度小结不调模型
+        verify(strategyClient, never()).quarterlyReview(any(), any());  // 月度小结不调模型
         verify(pushService).push(eq("alice"), anyString(), anyString());
     }
 
@@ -182,7 +182,7 @@ class PaperPeriodicReviewServiceTest {
         ObjectNode block = letter.putObject("letter");
         block.put("verdict", "本季逻辑仍然成立。");
         block.put("suggestions", "提议：把止损线从 5% 收到 4%（需你确认）。");
-        when(strategyClient.quarterlyReview(any())).thenReturn(letter);
+        when(strategyClient.quarterlyReview(any(), any())).thenReturn(letter);
 
         service.runPeriodicReports(LocalDate.of(2026, 10, 16));   // 上月 = 9 月（季末）→ Q3 信
 
@@ -208,7 +208,7 @@ class PaperPeriodicReviewServiceTest {
         service.runPeriodicReports(LocalDate.of(2026, 10, 16));   // 上月 = 9 月（季末）
 
         verify(messageService, never()).saveReport(any(), anyString(), anyString(), anyString(), anyString());
-        verify(strategyClient, never()).quarterlyReview(any());
+        verify(strategyClient, never()).quarterlyReview(any(), any());
     }
 
     @Test
@@ -231,7 +231,7 @@ class PaperPeriodicReviewServiceTest {
     void commentaryFailureStillSendsDeterministicLetter() {
         stubStrategy();
         when(messageService.reportSent(anyString())).thenReturn(false);
-        when(strategyClient.quarterlyReview(any())).thenThrow(new RuntimeException("python down"));
+        when(strategyClient.quarterlyReview(any(), any())).thenThrow(new RuntimeException("python down"));
 
         service.runPeriodicReports(LocalDate.of(2026, 10, 16));
 
