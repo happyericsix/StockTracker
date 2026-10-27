@@ -189,7 +189,7 @@ const loadTrend = async () => {
   const active = running.value
   if (!active.length) { equityTrend.value = []; return }
   const curves = await Promise.all(active.map((item) =>
-    getPaperEquity(item.id, 120).then((res) => {
+    getPaperEquity(item.strategyId, 120).then((res) => {
       const d = res.data
       const curve = Array.isArray(d?.equityCurve) ? d.equityCurve
         : Array.isArray(d?.equity_curve) ? d.equity_curve : []

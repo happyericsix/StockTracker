@@ -129,3 +129,9 @@ deploy-out/
 frontend/test-results/
 .token
 promptfooconfig.local.yaml
+
+# 压测工具：脚本与报告进库，k6 二进制与本机运行产物不进（loadtest/README.md 有获取方式）
+loadtest/bin/
+loadtest/*.log
+loadtest/metrics.csv
+loadtest/stub/.cache/

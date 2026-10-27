@@ -3,10 +3,12 @@ package com.happyericsix.stocktracker.controller;
 import com.happyericsix.stocktracker.entity.User;
 import com.happyericsix.stocktracker.repository.UserRepository;
 import com.happyericsix.stocktracker.service.SseEmitterService;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 /**
@@ -31,8 +33,12 @@ public class StockQuoteStreamController {
     @GetMapping("/stream")
     public SseEmitter stream(Authentication authentication,
             @org.springframework.web.bind.annotation.RequestParam(required = false) String focus) {
+        // 401 而不是 400/500：token 还有效但用户已注销的场景（2026-10-27 生产日志：
+        // 失效 token 的浏览器无限重连本端点，IllegalArgumentException 一路打进
+        // ERROR 日志）。401 是"客户端应停止重试"的信号，且不进 ERROR 通道。
         User user = userRepository.findByUsername(authentication.getName())
-                .orElseThrow(() -> new IllegalArgumentException("用户不存在"));
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.UNAUTHORIZED, "用户不存在或已注销"));
         // focus=图表页正在看的标的：进 15 秒刷新批，SSE 会推它的实时价（2026-10-15）
         return sseService.registerQuotes(user.getId(), focus);
     }

@@ -1,0 +1,1049 @@
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+
+     execution: local
+        script: k6/capacity.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 400 max VUs, 3m30s max duration (incl. graceful stop):
+              * default: 400 looping VUs for 3m0s (gracefulStop: 30s)
+
+
+Run       [ 100% ] setup()
+default   [   0% ]
+
+Run       [ 100% ] setup()
+default   [   0% ]
+
+Run       [ 100% ] setup()
+default   [   0% ]
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:37:34+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+
+running (0m04.0s), 400/400 VUs, 0 complete and 0 interrupted iterations
+default   [   0% ] 400 VUs  0m00.3s/3m0s
+
+running (0m05.0s), 400/400 VUs, 703 complete and 0 interrupted iterations
+default   [   1% ] 400 VUs  0m01.3s/3m0s
+
+running (0m06.0s), 400/400 VUs, 1355 complete and 0 interrupted iterations
+default   [   1% ] 400 VUs  0m02.3s/3m0s
+
+running (0m07.0s), 400/400 VUs, 2113 complete and 0 interrupted iterations
+default   [   2% ] 400 VUs  0m03.3s/3m0s
+
+running (0m08.0s), 400/400 VUs, 2913 complete and 0 interrupted iterations
+default   [   2% ] 400 VUs  0m04.3s/3m0s
+
+running (0m09.0s), 400/400 VUs, 3697 complete and 0 interrupted iterations
+default   [   3% ] 400 VUs  0m05.3s/3m0s
+
+running (0m10.0s), 400/400 VUs, 4439 complete and 0 interrupted iterations
+default   [   4% ] 400 VUs  0m06.3s/3m0s
+
+running (0m11.0s), 400/400 VUs, 5201 complete and 0 interrupted iterations
+default   [   4% ] 400 VUs  0m07.3s/3m0s
+
+running (0m12.0s), 400/400 VUs, 6001 complete and 0 interrupted iterations
+default   [   5% ] 400 VUs  0m08.3s/3m0s
+
+running (0m13.0s), 400/400 VUs, 6801 complete and 0 interrupted iterations
+default   [   5% ] 400 VUs  0m09.3s/3m0s
+
+running (0m14.0s), 400/400 VUs, 7601 complete and 0 interrupted iterations
+default   [   6% ] 400 VUs  0m10.3s/3m0s
+
+running (0m15.0s), 400/400 VUs, 8400 complete and 0 interrupted iterations
+default   [   6% ] 400 VUs  0m11.3s/3m0s
+
+running (0m16.0s), 400/400 VUs, 9200 complete and 0 interrupted iterations
+default   [   7% ] 400 VUs  0m12.3s/3m0s
+
+running (0m17.0s), 400/400 VUs, 10000 complete and 0 interrupted iterations
+default   [   7% ] 400 VUs  0m13.3s/3m0s
+
+running (0m18.0s), 400/400 VUs, 10800 complete and 0 interrupted iterations
+default   [   8% ] 400 VUs  0m14.3s/3m0s
+
+running (0m19.0s), 400/400 VUs, 11600 complete and 0 interrupted iterations
+default   [   9% ] 400 VUs  0m15.3s/3m0s
+
+running (0m20.0s), 400/400 VUs, 12400 complete and 0 interrupted iterations
+default   [   9% ] 400 VUs  0m16.3s/3m0s
+
+running (0m21.0s), 400/400 VUs, 13108 complete and 0 interrupted iterations
+default   [  10% ] 400 VUs  0m17.3s/3m0s
+
+running (0m22.0s), 400/400 VUs, 13860 complete and 0 interrupted iterations
+default   [  10% ] 400 VUs  0m18.3s/3m0s
+
+running (0m23.0s), 400/400 VUs, 14586 complete and 0 interrupted iterations
+default   [  11% ] 400 VUs  0m19.3s/3m0s
+
+running (0m24.0s), 400/400 VUs, 15319 complete and 0 interrupted iterations
+default   [  11% ] 400 VUs  0m20.3s/3m0s
+
+running (0m25.0s), 400/400 VUs, 16064 complete and 0 interrupted iterations
+default   [  12% ] 400 VUs  0m21.3s/3m0s
+
+running (0m26.0s), 400/400 VUs, 16801 complete and 0 interrupted iterations
+default   [  12% ] 400 VUs  0m22.3s/3m0s
+
+running (0m27.0s), 400/400 VUs, 17601 complete and 0 interrupted iterations
+default   [  13% ] 400 VUs  0m23.3s/3m0s
+
+running (0m28.0s), 400/400 VUs, 18401 complete and 0 interrupted iterations
+default   [  14% ] 400 VUs  0m24.3s/3m0s
+
+running (0m29.0s), 400/400 VUs, 19201 complete and 0 interrupted iterations
+default   [  14% ] 400 VUs  0m25.3s/3m0s
+
+running (0m30.0s), 400/400 VUs, 20001 complete and 0 interrupted iterations
+default   [  15% ] 400 VUs  0m26.3s/3m0s
+
+running (0m31.0s), 400/400 VUs, 20801 complete and 0 interrupted iterations
+default   [  15% ] 400 VUs  0m27.3s/3m0s
+
+running (0m32.0s), 400/400 VUs, 21601 complete and 0 interrupted iterations
+default   [  16% ] 400 VUs  0m28.3s/3m0s
+
+running (0m33.0s), 400/400 VUs, 22401 complete and 0 interrupted iterations
+default   [  16% ] 400 VUs  0m29.3s/3m0s
+
+running (0m34.0s), 400/400 VUs, 23201 complete and 0 interrupted iterations
+default   [  17% ] 400 VUs  0m30.3s/3m0s
+
+running (0m35.0s), 400/400 VUs, 24001 complete and 0 interrupted iterations
+default   [  17% ] 400 VUs  0m31.3s/3m0s
+
+running (0m36.0s), 400/400 VUs, 24800 complete and 0 interrupted iterations
+default   [  18% ] 400 VUs  0m32.3s/3m0s
+
+running (0m37.0s), 400/400 VUs, 25565 complete and 0 interrupted iterations
+default   [  19% ] 400 VUs  0m33.3s/3m0s
+
+running (0m38.0s), 400/400 VUs, 26332 complete and 0 interrupted iterations
+default   [  19% ] 400 VUs  0m34.3s/3m0s
+
+running (0m39.0s), 400/400 VUs, 27036 complete and 0 interrupted iterations
+default   [  20% ] 400 VUs  0m35.3s/3m0s
+
+running (0m40.0s), 400/400 VUs, 27790 complete and 0 interrupted iterations
+default   [  20% ] 400 VUs  0m36.3s/3m0s
+
+running (0m41.0s), 400/400 VUs, 28444 complete and 0 interrupted iterations
+default   [  21% ] 400 VUs  0m37.3s/3m0s
+
+running (0m42.0s), 400/400 VUs, 29232 complete and 0 interrupted iterations
+default   [  21% ] 400 VUs  0m38.3s/3m0s
+
+running (0m43.0s), 400/400 VUs, 30001 complete and 0 interrupted iterations
+default   [  22% ] 400 VUs  0m39.3s/3m0s
+
+running (0m44.0s), 400/400 VUs, 30801 complete and 0 interrupted iterations
+default   [  22% ] 400 VUs  0m40.3s/3m0s
+
+running (0m45.0s), 400/400 VUs, 31601 complete and 0 interrupted iterations
+default   [  23% ] 400 VUs  0m41.3s/3m0s
+
+running (0m46.0s), 400/400 VUs, 32401 complete and 0 interrupted iterations
+default   [  24% ] 400 VUs  0m42.3s/3m0s
+
+running (0m47.0s), 400/400 VUs, 33201 complete and 0 interrupted iterations
+default   [  24% ] 400 VUs  0m43.3s/3m0s
+
+running (0m48.0s), 400/400 VUs, 34001 complete and 0 interrupted iterations
+default   [  25% ] 400 VUs  0m44.3s/3m0s
+
+running (0m49.0s), 400/400 VUs, 34801 complete and 0 interrupted iterations
+default   [  25% ] 400 VUs  0m45.3s/3m0s
+
+running (0m50.0s), 400/400 VUs, 35601 complete and 0 interrupted iterations
+default   [  26% ] 400 VUs  0m46.3s/3m0s
+
+running (0m51.0s), 400/400 VUs, 36399 complete and 0 interrupted iterations
+default   [  26% ] 400 VUs  0m47.3s/3m0s
+
+running (0m52.0s), 400/400 VUs, 37182 complete and 0 interrupted iterations
+default   [  27% ] 400 VUs  0m48.3s/3m0s
+
+running (0m53.0s), 400/400 VUs, 37953 complete and 0 interrupted iterations
+default   [  27% ] 400 VUs  0m49.3s/3m0s
+
+running (0m54.0s), 400/400 VUs, 38698 complete and 0 interrupted iterations
+default   [  28% ] 400 VUs  0m50.3s/3m0s
+
+running (0m55.0s), 400/400 VUs, 39342 complete and 0 interrupted iterations
+default   [  29% ] 400 VUs  0m51.3s/3m0s
+
+running (0m56.0s), 400/400 VUs, 40094 complete and 0 interrupted iterations
+default   [  29% ] 400 VUs  0m52.3s/3m0s
+
+running (0m57.0s), 400/400 VUs, 40818 complete and 0 interrupted iterations
+default   [  30% ] 400 VUs  0m53.3s/3m0s
+
+running (0m58.0s), 400/400 VUs, 41601 complete and 0 interrupted iterations
+default   [  30% ] 400 VUs  0m54.3s/3m0s
+
+running (0m59.0s), 400/400 VUs, 42401 complete and 0 interrupted iterations
+default   [  31% ] 400 VUs  0m55.3s/3m0s
+
+running (1m00.0s), 400/400 VUs, 43201 complete and 0 interrupted iterations
+default   [  31% ] 400 VUs  0m56.3s/3m0s
+
+running (1m01.0s), 400/400 VUs, 44001 complete and 0 interrupted iterations
+default   [  32% ] 400 VUs  0m57.3s/3m0s
+
+running (1m02.0s), 400/400 VUs, 44801 complete and 0 interrupted iterations
+default   [  32% ] 400 VUs  0m58.3s/3m0s
+
+running (1m03.0s), 400/400 VUs, 45601 complete and 0 interrupted iterations
+default   [  33% ] 400 VUs  0m59.3s/3m0s
+
+running (1m04.0s), 400/400 VUs, 46401 complete and 0 interrupted iterations
+default   [  34% ] 400 VUs  1m00.3s/3m0s
+
+running (1m05.0s), 400/400 VUs, 47201 complete and 0 interrupted iterations
+default   [  34% ] 400 VUs  1m01.3s/3m0s
+
+running (1m06.0s), 400/400 VUs, 48001 complete and 0 interrupted iterations
+default   [  35% ] 400 VUs  1m02.3s/3m0s
+
+running (1m07.0s), 400/400 VUs, 48736 complete and 0 interrupted iterations
+default   [  35% ] 400 VUs  1m03.3s/3m0s
+
+running (1m08.0s), 400/400 VUs, 49480 complete and 0 interrupted iterations
+default   [  36% ] 400 VUs  1m04.3s/3m0s
+
+running (1m09.0s), 400/400 VUs, 50230 complete and 0 interrupted iterations
+default   [  36% ] 400 VUs  1m05.3s/3m0s
+
+running (1m10.0s), 400/400 VUs, 50941 complete and 0 interrupted iterations
+default   [  37% ] 400 VUs  1m06.3s/3m0s
+
+running (1m11.0s), 400/400 VUs, 51711 complete and 0 interrupted iterations
+default   [  37% ] 400 VUs  1m07.3s/3m0s
+
+running (1m12.0s), 400/400 VUs, 52404 complete and 0 interrupted iterations
+default   [  38% ] 400 VUs  1m08.3s/3m0s
+
+running (1m13.0s), 400/400 VUs, 53201 complete and 0 interrupted iterations
+default   [  39% ] 400 VUs  1m09.3s/3m0s
+
+running (1m14.0s), 400/400 VUs, 54001 complete and 0 interrupted iterations
+default   [  39% ] 400 VUs  1m10.3s/3m0s
+
+running (1m15.0s), 400/400 VUs, 54801 complete and 0 interrupted iterations
+default   [  40% ] 400 VUs  1m11.3s/3m0s
+
+running (1m16.0s), 400/400 VUs, 55601 complete and 0 interrupted iterations
+default   [  40% ] 400 VUs  1m12.3s/3m0s
+
+running (1m17.0s), 400/400 VUs, 56086 complete and 0 interrupted iterations
+default   [  41% ] 400 VUs  1m13.3s/3m0s
+
+running (1m18.0s), 400/400 VUs, 56764 complete and 0 interrupted iterations
+default   [  41% ] 400 VUs  1m14.3s/3m0s
+
+running (1m19.0s), 400/400 VUs, 57347 complete and 0 interrupted iterations
+default   [  42% ] 400 VUs  1m15.3s/3m0s
+
+running (1m20.0s), 400/400 VUs, 57827 complete and 0 interrupted iterations
+default   [  42% ] 400 VUs  1m16.3s/3m0s
+
+running (1m21.0s), 400/400 VUs, 58294 complete and 0 interrupted iterations
+default   [  43% ] 400 VUs  1m17.3s/3m0s
+
+running (1m22.0s), 400/400 VUs, 58739 complete and 0 interrupted iterations
+default   [  44% ] 400 VUs  1m18.3s/3m0s
+
+running (1m23.0s), 400/400 VUs, 59246 complete and 0 interrupted iterations
+default   [  44% ] 400 VUs  1m19.3s/3m0s
+
+running (1m24.0s), 400/400 VUs, 60017 complete and 0 interrupted iterations
+default   [  45% ] 400 VUs  1m20.3s/3m0s
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/user/favorites/brief\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/600519\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/000001\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/search?keyword=%E8%8C%85%E5%8F%B0\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/stocks/300750\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+time="2026-10-27T09:38:54+08:00" level=warning msg="Request Failed" error="Get \"http://localhost:8080/api/v1/market/status\": dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target machine actively refused it."
+
+running (1m25.0s), 400/400 VUs, 60536 complete and 0 interrupted iterations
+default   [  45% ] 400 VUs  1m21.3s/3m0s
+
+running (1m26.0s), 400/400 VUs, 61110 complete and 0 interrupted iterations
+default   [  46% ] 400 VUs  1m22.3s/3m0s
+
+running (1m27.0s), 400/400 VUs, 61691 complete and 0 interrupted iterations
+default   [  46% ] 400 VUs  1m23.3s/3m0s
+
+running (1m28.0s), 400/400 VUs, 62295 complete and 0 interrupted iterations
+default   [  47% ] 400 VUs  1m24.3s/3m0s
+
+running (1m29.0s), 400/400 VUs, 62984 complete and 0 interrupted iterations
+default   [  47% ] 400 VUs  1m25.3s/3m0s
+
+running (1m30.0s), 400/400 VUs, 63629 complete and 0 interrupted iterations
+default   [  48% ] 400 VUs  1m26.3s/3m0s
+
+running (1m31.0s), 400/400 VUs, 64187 complete and 0 interrupted iterations
+default   [  49% ] 400 VUs  1m27.3s/3m0s
+
+running (1m32.0s), 400/400 VUs, 64938 complete and 0 interrupted iterations
+default   [  49% ] 400 VUs  1m28.3s/3m0s
+
+running (1m33.0s), 400/400 VUs, 65684 complete and 0 interrupted iterations
+default   [  50% ] 400 VUs  1m29.3s/3m0s
+
+running (1m34.0s), 400/400 VUs, 66279 complete and 0 interrupted iterations
+default   [  50% ] 400 VUs  1m30.3s/3m0s
+
+running (1m35.0s), 400/400 VUs, 66776 complete and 0 interrupted iterations
+default   [  51% ] 400 VUs  1m31.3s/3m0s
+
+running (1m36.0s), 400/400 VUs, 67565 complete and 0 interrupted iterations
+default   [  51% ] 400 VUs  1m32.3s/3m0s
+
+running (1m37.0s), 400/400 VUs, 68123 complete and 0 interrupted iterations
+default   [  52% ] 400 VUs  1m33.3s/3m0s
+
+running (1m38.0s), 400/400 VUs, 68691 complete and 0 interrupted iterations
+default   [  52% ] 400 VUs  1m34.3s/3m0s
+
+running (1m39.0s), 400/400 VUs, 69443 complete and 0 interrupted iterations
+default   [  53% ] 400 VUs  1m35.3s/3m0s
+
+running (1m40.0s), 400/400 VUs, 70007 complete and 0 interrupted iterations
+default   [  54% ] 400 VUs  1m36.3s/3m0s
+
+running (1m41.0s), 400/400 VUs, 70547 complete and 0 interrupted iterations
+default   [  54% ] 400 VUs  1m37.3s/3m0s
+
+running (1m42.0s), 400/400 VUs, 71086 complete and 0 interrupted iterations
+default   [  55% ] 400 VUs  1m38.3s/3m0s
+
+running (1m43.0s), 400/400 VUs, 71750 complete and 0 interrupted iterations
+default   [  55% ] 400 VUs  1m39.3s/3m0s
+
+running (1m44.0s), 400/400 VUs, 72389 complete and 0 interrupted iterations
+default   [  56% ] 400 VUs  1m40.3s/3m0s
+
+running (1m45.0s), 400/400 VUs, 72943 complete and 0 interrupted iterations
+default   [  56% ] 400 VUs  1m41.3s/3m0s
+
+running (1m46.0s), 400/400 VUs, 73490 complete and 0 interrupted iterations
+default   [  57% ] 400 VUs  1m42.3s/3m0s
+
+running (1m47.0s), 400/400 VUs, 74053 complete and 0 interrupted iterations
+default   [  57% ] 400 VUs  1m43.3s/3m0s
+
+running (1m48.0s), 400/400 VUs, 74624 complete and 0 interrupted iterations
+default   [  58% ] 400 VUs  1m44.3s/3m0s
+
+running (1m49.0s), 400/400 VUs, 75329 complete and 0 interrupted iterations
+default   [  59% ] 400 VUs  1m45.3s/3m0s
+
+running (1m50.0s), 400/400 VUs, 75941 complete and 0 interrupted iterations
+default   [  59% ] 400 VUs  1m46.3s/3m0s
+
+running (1m51.0s), 400/400 VUs, 76385 complete and 0 interrupted iterations
+default   [  60% ] 400 VUs  1m47.3s/3m0s
+
+running (1m52.0s), 400/400 VUs, 76878 complete and 0 interrupted iterations
+default   [  60% ] 400 VUs  1m48.3s/3m0s
+
+running (1m53.0s), 400/400 VUs, 77397 complete and 0 interrupted iterations
+default   [  61% ] 400 VUs  1m49.3s/3m0s
+
+running (1m54.0s), 400/400 VUs, 78109 complete and 0 interrupted iterations
+default   [  61% ] 400 VUs  1m50.3s/3m0s
+
+running (1m55.0s), 400/400 VUs, 78705 complete and 0 interrupted iterations
+default   [  62% ] 400 VUs  1m51.4s/3m0s
+
+running (1m56.0s), 400/400 VUs, 79154 complete and 0 interrupted iterations
+default   [  62% ] 400 VUs  1m52.3s/3m0s
+
+running (1m57.0s), 400/400 VUs, 79703 complete and 0 interrupted iterations
+default   [  63% ] 400 VUs  1m53.3s/3m0s
+
+running (1m58.0s), 400/400 VUs, 80271 complete and 0 interrupted iterations
+default   [  64% ] 400 VUs  1m54.3s/3m0s
+
+running (1m59.0s), 400/400 VUs, 80822 complete and 0 interrupted iterations
+default   [  64% ] 400 VUs  1m55.3s/3m0s
+
+running (2m00.0s), 400/400 VUs, 81475 complete and 0 interrupted iterations
+default   [  65% ] 400 VUs  1m56.3s/3m0s
+
+running (2m01.0s), 400/400 VUs, 82093 complete and 0 interrupted iterations
+default   [  65% ] 400 VUs  1m57.3s/3m0s
+
+running (2m02.0s), 400/400 VUs, 82694 complete and 0 interrupted iterations
+default   [  66% ] 400 VUs  1m58.3s/3m0s
+
+running (2m03.0s), 400/400 VUs, 83368 complete and 0 interrupted iterations
+default   [  66% ] 400 VUs  1m59.3s/3m0s
+
+running (2m04.0s), 400/400 VUs, 84078 complete and 0 interrupted iterations
+default   [  67% ] 400 VUs  2m00.3s/3m0s
+
+running (2m05.0s), 400/400 VUs, 84607 complete and 0 interrupted iterations
+default   [  67% ] 400 VUs  2m01.3s/3m0s
+
+running (2m06.0s), 400/400 VUs, 85210 complete and 0 interrupted iterations
+default   [  68% ] 400 VUs  2m02.3s/3m0s
+
+running (2m07.0s), 400/400 VUs, 85855 complete and 0 interrupted iterations
+default   [  69% ] 400 VUs  2m03.3s/3m0s
+
+running (2m08.0s), 400/400 VUs, 86598 complete and 0 interrupted iterations
+default   [  69% ] 400 VUs  2m04.3s/3m0s
+
+running (2m09.0s), 400/400 VUs, 87107 complete and 0 interrupted iterations
+default   [  70% ] 400 VUs  2m05.3s/3m0s
+
+running (2m10.0s), 400/400 VUs, 87629 complete and 0 interrupted iterations
+default   [  70% ] 400 VUs  2m06.3s/3m0s
+
+running (2m11.0s), 400/400 VUs, 88324 complete and 0 interrupted iterations
+default   [  71% ] 400 VUs  2m07.3s/3m0s
+
+running (2m12.0s), 400/400 VUs, 88925 complete and 0 interrupted iterations
+default   [  71% ] 400 VUs  2m08.3s/3m0s
+
+running (2m13.0s), 400/400 VUs, 89458 complete and 0 interrupted iterations
+default   [  72% ] 400 VUs  2m09.3s/3m0s
+
+running (2m14.0s), 400/400 VUs, 90000 complete and 0 interrupted iterations
+default   [  72% ] 400 VUs  2m10.3s/3m0s
+
+running (2m15.0s), 400/400 VUs, 90487 complete and 0 interrupted iterations
+default   [  73% ] 400 VUs  2m11.3s/3m0s
+
+running (2m16.0s), 400/400 VUs, 91033 complete and 0 interrupted iterations
+default   [  74% ] 400 VUs  2m12.3s/3m0s
+
+running (2m17.0s), 400/400 VUs, 91715 complete and 0 interrupted iterations
+default   [  74% ] 400 VUs  2m13.3s/3m0s
+
+running (2m18.0s), 400/400 VUs, 92435 complete and 0 interrupted iterations
+default   [  75% ] 400 VUs  2m14.4s/3m0s
+
+running (2m19.0s), 400/400 VUs, 92902 complete and 0 interrupted iterations
+default   [  75% ] 400 VUs  2m15.3s/3m0s
+
+running (2m20.0s), 400/400 VUs, 93523 complete and 0 interrupted iterations
+default   [  76% ] 400 VUs  2m16.3s/3m0s
+
+running (2m21.0s), 400/400 VUs, 94196 complete and 0 interrupted iterations
+default   [  76% ] 400 VUs  2m17.3s/3m0s
+
+running (2m22.0s), 400/400 VUs, 94861 complete and 0 interrupted iterations
+default   [  77% ] 400 VUs  2m18.3s/3m0s
+
+running (2m23.0s), 400/400 VUs, 95483 complete and 0 interrupted iterations
+default   [  77% ] 400 VUs  2m19.3s/3m0s
+
+running (2m24.0s), 400/400 VUs, 96005 complete and 0 interrupted iterations
+default   [  78% ] 400 VUs  2m20.3s/3m0s
+
+running (2m25.0s), 400/400 VUs, 96461 complete and 0 interrupted iterations
+default   [  79% ] 400 VUs  2m21.3s/3m0s
+
+running (2m26.0s), 400/400 VUs, 96973 complete and 0 interrupted iterations
+default   [  79% ] 400 VUs  2m22.3s/3m0s
+
+running (2m27.0s), 400/400 VUs, 97588 complete and 0 interrupted iterations
+default   [  80% ] 400 VUs  2m23.3s/3m0s
+
+running (2m28.0s), 400/400 VUs, 98260 complete and 0 interrupted iterations
+default   [  80% ] 400 VUs  2m24.3s/3m0s
+
+running (2m29.0s), 400/400 VUs, 98754 complete and 0 interrupted iterations
+default   [  81% ] 400 VUs  2m25.4s/3m0s
+
+running (2m30.0s), 400/400 VUs, 99223 complete and 0 interrupted iterations
+default   [  81% ] 400 VUs  2m26.3s/3m0s
+
+running (2m31.0s), 400/400 VUs, 99706 complete and 0 interrupted iterations
+default   [  82% ] 400 VUs  2m27.3s/3m0s
+
+running (2m32.0s), 400/400 VUs, 100182 complete and 0 interrupted iterations
+default   [  82% ] 400 VUs  2m28.3s/3m0s
+
+running (2m33.0s), 400/400 VUs, 100780 complete and 0 interrupted iterations
+default   [  83% ] 400 VUs  2m29.3s/3m0s
+
+running (2m34.0s), 400/400 VUs, 101400 complete and 0 interrupted iterations
+default   [  84% ] 400 VUs  2m30.4s/3m0s
+
+running (2m35.0s), 400/400 VUs, 101934 complete and 0 interrupted iterations
+default   [  84% ] 400 VUs  2m31.3s/3m0s
+
+running (2m36.0s), 400/400 VUs, 102403 complete and 0 interrupted iterations
+default   [  85% ] 400 VUs  2m32.3s/3m0s
+
+running (2m37.0s), 400/400 VUs, 102906 complete and 0 interrupted iterations
+default   [  85% ] 400 VUs  2m33.3s/3m0s
+
+running (2m38.0s), 400/400 VUs, 103343 complete and 0 interrupted iterations
+default   [  86% ] 400 VUs  2m34.3s/3m0s
+
+running (2m39.0s), 400/400 VUs, 103931 complete and 0 interrupted iterations
+default   [  86% ] 400 VUs  2m35.3s/3m0s
+
+running (2m40.0s), 400/400 VUs, 104616 complete and 0 interrupted iterations
+default   [  87% ] 400 VUs  2m36.3s/3m0s
+
+running (2m41.0s), 400/400 VUs, 105192 complete and 0 interrupted iterations
+default   [  87% ] 400 VUs  2m37.3s/3m0s
+
+running (2m42.0s), 400/400 VUs, 105821 complete and 0 interrupted iterations
+default   [  88% ] 400 VUs  2m38.3s/3m0s
+
+running (2m43.0s), 400/400 VUs, 106468 complete and 0 interrupted iterations
+default   [  89% ] 400 VUs  2m39.3s/3m0s
+
+running (2m44.0s), 400/400 VUs, 107062 complete and 0 interrupted iterations
+default   [  89% ] 400 VUs  2m40.3s/3m0s
+
+running (2m45.0s), 400/400 VUs, 107699 complete and 0 interrupted iterations
+default   [  90% ] 400 VUs  2m41.3s/3m0s
+
+running (2m46.0s), 400/400 VUs, 108362 complete and 0 interrupted iterations
+default   [  90% ] 400 VUs  2m42.3s/3m0s
+
+running (2m47.0s), 400/400 VUs, 109008 complete and 0 interrupted iterations
+default   [  91% ] 400 VUs  2m43.3s/3m0s
+
+running (2m48.0s), 400/400 VUs, 109619 complete and 0 interrupted iterations
+default   [  91% ] 400 VUs  2m44.3s/3m0s
+
+running (2m49.0s), 400/400 VUs, 110134 complete and 0 interrupted iterations
+default   [  92% ] 400 VUs  2m45.3s/3m0s
+
+running (2m50.0s), 400/400 VUs, 110648 complete and 0 interrupted iterations
+default   [  92% ] 400 VUs  2m46.3s/3m0s
+
+running (2m51.0s), 400/400 VUs, 111324 complete and 0 interrupted iterations
+default   [  93% ] 400 VUs  2m47.3s/3m0s
+
+running (2m52.0s), 400/400 VUs, 111939 complete and 0 interrupted iterations
+default   [  94% ] 400 VUs  2m48.3s/3m0s
+
+running (2m53.0s), 400/400 VUs, 112396 complete and 0 interrupted iterations
+default   [  94% ] 400 VUs  2m49.3s/3m0s
+
+running (2m54.0s), 400/400 VUs, 112885 complete and 0 interrupted iterations
+default   [  95% ] 400 VUs  2m50.3s/3m0s
+
+running (2m55.0s), 400/400 VUs, 113409 complete and 0 interrupted iterations
+default   [  95% ] 400 VUs  2m51.3s/3m0s
+
+running (2m56.0s), 400/400 VUs, 113912 complete and 0 interrupted iterations
+default   [  96% ] 400 VUs  2m52.3s/3m0s
+
+running (2m57.0s), 400/400 VUs, 114380 complete and 0 interrupted iterations
+default   [  96% ] 400 VUs  2m53.3s/3m0s
+
+running (2m58.0s), 400/400 VUs, 114995 complete and 0 interrupted iterations
+default   [  97% ] 400 VUs  2m54.3s/3m0s
+
+running (2m59.0s), 400/400 VUs, 115701 complete and 0 interrupted iterations
+default   [  97% ] 400 VUs  2m55.3s/3m0s
+
+running (3m00.0s), 400/400 VUs, 116257 complete and 0 interrupted iterations
+default   [  98% ] 400 VUs  2m56.3s/3m0s
+
+running (3m01.0s), 400/400 VUs, 116784 complete and 0 interrupted iterations
+default   [  99% ] 400 VUs  2m57.3s/3m0s
+
+running (3m02.0s), 400/400 VUs, 117337 complete and 0 interrupted iterations
+default   [  99% ] 400 VUs  2m58.3s/3m0s
+
+running (3m03.0s), 400/400 VUs, 117875 complete and 0 interrupted iterations
+default   [ 100% ] 400 VUs  2m59.3s/3m0s
+
+running (3m04.0s), 269/400 VUs, 118432 complete and 0 interrupted iterations
+default ↓ [ 100% ] 400 VUs  3m0s
+
+
+  █ THRESHOLDS 
+
+    http_req_duration
+    ✓ 'p(99)<2000' p(99)=173.69ms
+
+    http_req_failed
+    ✓ 'rate<0.05' rate=0.09%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 474804 2577.700023/s
+    checks_succeeded...: 99.90% 474369 out of 474804
+    checks_failed......: 0.09%  435 out of 474804
+
+    ✗ 自选股摘要 200
+      ↳  99% — ✓ 118469 / ✗ 232
+    ✗ 个股详情 200
+      ↳  99% — ✓ 118612 / ✗ 89
+    ✗ 搜索 200
+      ↳  99% — ✓ 118622 / ✗ 79
+    ✗ 市场状态 200
+      ↳  99% — ✓ 118666 / ✗ 35
+
+    HTTP
+    http_req_duration..............: avg=25.49ms  min=0s       med=4.83ms  max=449.92ms p(90)=96.07ms  p(95)=132.3ms 
+      { expected_response:true }...: avg=25.51ms  min=0s       med=4.84ms  max=449.92ms p(90)=96.16ms  p(95)=132.33ms
+    http_req_failed................: 0.09%  435 out of 474854
+    http_reqs......................: 474854 2577.971472/s
+
+    EXECUTION
+    iteration_duration.............: avg=606.88ms min=504.77ms med=529.5ms max=1.14s    p(90)=801.29ms p(95)=843.98ms
+    iterations.....................: 118701 644.425006/s
+    vus............................: 269    min=0             max=400
+    vus_max........................: 400    min=400           max=400
+
+    NETWORK
+    data_received..................: 259 MB 1.4 MB/s
+    data_sent......................: 302 MB 1.6 MB/s
+
+
+
+
+running (3m04.2s), 000/400 VUs, 118701 complete and 0 interrupted iterations
+default ✓ [ 100% ] 400 VUs  3m0s

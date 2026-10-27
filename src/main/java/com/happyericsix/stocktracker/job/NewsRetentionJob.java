@@ -9,6 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -53,7 +54,16 @@ public class NewsRetentionJob {
         this.jobRunService = jobRunService;
     }
 
-    /** 03:40：避开整点（那是各种日报任务的高峰），且远离开收盘。 */
+    /**
+     * 03:40：避开整点（那是各种日报任务的高峰），且远离开收盘。
+     *
+     * <p>{@code @Transactional} 不是装饰（2026-10-27 生产事故）：下面全是 Spring Data
+     * 的派生删除方法（deleteBy...），它们要求调用线程持有事务——没有事务时抛
+     * "No EntityManager with actual transaction available"，该任务自上线起每晚
+     * 必败。失败会被 {@code runWithHeartbeat} 捕获记 FAILED，回滚的只是删除本身，
+     * 心跳（REQUIRES_NEW）不受影响。
+     */
+    @Transactional
     @Scheduled(cron = "0 40 3 * * *", zone = "Asia/Shanghai")
     public void purgeExpired() {
         jobRunService.runWithHeartbeat(JobRunService.JOB_NEWS_RETENTION, () -> {

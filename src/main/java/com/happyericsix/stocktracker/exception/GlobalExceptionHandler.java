@@ -10,6 +10,7 @@ import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 @ControllerAdvice
 public class GlobalExceptionHandler {
@@ -88,6 +89,20 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<Result<Void>> handleUnreadable(HttpMessageNotReadableException ex) {
         return ResponseEntity.badRequest().body(Result.error(400, "请求体格式错误"));
+    }
+
+    /**
+     * 路径/查询参数类型不匹配（如 /strategies/undefined/paper/equity 的 id）：
+     * 这是**调用方的错**，此前落到兜底 500，监控里看起来像服务端故障——
+     * 2026-10-27 模拟盘页资产走势图字段误用（item.id vs item.strategyId）实测
+     * 一次页面加载就产生两条"Unhandled exception"。归到 400 让它一眼可辨。
+     */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<Result<Void>> handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
+        log.warn("Request param type mismatch: {} = '{}'", ex.getName(), ex.getValue());
+        return ResponseEntity.badRequest().body(Result.error(400,
+                String.format("参数 %s 格式错误（期望 %s）", ex.getName(),
+                        ex.getRequiredType() != null ? ex.getRequiredType().getSimpleName() : "未知")));
     }
 
     /** 兜底：任何未预期异常不再泄漏默认 500 白页，统一 Result 信封 */
