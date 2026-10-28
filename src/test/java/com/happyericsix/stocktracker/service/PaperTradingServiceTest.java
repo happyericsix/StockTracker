@@ -44,6 +44,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
@@ -351,7 +352,7 @@ class PaperTradingServiceTest {
 
         paperTradingService.evaluateDaily();
 
-        verify(strategyClient, never()).agentDecide(anyString(), anyString(), anyString(), any(), any(), any(), any(), any(), any(), any());
+        verify(strategyClient, never()).agentDecide(anyString(), anyString(), anyString(), any(), any(), any(), any(), any(), any(), any(), any(), any(), anyBoolean());
         verify(strategyClient, times(1)).evaluateBar(eq(configJson), eq("600519"), anyString(), any());
         // 估值行落库时按**策略声明的模式**标注（它不是一次决策，但必须落在同一段曲线上）
         ArgumentCaptor<PaperTradeTrace> captor = ArgumentCaptor.forClass(PaperTradeTrace.class);
@@ -449,14 +450,14 @@ class PaperTradingServiceTest {
                         + "\"authorization\":{\"intraday_execution\":true,\"allow_open\":true,"
                         + "\"allow_close\":true,\"max_position_pct\":1.0}}");
         when(strategyClient.agentDecide(eq(configJson), eq("601988"), anyString(), isNull(), isNull(),
-                any(), any(), any(), any(), any()))
+                any(), any(), any(), any(), any(), any(), any(), anyBoolean()))
                 .thenReturn(result);
 
         PaperAccountResponse response = paperTradingService.startPaper("alice", 10L);
 
         assertEquals("buy", response.getLastSignal());
         verify(strategyClient, times(1)).agentDecide(eq(configJson), eq("601988"), anyString(),
-                isNull(), isNull(), any(), any(), any(), any(), any());
+                isNull(), isNull(), any(), any(), any(), any(), any(), any(), any(), anyBoolean());
         // 盘中路径一次都不许走：它没有任何授权时只会留一条 awaiting_authorization
         verify(strategyClient, never()).evaluateBarRealtime(anyString(), anyString(), any());
         // 第一份授权当场落库 —— 盘中规则执行从启动那一刻起就有边界可依
@@ -714,7 +715,7 @@ class PaperTradingServiceTest {
                         + "\"allow_close\":true,\"max_position_pct\":1.0}}");
         when(strategyClient.agentDecide(eq(configJson), eq("601988"), anyString(), isNull(),
                 isNull(), isNull(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any(), any(), any()))
+                org.mockito.ArgumentMatchers.any(), any(), any(), any(), any(), anyBoolean()))
                 .thenReturn(result);
 
         paperTradingService.startPaper("alice", 10L);
@@ -723,7 +724,7 @@ class PaperTradingServiceTest {
         ArgumentCaptor<JsonNode> portfolioCaptor = ArgumentCaptor.forClass(JsonNode.class);
         verify(strategyClient, times(1)).agentDecide(eq(configJson), eq("601988"), anyString(),
                 isNull(), isNull(), isNull(), experienceCaptor.capture(),
-                portfolioCaptor.capture(), any(), any());
+                portfolioCaptor.capture(), any(), any(), any(), any(), anyBoolean());
         assertEquals(25.0, experienceCaptor.getValue().path("winRatePct").asDouble(), 0.001);
         assertEquals(4, experienceCaptor.getValue().path("evaluatedTrades").asInt());
         // 组合上下文（P5）同一趟必须带上：委员会得知道自己管着多大集中度
@@ -770,15 +771,15 @@ class PaperTradingServiceTest {
                 "{\"signal\":\"hold\",\"matched_conditions\":[],\"price\":6.73,"
                         + "\"skip_reason\":\"agent_no_new_information\"}");
         when(strategyClient.agentDecide(eq(configJson), eq("601988"), anyString(), isNull(), isNull(),
-                any(), any(), any(), any(), any()))
+                any(), any(), any(), any(), any(), any(), any(), anyBoolean()))
                 .thenReturn(decision);
 
         paperTradingService.retryFailedDailySettlements(true);
 
         // 失败的那条被补跑（问了一次委员会），成功过的那条一次都没问
         verify(strategyClient, times(1)).agentDecide(eq(configJson), eq("601988"), anyString(),
-                isNull(), isNull(), any(), any(), any(), any(), any());
-        verify(strategyClient, never()).agentDecide(anyString(), eq("600519"), anyString(), any(), any(), any(), any(), any(), any(), any());
+                isNull(), isNull(), any(), any(), any(), any(), any(), any(), any(), anyBoolean());
+        verify(strategyClient, never()).agentDecide(anyString(), eq("600519"), anyString(), any(), any(), any(), any(), any(), any(), any(), any(), any(), anyBoolean());
     }
 
     /**
@@ -808,7 +809,7 @@ class PaperTradingServiceTest {
                 "{\"signal\":\"hold\",\"bar_date_missing\":true,\"skip_reason\":\"no_bar\",\"price\":null}");
         // 持仓账户的 position 非空（与既有重试用例的空仓不同），第 4 参用 any()
         when(strategyClient.agentDecide(eq(configJson), eq("601988"), anyString(), any(), isNull(),
-                any(), any(), any(), any(), any()))
+                any(), any(), any(), any(), any(), any(), any(), anyBoolean()))
                 .thenReturn(noBar);
 
         paperTradingService.evaluateDaily();
@@ -844,7 +845,7 @@ class PaperTradingServiceTest {
                         .tradeDate(LocalDate.now()).decision(ExecutionContract.DECISION_SKIP)
                         .skipReason(ExecutionContract.SKIP_NO_BAR).build()));
         when(strategyClient.agentDecide(eq(configJson), eq("601988"), anyString(), any(), isNull(),
-                any(), any(), any(), any(), any()))
+                any(), any(), any(), any(), any(), any(), any(), anyBoolean()))
                 .thenReturn(mapper.readTree(
                         "{\"signal\":\"hold\",\"bar_date_missing\":true,\"skip_reason\":\"no_bar\",\"price\":null}"));
 
@@ -869,7 +870,7 @@ class PaperTradingServiceTest {
         when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
         when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.of(holdingAccount(strategy)));
         when(strategyClient.agentDecide(eq(configJson), eq("601988"), anyString(), any(), isNull(),
-                any(), any(), any(), any(), any()))
+                any(), any(), any(), any(), any(), any(), any(), anyBoolean()))
                 .thenReturn(mapper.readTree(
                         "{\"error\":\"历史 K 线数据不足，暂时无法评估\",\"price\":null,"
                                 + "\"skip_reason\":\"data_unavailable\","
@@ -902,7 +903,7 @@ class PaperTradingServiceTest {
         when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
         when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.of(holdingAccount(strategy)));
         when(strategyClient.agentDecide(eq(configJson), eq("601988"), anyString(), any(), isNull(),
-                any(), any(), any(), any(), any()))
+                any(), any(), any(), any(), any(), any(), any(), anyBoolean()))
                 .thenThrow(new RuntimeException("Connection refused: python-data/8000"));
 
         paperTradingService.evaluateDaily();
@@ -939,7 +940,7 @@ class PaperTradingServiceTest {
                         .tradeDate(LocalDate.now()).decision(ExecutionContract.DECISION_SKIP)
                         .skipReason(ExecutionContract.SKIP_DATA_UNAVAILABLE).build()));
         when(strategyClient.agentDecide(eq(configJson), eq("601988"), anyString(), any(), isNull(),
-                any(), any(), any(), any(), any()))
+                any(), any(), any(), any(), any(), any(), any(), anyBoolean()))
                 .thenReturn(mapper.readTree(
                         "{\"signal\":\"hold\",\"matched_conditions\":[],\"price\":6.73,"
                                 + "\"skip_reason\":\"agent_no_new_information\"}"));
@@ -947,7 +948,7 @@ class PaperTradingServiceTest {
         paperTradingService.retryFailedDailySettlements(false);
 
         verify(strategyClient, times(1)).agentDecide(eq(configJson), eq("601988"), anyString(),
-                any(), isNull(), any(), any(), any(), any(), any());
+                any(), isNull(), any(), any(), any(), any(), any(), any(), any(), anyBoolean());
     }
 
     // ==================== 止损硬通道（2026-10-08：大跌日的生存底线） ====================
@@ -1655,14 +1656,14 @@ class PaperTradingServiceTest {
                         + "\"indicators\":{\"ma_20\":9.8},"
                         + "\"extra\":{\"committee\":{\"llm_calls\":8,\"total_tokens\":33449}}}}");
         when(strategyClient.agentDecide(eq(configJson), eq("600519"), anyString(), isNull(), any(),
-                any(), any(), any(), any(), any()))
+                any(), any(), any(), any(), any(), any(), any(), anyBoolean()))
                 .thenReturn(result);
 
         paperTradingService.evaluateDaily();
 
         // ① 走的是 agent 端点，而且**没有**去调规则端点
         verify(strategyClient, times(1)).agentDecide(eq(configJson), eq("600519"), anyString(), isNull(), any(),
-                any(), any(), any(), any(), any());
+                any(), any(), any(), any(), any(), any(), any(), anyBoolean());
         verify(strategyClient, never()).evaluateBar(anyString(), anyString(), anyString(), any());
 
         // ② 决策被执行（成交 + 账户变化）
@@ -1917,7 +1918,7 @@ class PaperTradingServiceTest {
                         + "\"fingerprint\":{\"fill_basis\":\"close\",\"adjust_mode\":\"qfq\","
                         + "\"money_policy_version\":1,\"engine_version\":\"abc123\",\"decision_mode\":\"agent\"}}");
         when(strategyClient.agentDecide(eq(configJson), eq("600519"), anyString(), isNull(), any(),
-                any(), any(), any(), any(), any()))
+                any(), any(), any(), any(), any(), any(), any(), anyBoolean()))
                 .thenReturn(result);
 
         paperTradingService.evaluateDaily();
@@ -2109,7 +2110,7 @@ class PaperTradingServiceTest {
         paperTradingService.evaluateDaily();
 
         verify(strategyClient, times(1)).evaluateBar(eq(configJson), eq("600519"), anyString(), isNull());
-        verify(strategyClient, never()).agentDecide(anyString(), anyString(), anyString(), any(), any(), any(), any(), any(), any(), any());
+        verify(strategyClient, never()).agentDecide(anyString(), anyString(), anyString(), any(), any(), any(), any(), any(), any(), any(), any(), any(), anyBoolean());
         ArgumentCaptor<PaperTradeTrace> captor = ArgumentCaptor.forClass(PaperTradeTrace.class);
         verify(paperTraceService, times(1)).record(captor.capture());
         assertEquals(ExecutionContract.DECISION_MODE_RULE, captor.getValue().getDecisionMode(),
@@ -2156,7 +2157,7 @@ class PaperTradingServiceTest {
                         + "\"money_policy_version\":1,\"engine_version\":\"abc123\",\"decision_mode\":\"agent\"},"
                         + "\"committee\":{\"llm_calls\":8,\"total_tokens\":21457}}");
         when(strategyClient.agentDecide(eq(configJson), eq("600519"), anyString(), isNull(), any(),
-                any(), any(), any(), any(), any()))
+                any(), any(), any(), any(), any(), any(), any(), anyBoolean()))
                 .thenReturn(result);
 
         paperTradingService.evaluateDaily();

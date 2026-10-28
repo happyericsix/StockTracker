@@ -142,6 +142,25 @@ public class PaperTradingService {
     /** 每策略每日盯盘 LLM 调用预算（成本止损线，2026-10-09 产品决策：平衡档 20 次）。 */
     @Value("${paper.intraday-watch.daily-budget:20}")
     private int intradayWatchDailyBudget;
+    /**
+     * 影子会议（P5，2026-10-28）：全局开关，开启后所有 agent 策略的日线结算
+     * **跳过召集门控天天开会**，结论照常进痕迹（完整审计在 snapshot 里）但
+     * 不执行、不落授权、不计入"真开会"统计（agent_llm_calls 记 0）。
+     * 用途：攒"委员会 vs 门控路径"的对比样本，回答"这层到底加不加分"。
+     * 月成本约等于每策略每交易日一次全委会（~21k tokens × ~22 天）。
+     */
+    @Value("${paper.shadow-committee.enabled:false}")
+    private boolean shadowCommitteeEnabled;
+    /**
+     * 盘中授权 TTL（P3，2026-10-28）：授权"直到下一次会议更新"的最长静默生效期。
+     * 持仓 3 天（敞口真实，盯紧）/空仓 5 天（错过的代价更小）——超期后旧边界
+     * 不再静默管当天的事：盘中按 auth_expired 不动，并注入 auth_review
+     * 让 15:30 的委员会重划边界。与 Python 侧 stale 门控（10/3 天）刻意不同：
+     * 那边是"多久必须开会"，这边是"旧授权多久作废"，前者大于后者——
+     * 作废必须先于"完全没人看"。
+     */
+    private static final int AUTH_TTL_DAYS_HOLDING = 3;
+    private static final int AUTH_TTL_DAYS_FLAT = 5;
     /** 同一事件类型的冷却窗口：一次急涨往往连着几根 bar 都"在触发"，不冷却会被同一件事叫醒多次。 */
     private static final long WATCH_EVENT_COOLDOWN_MS = 15 * 60 * 1000L;
     /** 事件冷却表：strategyId:eventType → 上次触发时刻。重启丢失无害（最多多问几次模型）。 */
@@ -1101,6 +1120,19 @@ public class PaperTradingService {
             log.warn("读取总览痕迹失败 strategyId={}: {}", strategy.getId(), e.getMessage());
         }
 
+        // 委员会活性（P2，2026-10-28）：agent 模式的正常态就是沉默，沉默的原因必须可见。
+        // 旁路读 + 全部从痕迹表推导（绝不读任何"每天结算都刷新"的字段）。
+        if (ExecutionContract.DECISION_MODE_AGENT.equals(item.getDecisionMode())) {
+            try {
+                item.setCommitteeStatus(committeeStatusOf(strategy,
+                        account != null && item.getShares() != null
+                                && item.getShares().signum() > 0));
+            } catch (Exception e) {
+                log.info("委员会活性组装失败 strategyId={}（不影响总览）：{}",
+                        strategy.getId(), e.toString());
+            }
+        }
+
         if (expectationService != null && strategy.getUser() != null) {
             ExpectationService.Expectation expectation = expectationService.latest(
                     strategy.getUser().getId(), strategy.getId());
@@ -1237,11 +1269,19 @@ public class PaperTradingService {
             JsonNode newsBriefing = committeeBriefingQuietly(strategy.getSymbol());
             JsonNode experience = strategyExperienceQuietly(strategy);
             JsonNode portfolio = portfolioContextQuietly(strategy, account);
+            String lastMeeting = lastBriefingDate(strategy.getId());
+            // 信息面脉搏（P1，2026-10-28）：距上次开会的新闻增量 → 门控的 news_signal
+            // 触发。委员会开会时看的是完整证据包；这里只是三个计数，够门控判"有没有动静"。
+            JsonNode newsPulse = newsPulseQuietly(strategy.getSymbol(), lastMeeting);
+            // 授权过期复核（P3，2026-10-28）：盘中授权超过 TTL → 注入 auth_review，
+            // 委员会当天的第一议程就是重划边界（不再是"上次开会怎么说就一直怎么样"）。
+            List<String> conveneFlags = authorizationStale(strategy, account)
+                    ? List.of(ExecutionContract.CONVENE_FLAG_AUTH_REVIEW) : List.of();
             result = strategyClient.agentDecide(strategy.getConfigJson(), strategy.getSymbol(),
-                    today.toString(), position, lastBriefingDate(strategy.getId()),
+                    today.toString(), position, lastMeeting,
                     newsBriefing, experience, portfolio,
                     strategy.getUser() != null ? strategy.getUser().getId() : null,
-                    strategy.getId());
+                    strategy.getId(), newsPulse, conveneFlags, shadowCommitteeEnabled);
         } else {
             result = strategyClient.evaluateBar(strategy.getConfigJson(), strategy.getSymbol(),
                     today.toString(), position);
@@ -1269,8 +1309,18 @@ public class PaperTradingService {
 
         // 委员会带了授权输出就落库（最新一行生效）。失败无害：授权写不进去
         // 只是盘中继续沿用上一次的边界，绝不让它影响本次结算本身。
-        if (isAgentMode(strategy)) {
+        // ⚠️ 影子会议（P5）不落授权：它不是真会议的意志，边界只能由真会议划。
+        if (isAgentMode(strategy) && !result.path("shadow").asBoolean(false)) {
             saveAuthorization(strategy, result);
+        }
+
+        // 影子会议（P5，2026-10-28）：委员会照常辩论了（结论与完整审计在 result 里），
+        // 但**只记录不执行**——这是攒"委员会 vs 门控路径"对比样本的实验通道，
+        // 绝不能让它真的动仓位或改授权。
+        if (isAgentMode(strategy) && result.path("shadow").asBoolean(false)) {
+            markToMarket(strategy, account, result);
+            markFingerprintDecisionMode(result);
+            return shadowRecordOnly(strategy, account, result, trigger, today);
         }
 
         // 三层夹取的最后一层在日线也要在场（此前 sizeCap=null，委员会日线买入可以
@@ -1521,6 +1571,14 @@ public class PaperTradingService {
             intradayAuthorized = authorization != null
                     && Boolean.TRUE.equals(authorization.getIntradayExecution());
         }
+        // 授权 TTL（P3，2026-10-28）：授权本身还在（findLatest 查得到），但签发太久——
+        // 旧边界不再静默管当天的事，盘中按 auth_expired 不动；15:30 的结算会注入
+        // auth_review 让委员会重划边界。与"从未授权/委员会主动关掉"分开记：三者的
+        // 复盘动作完全不同。止损硬通道仍然优先（生存不排队，见 2026-10-08 的教训）。
+        boolean authorizationExpired = intradayAuthorized && authorizationStale(strategy, account);
+        if (authorizationExpired) {
+            intradayAuthorized = false;
+        }
 
         JsonNode position = buildPosition(account);
         JsonNode result = strategyClient.evaluateBarRealtime(
@@ -1572,9 +1630,12 @@ public class PaperTradingService {
             // 两种"不动"必须分开：从未授权（awaiting_authorization）与
             // 委员会开会后明确关闭盘中执行（agent_intraday_disabled）——
             // 后者是委员会的主动决定，混进"没开会"会让"为什么关掉"永远统计不出来。
+            // 第三种（P3）：授权过期（auth_expired）——边界太旧，等 15:30 重划。
             String reason = authorization == null
                     ? ExecutionContract.SKIP_AWAITING_AUTHORIZATION
-                    : ExecutionContract.SKIP_AGENT_INTRADAY_DISABLED;
+                    : authorizationExpired
+                            ? ExecutionContract.SKIP_AUTH_EXPIRED
+                            : ExecutionContract.SKIP_AGENT_INTRADAY_DISABLED;
             return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME, trigger,
                     CnTime.today(), barTime, result, reason);
         }
@@ -1851,6 +1912,130 @@ public class PaperTradingService {
             log.info("委员会信息面证据组装失败 symbol={}（不影响决策）：{}", symbol, e.toString());
             return null;
         }
+    }
+
+    /**
+     * 信息面脉搏（P1，2026-10-28）：距上次真开会的新闻增量计数，给召集门控的
+     * news_signal 触发用。lastMeeting 解析失败/服务缺席都返回 null（fail-open：
+     * 信息面缺席时门控照旧只看价量，绝不该因此挡住结算）。
+     */
+    private JsonNode newsPulseQuietly(String symbol, String lastMeeting) {
+        if (newsBriefingService == null) {
+            return null;
+        }
+        try {
+            LocalDate since = lastMeeting == null || lastMeeting.isBlank()
+                    ? null : LocalDate.parse(lastMeeting);
+            return newsBriefingService.newsPulse(symbol, since);
+        } catch (Exception e) {
+            log.info("新闻脉搏组装失败 symbol={}（门控按无信息面处理）：{}", symbol, e.toString());
+            return null;
+        }
+    }
+
+    /**
+     * 盘中授权是否超过 TTL（P3，2026-10-28）：持仓 {@value #AUTH_TTL_DAYS_HOLDING} 天 /
+     * 空仓 {@value #AUTH_TTL_DAYS_FLAT} 天（为什么比 stale 门控短，见常量声明处的注释）。
+     * 没有授权（从未开过会）返回 false——那是 awaiting_authorization 的语义，不归这条管。
+     */
+    private boolean authorizationStale(Strategy strategy, PaperAccount account) {
+        if (!isAgentMode(strategy)) {
+            return false;
+        }
+        PaperAuthorization auth = paperAuthorizationRepository.findLatest(strategy.getId()).orElse(null);
+        if (auth == null || auth.getIssuedAt() == null) {
+            return false;
+        }
+        int ttl = account != null && account.getShares() != null
+                && account.getShares().signum() > 0
+                ? AUTH_TTL_DAYS_HOLDING : AUTH_TTL_DAYS_FLAT;
+        return auth.getIssuedAt().toLocalDate().isBefore(CnTime.today().minusDays(ttl - 1L));
+    }
+
+    /**
+     * 影子会议的留痕（P5，2026-10-28）：decision=skip + skip_reason=shadow_recorded，
+     * 完整的委员会审计（8 角色结论/触发理由/shadow 标记）都在 result 的 snapshot 里。
+     * llm_calls 归零是关键：lastBriefingDate 按"agent_llm_calls>0"找上次真开会，
+     * 影子会议不能喂饱 stale 门控，否则真会议会被无限推迟。tokens 保留——
+     * 影子实验的 token 是真实花掉的成本，账要能查。
+     */
+    private PaperAccount shadowRecordOnly(Strategy strategy, PaperAccount account,
+                                          JsonNode result, String trigger, LocalDate today) {
+        PaperTradeTrace trace = newTrace(strategy, account, ExecutionContract.SETTLEMENT_DAILY,
+                trigger, today, null, result);
+        trace.setDecision(ExecutionContract.DECISION_SKIP);
+        trace.setSkipReason(ExecutionContract.SKIP_SHADOW_RECORDED);
+        trace.setAgentLlmCalls(0);
+        fillAccountAfter(trace, account);
+        paperTraceService.record(trace);
+        log.info("shadow committee recorded (not executed) for strategy id={}", strategy.getId());
+        return account;
+    }
+
+    /**
+     * 委员会活性读视图（P2，2026-10-28）。
+     *
+     * <p>"上次真开会"来自 {@link PaperTraceService#lastBriefingDate}（痕迹表推导）；
+     * "下次保底"= 上次真开会 + stale 天数（持仓 3 / 空仓 10，与 Python 门控同源，
+     * 策略 config 的 gate 段可覆盖 max_days_*——覆盖了就按覆盖值算）。观察员结论
+     * 与门控触发理由取最近一条痕迹的 snapshot（extra.gate）。
+     */
+    private PaperOverviewResponse.CommitteeStatus committeeStatusOf(Strategy strategy, boolean holding) {
+        String lastMeeting = paperTraceService.lastBriefingDate(strategy.getId());
+        LocalDate lastCommitteeAt = lastMeeting == null ? null : LocalDate.parse(lastMeeting);
+        Integer daysSince = lastCommitteeAt == null ? null
+                : (int) java.time.temporal.ChronoUnit.DAYS.between(lastCommitteeAt, CnTime.today());
+
+        int maxDays = staleDaysFor(strategy, holding);
+        LocalDate nextForced = lastCommitteeAt == null ? null : lastCommitteeAt.plusDays(maxDays);
+
+        // 最近一条痕迹的门控判定（skip 日才有 gate 快照；开过会的日子 reasons 里是真实触发）
+        String gateReasons = null;
+        String observerAttention = null;
+        String observerNote = null;
+        PaperTradeTrace latest = paperTraceService.listRecent(strategy.getId(), 1).stream()
+                .findFirst().orElse(null);
+        if (latest != null && latest.getSnapshotJson() != null) {
+            try {
+                JsonNode gate = mapper.readTree(latest.getSnapshotJson())
+                        .path("extra").path("gate");
+                JsonNode reasons = gate.get("reasons");
+                if (reasons != null && reasons.isArray() && !reasons.isEmpty()) {
+                    java.util.List<String> texts = new java.util.ArrayList<>();
+                    reasons.forEach(r -> texts.add(r.asText()));
+                    gateReasons = String.join(", ", texts);
+                }
+                JsonNode observer = gate.get("observer");
+                if (observer != null && observer.isObject()) {
+                    observerAttention = observer.path("attention").asText(null);
+                    String note = observer.path("note").asText(null);
+                    observerNote = note == null || note.isBlank() ? null : note;
+                }
+            } catch (Exception e) {
+                // 快照解析失败只少一块展示，不影响其余字段
+                log.debug("门控快照解析失败 strategyId={}: {}", strategy.getId(), e.getMessage());
+            }
+        }
+        return new PaperOverviewResponse.CommitteeStatus(
+                lastCommitteeAt, daysSince, nextForced, holding,
+                gateReasons, observerAttention, observerNote);
+    }
+
+    /** stale 保底天数：策略 config 的 gate.max_days_* 覆盖 &gt; 全局默认（与 Python _gate_tuning 同源）。 */
+    private int staleDaysFor(Strategy strategy, boolean holding) {
+        int days = holding ? 3 : 10;
+        try {
+            JsonNode gate = parseConfig(strategy.getConfigJson()).path("gate");
+            double overridden = holding
+                    ? gate.path("max_days_holding").asDouble(Double.NaN)
+                    : gate.path("max_days_flat").asDouble(Double.NaN);
+            if (!Double.isNaN(overridden) && overridden >= 1) {
+                days = (int) overridden;
+            }
+        } catch (Exception e) {
+            // config 解析失败走全局默认
+        }
+        return days;
     }
 
     /**

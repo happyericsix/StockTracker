@@ -148,6 +148,21 @@ public final class ExecutionContract {
 
     /** 单 bar 成交量参与率不够吃下一手：流动性约束（模拟"大单推价"的冲击成本）。 */
     public static final String SKIP_VOLUME_CAPPED = "volume_capped";
+    /**
+     * 授权时效（P3，2026-10-28）：盘中授权签发已超过 TTL（持仓 3 天/空仓 5 天）。
+     * 旧边界不再静默管当天的事——盘中按"不动"处理并触发 auth_review 开会重划。
+     *
+     * <p>为什么必须独立：它是"边界过期"，不是 {@link #SKIP_AGENT_INTRADAY_DISABLED}
+     * （委员会主动关掉）也不是 {@link #SKIP_AWAITING_AUTHORIZATION}（从未授权）——
+     * 三者的复盘动作完全不同。由结算侧在盘中授权检查处判定与落痕迹。
+     */
+    public static final String SKIP_AUTH_EXPIRED = "auth_expired";
+    /**
+     * 影子会议（P5，2026-10-28）：shadow 模式下委员会照常辩论、结论照常进痕迹
+     * （snapshot 里有完整审计），但**不执行、不落授权、不计入"真开会"统计**
+     * （agent_llm_calls 记 0，让 stale 门控不被影子会议喂饱）。由结算侧判定与落痕迹。
+     */
+    public static final String SKIP_SHADOW_RECORDED = "shadow_recorded";
 
     // ---------- 归一与版本 ----------
     public static final String UNKNOWN_PREFIX = "unknown_";
@@ -172,6 +187,14 @@ public final class ExecutionContract {
     public static final String TRIGGER_WATCH = "watch";
     /** 公司行动（分红除权调整）：不是一次"决策"，但同样改变账户数字，必须留痕。 */
     public static final String TRIGGER_CORPORATE_ACTION = "corporate_action";
+    /**
+     * 会前注入的召集触发（P3，2026-10-28）：不是结算的触发来源，是**委员会召集门控**
+     * 的注入触发（Python 侧 INJECTABLE_TRIGGERS 的 Java 侧镜像值）。
+     * auth_review = 盘中授权已过 TTL，开会第一议程是重划边界。
+     * 与上面 TRIGGER_* 刻意分开放：混在一起会让"谁触发了结算"的运维口径
+     * 混进"为什么开委员会"的决策口径。
+     */
+    public static final String CONVENE_FLAG_AUTH_REVIEW = "auth_review";
 
     public static final List<String> TRACE_TRIGGERS =
             List.of(TRIGGER_CRON, TRIGGER_EVENT, TRIGGER_MANUAL, TRIGGER_WATCH,
@@ -205,7 +228,7 @@ public final class ExecutionContract {
             SKIP_AWAITING_AUTHORIZATION, SKIP_OUTSIDE_AUTHORIZATION,
             SKIP_AGENT_INTRADAY_DISABLED, SKIP_WATCH_HOLD,
             SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED, SKIP_PORTFOLIO_HALTED,
-            SKIP_VOLUME_CAPPED);
+            SKIP_VOLUME_CAPPED, SKIP_AUTH_EXPIRED, SKIP_SHADOW_RECORDED);
 
     /** 结算类型 → 成交价口径。**唯一的映射处**（Python 侧同名映射）。 */
     public static final Map<String, String> FILL_BASIS_BY_SETTLEMENT = Map.of(

@@ -154,6 +154,10 @@ public class PaperTradeTraceResponse {
                 "组合熔断：全部模拟盘当日的总回撤超过阈值，新的开仓被暂停（平仓不受影响）");
         map.put(ExecutionContract.SKIP_VOLUME_CAPPED,
                 "这根 K 线的成交量太小，按 25% 参与率上限吃不满一手 —— 流动性不足，大单会推价");
+        map.put(ExecutionContract.SKIP_AUTH_EXPIRED,
+                "委员会授权已超过时效（持仓 3 天 / 空仓 5 天），旧边界不再管盘中的事 —— 等当日 15:30 委员会重划");
+        map.put(ExecutionContract.SKIP_SHADOW_RECORDED,
+                "影子会议：委员会照常辩论并留档（完整结论在痕迹快照里），但按实验设计不执行、不改授权");
         return map;
     }
 

@@ -171,6 +171,27 @@ public class StrategyClient {
     public JsonNode agentDecide(String configJson, String symbol, String date, JsonNode position,
                                 String lastDecisionAt, JsonNode newsBriefing, JsonNode experience,
                                 JsonNode portfolio, Long userId, Long strategyId) {
+        return agentDecide(configJson, symbol, date, position, lastDecisionAt, newsBriefing,
+                experience, portfolio, userId, strategyId, null, null, false);
+    }
+
+    /**
+     * 全量+门控扩展版（2026-10-28 P1/P3/P5）。三个新参数都直通 Python 的召集门控：
+     *
+     * @param newsPulse    信息面增量摘要 {window_days, total_events, high_impact_events}
+     *                     （Java 从新闻库按"距上次开会"的窗口数出）——门控据此判
+     *                     news_signal 触发。null 不带键（fail-open）。
+     * @param conveneFlags 会前注入的触发（封闭集，Python 侧校验 ∩ INJECTABLE_TRIGGERS）：
+     *                     当前只有 auth_review（盘中授权过期，开会第一议程是重划边界）。
+     *                     null/空不注入。
+     * @param shadow       影子会议（P5）：true 时跳过门控天天开会，响应带 shadow=true
+     *                     —— 结算侧必须只记录不执行（见 PaperTradingService 的处理）。
+     */
+    public JsonNode agentDecide(String configJson, String symbol, String date, JsonNode position,
+                                String lastDecisionAt, JsonNode newsBriefing, JsonNode experience,
+                                JsonNode portfolio, Long userId, Long strategyId,
+                                JsonNode newsPulse, java.util.List<String> conveneFlags,
+                                boolean shadow) {
         var body = new HashMap<String, Object>();
         body.put("strategy_json", raw(configJson));
         body.put("symbol", symbol);
@@ -185,6 +206,9 @@ public class StrategyClient {
         if (newsBriefing != null && !newsBriefing.isEmpty()) body.put("news_briefing", newsBriefing);
         if (experience != null && !experience.isEmpty()) body.put("experience", experience);
         if (portfolio != null && !portfolio.isEmpty()) body.put("portfolio", portfolio);
+        if (newsPulse != null && !newsPulse.isEmpty()) body.put("news_pulse", newsPulse);
+        if (conveneFlags != null && !conveneFlags.isEmpty()) body.put("convene_flags", conveneFlags);
+        if (shadow) body.put("shadow", true);
         // BYOK（2026-10-25）：委员会是用户级任务里最贵的一档（8 棒串行 ~21k tokens/次），
         // 必须花用户自己的 Key。**永远带这个字段**（userId 缺席也带空数组）——
         // Python 侧以它区分用户级调用，不带就会静默烧部署者的全局 key。

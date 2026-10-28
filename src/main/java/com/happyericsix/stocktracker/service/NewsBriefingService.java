@@ -77,6 +77,39 @@ public class NewsBriefingService {
     }
 
     /**
+     * 信息面增量脉搏（P1，2026-10-28）：距上次委员会开会以来，该标的新增事件的计数摘要。
+     *
+     * <p>给召集门控的 news_signal 触发用——委员会开会时能看新闻证据包，但"要不要开会"
+     * 此前只看价量；这里把信息面从"开会才看"提前到"决定要不要开会就看"。
+     * 只出三个数字（窗口天数/总数/high 条数），组装失败返回 null（fail-open：
+     * 信息面缺席不该挡住门控，Python 侧拿到 null 就当没有这条触发）。
+     *
+     * @param since 上次真开会的日子；null（从没开过）窗口取 7 天
+     */
+    public JsonNode newsPulse(String symbol, java.time.LocalDate since) {
+        try {
+            java.time.LocalDate anchor = since == null
+                    ? java.time.LocalDate.now(CnTime.ZONE).minusDays(7) : since;
+            int windowDays = Math.max(1, (int) java.time.temporal.ChronoUnit.DAYS.between(
+                    anchor, java.time.LocalDate.now(CnTime.ZONE)));
+            // 上限 10 天：超过按 10 天取（更长窗口的"新闻增量"对开会决策已无边际价值）
+            int days = Math.min(windowDays, 10);
+            List<NewsEvent> events = newsService.timelineEvents(symbol, days, 50);
+            long high = events.stream()
+                    .filter(e -> IMPACT_HIGH.equalsIgnoreCase(e.getImpactLevel()))
+                    .count();
+            ObjectNode root = mapper.createObjectNode();
+            root.put("window_days", days);
+            root.put("total_events", events.size());
+            root.put("high_impact_events", (int) high);
+            return root;
+        } catch (Exception e) {
+            log.info("新闻脉搏组装失败 symbol={}（门控按无信息面处理）：{}", symbol, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
      * 个股信息面简报（Python 工具 / 内部端点的形状）：近 days 天事件（含分析字段
      * 与可信度）+ 已撰稿专题。失败容忍：任何一段为空都不挡其余段。
      */

@@ -141,6 +141,17 @@ SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED = "intraday_watch_budget_exceeded"
 # 与单策略的风控不同：这条管的是"整个组合今天亏了多少"，由 Java 结算侧判定与落痕迹。
 SKIP_PORTFOLIO_HALTED = "portfolio_halted"
 SKIP_VOLUME_CAPPED = "volume_capped"            # 单 bar 成交量参与率不足一手（流动性约束）
+# ===== 授权时效（P3，2026-10-28）：授权陈旧度与会议节奏解耦 =====
+# 盘中授权签发已超过 TTL（持仓 3 天/空仓 5 天）：旧的边界不再静默管今天的事，
+# 盘中按"不动"处理并触发 auth_review 开会重划。为什么必须独立：它是"边界过期"，
+# 不是"委员会关掉了盘中"（agent_intraday_disabled）也不是"从没授权过"
+# （awaiting_authorization）——三者的复盘动作完全不同。由 Java 结算侧判定与落痕迹。
+SKIP_AUTH_EXPIRED = "auth_expired"
+# ===== 影子会议（P5，2026-10-28）：天天开会只记录、不执行 =====
+# shadow 模式下委员会照常辩论、结论照常进痕迹（snapshot 里有完整审计），
+# 但**不执行、不落授权、不计入"真开会"统计**（agent_llm_calls 记 0，
+# 让 stale 门控不被影子会议喂饱）。由 Java 结算侧判定与落痕迹。
+SKIP_SHADOW_RECORDED = "shadow_recorded"
 
 SKIP_REASONS = (
     SKIP_MARKET_CLOSED,
@@ -168,6 +179,8 @@ SKIP_REASONS = (
     SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED,
     SKIP_PORTFOLIO_HALTED,
     SKIP_VOLUME_CAPPED,
+    SKIP_AUTH_EXPIRED,
+    SKIP_SHADOW_RECORDED,
 )
 
 UNKNOWN_PREFIX = "unknown_"

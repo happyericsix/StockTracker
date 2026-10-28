@@ -697,6 +697,8 @@ const SKIP_REASON_LABELS = {
   agent_budget_exceeded: '预算用尽',
   data_unavailable: '数据不可用',
   state_mismatch: '信号矛盾',
+  auth_expired: '授权过期待复核',
+  shadow_recorded: '影子会议（只记录）',
 }
 
 /** 分布条配色：同族蓝灰渐进，不与红绿涨跌语义打架（分布不是方向） */

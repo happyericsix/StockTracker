@@ -369,10 +369,15 @@ def quiet_bars(n=60, price=100.0):
 
 
 def test_nothing_happening_means_no_briefing_at_all():
-    """没有触发理由 → **一次调用都不花**，并留下一个真实原因。
+    """没有触发理由 → **一次全委会角色都不花**，并留下一个真实原因。
 
     "没看"与"看过之后决定不动"必须分得开：前者说明今天没有值得开会的理由，
     后者说明委员们看了。混在一起，"agent 多久没真正看过行情"就永远查不出来。
+
+    2026-10-28 P0 之后这条纪律多了半层：无触发日会先过一次**观察员**（1 次轻量
+    调用，FakeLLM 的非 JSON 输出正好落在"解析失败→不召集"分支）——所以这里
+    断言的是"恰好一次观察员调用、零次委员会角色调用"。观察员缺席
+    （AGENT_OBSERVER=0 / 模型不可用）时才是真正的零调用（见 observer 自己的测试）。
     """
     bars = quiet_bars(60)
     llm = FakeLLM()
@@ -380,12 +385,17 @@ def test_nothing_happening_means_no_briefing_at_all():
     result = tc.decide("600519", bars[-1]["date"], bars, completion=llm,
                        last_decision_at=bars[-2]["date"])   # 昨天刚开过会
 
-    assert llm.calls == [], "没有触发理由就不该发起任何调用"
+    assert len(llm.calls) == 1, "无触发日恰好一次观察员扫视，不该有委员会角色调用"
+    assert "策略观察员" in llm.calls[0]["system"]
     assert result["decision"] == ec.DECISION_SKIP
     assert result["skip_reason"] == ec.SKIP_AGENT_NO_NEW_INFORMATION
     assert result["committee"]["llm_calls"] == 0
     assert result["committee"]["gate"]["convened"] is False
     assert result["committee"]["gate"]["reasons"] == []
+    # 观察员的结论进了 gate：安静的日子也要能回答"今天看过了、说了什么"
+    observer = result["committee"]["gate"].get("observer") or {}
+    assert observer.get("attention") == "low"
+    assert observer.get("propose_convene") is False
 
 
 def test_the_skip_for_not_convening_still_leaves_evidence():

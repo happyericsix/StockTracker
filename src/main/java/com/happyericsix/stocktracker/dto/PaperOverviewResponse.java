@@ -43,8 +43,31 @@ public class PaperOverviewResponse {
 
     /** 当前有效的可验证预期（没登记过就是 null —— "没有承诺"与"承诺到期未知"必须分得开）。 */
     public record Expectation(String metric, String metricLabel, BigDecimal threshold,
-                              LocalDate deadline, String status, BigDecimal outcome,
-                              boolean pending, String sentence) {
+                               LocalDate deadline, String status, BigDecimal outcome,
+                               boolean pending, String sentence) {
+    }
+
+    /**
+     * 委员会活性（P2，2026-10-28）：回答"agent 到底还看不看盘"——2026-10-28 生产事故
+     * 的教训：门控的**正常态就是沉默**，沉默的原因必须主动可见，否则每个安静的日子
+     * 都像死机。全部从痕迹表推导（lastCommitteeAt 按"agent_llm_calls&gt;0 的最新一条"，
+     * 不信任何每天刷新的可变字段——那个会被静默喂饱）。
+     */
+    public record CommitteeStatus(
+            /** 上次**真开会**的日子（YYYY-MM-DD）；null = 从没开过。 */
+            LocalDate lastCommitteeAt,
+            /** 距上次真开会的自然日数；null = 从没开过。 */
+            Integer daysSinceRealMeeting,
+            /** stale 保底：再不开会也会被强制召集的日子；null = 从没开过（首次决策随时触发）。 */
+            LocalDate nextForcedMeetingAt,
+            /** 持仓与否决定保底天数（持仓盯得紧）——前端不必知道规则，只看日期。 */
+            boolean holding,
+            /** 最近一次**门控判定**的触发理由（逗号分隔；空 = 没开会也没触发）。 */
+            String lastGateReasons,
+            /** 观察员最近一次扫视的注意力档位（low/med/high）；null = 观察员缺席或未启用。 */
+            String observerAttention,
+            /** 观察员最近一次扫视的一句话备注；null = 同上。 */
+            String observerNote) {
     }
 
     private Long strategyId;
@@ -75,6 +98,8 @@ public class PaperOverviewResponse {
     private PaperSchedule.NextEvaluation nextEvaluation;
     /** 下一次日线结算的人话（含"按工作日近似"的边界）。 */
     private String nextEvaluationNote;
+    /** 委员会活性（agent 模式才有；rule 模式为 null）。 */
+    private CommitteeStatus committeeStatus;
 
     public Long getStrategyId() { return strategyId; }
     public void setStrategyId(Long strategyId) { this.strategyId = strategyId; }
@@ -124,4 +149,6 @@ public class PaperOverviewResponse {
     public void setNextEvaluation(PaperSchedule.NextEvaluation nextEvaluation) { this.nextEvaluation = nextEvaluation; }
     public String getNextEvaluationNote() { return nextEvaluationNote; }
     public void setNextEvaluationNote(String nextEvaluationNote) { this.nextEvaluationNote = nextEvaluationNote; }
+    public CommitteeStatus getCommitteeStatus() { return committeeStatus; }
+    public void setCommitteeStatus(CommitteeStatus committeeStatus) { this.committeeStatus = committeeStatus; }
 }

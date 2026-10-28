@@ -122,6 +122,19 @@ class RiskRule(BaseModel):
     commission_pct: float = 0.1
     slippage_pct: float = 0.1
 
+class GateTuning(BaseModel):
+    """agent 召集门控的按策略覆盖（P4，2026-10-28）。
+
+    全局默认对银行股与小盘股一刀切：3% 对前者是灾难日、对后者接近日常。
+    全部可选、留空即用全局默认；数值下限在 trading_committee._gate_tuning
+    里做防御（非正数回默认）——风控参数不允许被坏配置置零。
+    只影响 agent 模式的**开会节奏**，不影响任何执行语义。
+    """
+    spike_multiple: Optional[float] = None
+    min_move_pct: Optional[float] = None
+    max_days_flat: Optional[float] = None
+    max_days_holding: Optional[float] = None
+
 class StrategyConfig(BaseModel):
     schema_version: Literal["1.0"] = "1.0"
     name: str
@@ -132,6 +145,7 @@ class StrategyConfig(BaseModel):
     entry: RuleGroup
     exit: RuleGroup
     risk: RiskRule = Field(default_factory=RiskRule)
+    gate: Optional[GateTuning] = None
 
 # pydantic 框架消息 → 中文（自定义 ValueError 的消息本来就是中文，不走这张表）
 _FRAMEWORK_MSG_ZH = {

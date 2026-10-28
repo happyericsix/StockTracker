@@ -1299,6 +1299,15 @@ async def agent_decide_endpoint(req: Request):
             # 而不是"上次结算的日子"（后者每天都有，定时器永远不会到期）。
             config=cfg.model_dump() if cfg else None,
             last_decision_at=data.get("last_decision_at"),
+            # 信息面触发（P1，2026-10-28）：Java 从新闻库算好的增量摘要
+            # {window_days, total_events, high_impact_events}，进召集门控的 news_signal。
+            news_pulse=data.get("news_pulse") if isinstance(data.get("news_pulse"), dict) else None,
+            # 会前注入触发（P3，2026-10-28）：调用方判定的 auth_review（授权过期）等，
+            # decide 内部校验 ∩ INJECTABLE_TRIGGERS 后并入 reasons。
+            convene_flags=data.get("convene_flags") if isinstance(data.get("convene_flags"), list) else None,
+            # 影子会议（P5，2026-10-28）：跳过门控天天开会、响应带 shadow=true，
+            # 结算侧只记录不执行 —— 攒"委员会 vs 门控路径"对比样本。
+            shadow=bool(data.get("shadow")),
             # 信息面证据（P3）：Java 从新闻库组装，非空才带（fail-open）
             news_briefing=data.get("news_briefing") if isinstance(data.get("news_briefing"), dict) else None,
             # 经验回流（P4）：这条策略自己的成交成绩单，非空才带（fail-open）

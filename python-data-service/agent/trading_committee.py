@@ -118,12 +118,31 @@ _JUDGE_CORRECTION_PROMPT = (
 #    并记 0 次 LLM 调用 —— "没看"与"看过之后决定不动"必须分得开；
 # ② 门控是**多给**而不是少给：任何一条触发就开会；`last_decision_at` 缺失时也开会
 #    （fail-open：宁可多花钱，也不要因为传参缺失而永远沉默）。
+#
+# <h3>触发理由的三个来源（2026-10-28 扩充）</h3>
+# - 前四条（价量确定性）：rule_signal / volatility_spike / stale / first_decision；
+# - 信息面（P1）：news_signal —— Java 从新闻库算好的增量（高影响条数/窗口），
+#   sector_move —— 板块当日涨跌越过阈值而个股没到自己的阈值（背离才值得看）；
+# - 会前注入（不走 convene_reasons，由 decide 的调用方带给 reasons）：
+#   observer_flag —— 每日观察员（daily_observer）看完盘面提议开会；
+#   auth_review   —— 盘中授权已过期（Java TTL 判定），开会第一件事就是重划边界。
 TRIGGER_RULE_SIGNAL = "rule_signal"
 TRIGGER_VOLATILITY_SPIKE = "volatility_spike"
 TRIGGER_STALE = "stale"
 TRIGGER_FIRST_DECISION = "first_decision"
+TRIGGER_NEWS_SIGNAL = "news_signal"
+TRIGGER_SECTOR_MOVE = "sector_move"
+TRIGGER_OBSERVER = "observer_flag"
+TRIGGER_AUTH_REVIEW = "auth_review"
+#: 调用方可以不经价量判断直接注入的触发（封闭集；decide 会校验后合并）。
+INJECTABLE_TRIGGERS = (TRIGGER_OBSERVER, TRIGGER_AUTH_REVIEW)
+#: shadow 模式（P5，2026-10-28）的触发标记：不是"市场值得开会"，是"为攒样本开会"。
+#: 刻意不进 CONVENE_TRIGGERS —— 它只出现在 shadow 响应的 gate.reasons 里，
+#: 统计"真实触发频率"时必须排除它。
+TRIGGER_SHADOW = "shadow_mode"
 CONVENE_TRIGGERS = (TRIGGER_RULE_SIGNAL, TRIGGER_VOLATILITY_SPIKE, TRIGGER_STALE,
-                    TRIGGER_FIRST_DECISION)
+                    TRIGGER_FIRST_DECISION, TRIGGER_NEWS_SIGNAL, TRIGGER_SECTOR_MOVE,
+                    TRIGGER_OBSERVER, TRIGGER_AUTH_REVIEW)
 
 #: 空仓时最多几天不开会（自然日）。空仓时"错过机会"的代价与"没盯着"的代价都更小。
 MAX_DAYS_FLAT = 10
@@ -136,6 +155,14 @@ SPIKE_MULTIPLE = 2.0
 #: 于是"一片平静之后突然跳一下"这种**最该开会**的日子反而不开会。
 #: 这是写测试时发现的：第一版的倍数判断在平盘序列上永远不触发。
 MIN_MOVE_PCT = 3.0
+#: 板块背离触发（P1）：板块当日涨跌幅绝对值过线即触发——个股没到自己的阈值
+#: 但板块到了，恰是"价量门控选择性失明"的场景（银行板块 -5%、个股只 -2.8%）。
+SECTOR_MOVE_PCT = 2.0
+#: 新闻触发（P1）：距上次开会窗口内 high impact 条数 ≥1 或 总条数 ≥3。
+#: 高影响一条就值得看（公告/监管/业绩类）；低影响要攒够三条才算"发酵"。
+NEWS_HIGH_IMPACT_MIN = 1
+NEWS_EVENT_MIN = 3
+
 #: 每个角色的输出只留这么长的摘要进痕迹（全文太大，哈希负责防篡改）。
 EXCERPT_CHARS = 400
 
@@ -399,9 +426,35 @@ def _days_since(last_decision_at: Any, as_of: str) -> Optional[int]:
         return None
 
 
+def _gate_tuning(config: dict | None) -> dict:
+    """按策略覆盖门控阈值（P4，2026-10-28）：全局常数对银行股与小盘股一刀切，
+    3% 对前者是灾难日、对后者接近日常。策略 config 的可选 `gate` 段可逐项覆盖：
+        {"gate": {"spike_multiple": 1.5, "min_move_pct": 2.0,
+                  "max_days_flat": 7, "max_days_holding": 2}}
+    只收已声明的键且做数值防御（非正数/解析失败一律回全局默认）——门控阈值
+    是风控参数，不允许被一条坏 config 置成 0 或负数。
+    """
+    tuning = {"spike_multiple": SPIKE_MULTIPLE, "min_move_pct": MIN_MOVE_PCT,
+              "max_days_flat": MAX_DAYS_FLAT, "max_days_holding": MAX_DAYS_HOLDING}
+    raw = (config or {}).get("gate")
+    if not isinstance(raw, dict):
+        return tuning
+    for key, minimum in (("spike_multiple", 0.1), ("min_move_pct", 0.1),
+                         ("max_days_flat", 1), ("max_days_holding", 1)):
+        try:
+            value = float(raw.get(key))
+        except (TypeError, ValueError):
+            continue
+        if value >= minimum:
+            tuning[key] = value
+    return tuning
+
+
 def convene_reasons(records: list[dict], as_of: str, *, config: dict | None = None,
                     position: dict | None = None,
-                    last_decision_at: Any = None) -> tuple[list[str], dict]:
+                    last_decision_at: Any = None,
+                    news_pulse: dict | None = None,
+                    sector_pct: Any = None) -> tuple[list[str], dict]:
     """该不该召集委员会？返回 (触发的理由, 供痕迹记录的判定细节)。
 
     **确定性、零 LLM 成本**。任何一条触发就开会；一条都没有就"今天没必要看"。
@@ -409,9 +462,17 @@ def convene_reasons(records: list[dict], as_of: str, *, config: dict | None = No
     注意这里不是"省钱的开关"，而是**把信息密度提上来**：
     日频召集时 8 个角色每天重新读一遍只差一根 bar 的证据，绝大多数结论是 HOLD ——
     那买到的不是信息，是重复劳动。真正值得开会的时刻少而明确。
+
+    `news_pulse`（P1，2026-10-28）：Java 从新闻库算好的增量摘要
+    {window_days, total_events, high_impact_events}，None/空 = 无信息面证据（fail-open）。
+    `sector_pct`（P1）：所属板块当日涨跌幅（%，带符号），None = 板块语境缺席。
+    两者都来自既有数据（委员会证据包的同源取数），门控只是把它从"开会才看"
+    提前到"决定要不要开会就看"。
     """
+    tuning = _gate_tuning(config)
     reasons: list[str] = []
-    detail: dict = {"as_of": str(as_of), "last_decision_at": str(last_decision_at or "")}
+    detail: dict = {"as_of": str(as_of), "last_decision_at": str(last_decision_at or ""),
+                    "tuning": dict(tuning)}
 
     # ① 从没开过会：不能因为"没触发"就一直不开
     if not last_decision_at:
@@ -442,17 +503,42 @@ def convene_reasons(records: list[dict], as_of: str, *, config: dict | None = No
         detail["average_move_pct"] = round(average_move * 100, 2)
         detail["volume_ratio"] = round(volume_ratio, 2)
         # 两条判据取或：① 明显大于近期平均；② 绝对幅度过了下限（覆盖"极静之后突然一跳"）
-        relative = average_move > 0 and today_move >= SPIKE_MULTIPLE * average_move
-        absolute = today_move * 100.0 >= MIN_MOVE_PCT
+        relative = average_move > 0 and today_move >= tuning["spike_multiple"] * average_move
+        absolute = today_move * 100.0 >= tuning["min_move_pct"]
         detail["spike_basis"] = ("relative" if relative and not absolute
                                  else "absolute" if absolute and not relative
                                  else "both" if relative else "none")
-        if relative or absolute or volume_ratio >= SPIKE_MULTIPLE:
+        if relative or absolute or volume_ratio >= tuning["spike_multiple"]:
             reasons.append(TRIGGER_VOLATILITY_SPIKE)
+
+    # ③' 板块背离（P1）：板块当日涨跌幅过线即触发 —— 刻意**不要求个股没触发**：
+    #    门控纪律是"多给不是少给"，重复触发只是 reasons 里多一个词，不构成歧义。
+    if sector_pct is not None:
+        try:
+            sector_value = float(sector_pct)
+        except (TypeError, ValueError):
+            sector_value = None
+        if sector_value is not None:
+            detail["sector_pct"] = round(sector_value, 2)
+            if abs(sector_value) >= SECTOR_MOVE_PCT:
+                reasons.append(TRIGGER_SECTOR_MOVE)
+
+    # ③'' 信息面增量（P1）：高影响事件一条就值得看；低影响攒够三条算"发酵"。
+    #    计数是 Java 做的（新闻库在 Java 侧），门控只消费结论 —— 保持零数据源依赖。
+    if isinstance(news_pulse, dict) and news_pulse:
+        try:
+            high = int(news_pulse.get("high_impact_events") or 0)
+            total = int(news_pulse.get("total_events") or 0)
+        except (TypeError, ValueError):
+            high, total = 0, 0
+        detail["news_pulse"] = {"high_impact_events": high, "total_events": total,
+                                "window_days": news_pulse.get("window_days")}
+        if high >= NEWS_HIGH_IMPACT_MIN or total >= NEWS_EVENT_MIN:
+            reasons.append(TRIGGER_NEWS_SIGNAL)
 
     # ④ 太久没看（有仓位时更短：持仓的风险敞口是真实的）
     holding = bool(isinstance(position, dict) and float(position.get("shares") or 0.0) > 0)
-    limit = MAX_DAYS_HOLDING if holding else MAX_DAYS_FLAT
+    limit = tuning["max_days_holding"] if holding else tuning["max_days_flat"]
     age = _days_since(last_decision_at, as_of)
     detail["days_since_last_decision"] = age
     detail["stale_limit_days"] = limit
@@ -674,6 +760,9 @@ def decide(symbol: str, as_of: str, records: list[dict],
            last_decision_at: Any = None,
            completion: Optional[Callable] = None,
            news_briefing: dict | None = None,
+           news_pulse: dict | None = None,
+           convene_flags: list | None = None,
+           shadow: bool = False,
            experience: dict | None = None,
            portfolio: dict | None = None,
            fundamentals: dict | None = None,
@@ -805,6 +894,9 @@ def decide(symbol: str, as_of: str, records: list[dict],
     if not evidence:
         return {**base, "skip_reason": ec.SKIP_NO_BAR,
                 "committee": _empty_audit(as_of, warnings)}
+    if shadow:
+        # P5：让结算侧一眼认出"这是影子会议的产物"——只记录、不执行、不落授权。
+        base["shadow"] = True
 
     # ==================== 每日 token 预算硬顶（成本止损线） ====================
     # 委员会一轮 ~30k tokens；用户量涨 = 成本线性涨。预算用完就不再开会，
@@ -843,8 +935,49 @@ def decide(symbol: str, as_of: str, records: list[dict],
 
     # ==================== 召集门控（事件驱动） ====================
     # 没有触发理由就不开会：**不花一次调用**，并且把"没看"记成一个真实原因。
+    #
+    # 三层结构（2026-10-28 P0/P1/P3）：
+    #   ① 价量确定性触发（convene_reasons 前四条）+ 信息面触发（news/sector）；
+    #   ② 调用方注入的触发（convene_flags ∩ INJECTABLE_TRIGGERS）：
+    #      observer_flag（每日观察员提议）/ auth_review（授权过期须重划边界）；
+    #   ③ shadow 模式（P5）：跳过门控天天开会，响应带 shadow=true，
+    #      结算侧只记录不执行 —— 用来攒"委员会 vs 门控路径"的对比样本。
     reasons, gate = convene_reasons(records, str(as_of), config=config, position=position,
-                                    last_decision_at=last_decision_at)
+                                    last_decision_at=last_decision_at,
+                                    news_pulse=news_pulse if isinstance(news_pulse, dict) else None,
+                                    sector_pct=(sector_context or {}).get("today_pct")
+                                    if isinstance(sector_context, dict) else None)
+    for flag in (convene_flags or []):
+        if flag in INJECTABLE_TRIGGERS and flag not in reasons:
+            reasons.append(flag)
+    gate["injected"] = [f for f in (convene_flags or []) if f in INJECTABLE_TRIGGERS]
+
+    # ===== 每日观察员（P0，2026-10-28）：门控没触发时，agent 亲眼看一眼 =====
+    # 价量规则看不见缓慢趋势/板块背离/新闻发酵 —— 观察员补这个盲区。
+    # 它只有"提议开会"的权：propose_convene=false 时维持门控结论（skip），
+    # 它的结论（含"安静"）进 gate detail，安静的日子也要能回答"今天看过了"。
+    if not reasons and not shadow:
+        from agent import daily_observer
+        verdict = daily_observer.observe(
+            symbol, str(as_of), records, position, evidence, config=config,
+            completion=completion, news_briefing=news_briefing,
+            days_since_last=gate.get("days_since_last_decision"))
+        gate["observer"] = {k: verdict.get(k) for k in
+                            ("attention", "propose_convene", "thesis_status", "note",
+                             "degraded", "observer_tokens")}
+        if verdict.get("warnings"):
+            warnings.extend(str(w) for w in verdict["warnings"])
+        if verdict.get("propose_convene"):
+            logger.info("观察员提议开会 symbol=%s attention=%s note=%s",
+                        symbol, verdict.get("attention"), verdict.get("note"))
+            reasons.append(TRIGGER_OBSERVER)
+
+    if shadow:
+        # P5：shadow 模式不是"值得开会"，是"为了攒样本而开会"——触发理由单列，
+        # 与真实触发严格区分（统计对比时 shadow 日的真实触发状态仍在 gate 里）。
+        gate["real_reasons"] = list(reasons)
+        gate["shadow_bypass"] = True
+        reasons = [TRIGGER_SHADOW]
     gate["convened"] = bool(reasons)
     gate["reasons"] = list(reasons)
     if not reasons:
@@ -928,8 +1061,14 @@ def attach_meeting_context(evidence: dict, gate: dict, reasons: list[str],
         "reasons": list(reasons),
         "rule_signal": gate.get("rule_signal"),
         "days_since_last_decision": gate.get("days_since_last_decision"),
-        "note": ("这是召集本次会议的触发原因。rule_signal 非空表示规则引擎刚给出了信号——"
-                 "你的结论必须正面回应它：执行、否决都要给理由，不许装作没看见。"),
+        "note": ("这是召集本次会议的触发原因，逐条回应：rule_signal 非空表示规则引擎"
+                 "刚给出了信号——执行、否决都要给理由，不许装作没看见；"
+                 "news_signal/sector_move 表示信息面或板块有值得辩论的增量——"
+                 "结论要说清它对论点的方向性影响；observer_flag 表示观察员认为盘面"
+                 "出现了价量阈值之外的迹象——你要么证实它、要么明确否定它；"
+                 "auth_review 表示盘中授权已过期——重划授权边界是本次会议的"
+                 "第一议程，不是附带产出；shadow_mode 表示这是影子会议"
+                 "（只为留档复盘，不影响真实执行）。"),
     }
     if config:
         evidence["strategy_intent"] = {

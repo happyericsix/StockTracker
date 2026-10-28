@@ -30,6 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
@@ -130,7 +131,7 @@ class AgentDecisionPersistenceTest {
                 + "\"roles\":[{\"role\":\"bull\",\"label\":\"bull-researcher\","
                 + "\"sha256\":\"deadbeef0001\",\"excerpt\":\"均线多头排列\"}]}";
         when(strategyClient.agentDecide(anyString(), eq("600519"), anyString(), isNull(), any(),
-                any(), any(), any(), any(), any()))
+                any(), any(), any(), any(), any(), any(), any(), anyBoolean()))
                 .thenReturn(mapper.readTree(
                         "{\"valid\":true,\"decision\":\"buy\",\"signal\":\"buy\",\"size_fraction\":0.5,"
                                 + "\"price\":10.0,\"matched_conditions\":[],\"fill_basis\":\"close\","
@@ -195,7 +196,7 @@ class AgentDecisionPersistenceTest {
         String today = LocalDate.now().toString();
 
         when(strategyClient.agentDecide(anyString(), eq("600519"), anyString(), isNull(), any(),
-                any(), any(), any(), any(), any()))
+                any(), any(), any(), any(), any(), any(), any(), anyBoolean()))
                 .thenReturn(mapper.readTree(
                         "{\"valid\":true,\"decision\":\"buy\",\"signal\":\"buy\",\"size_fraction\":0.5,"
                                 + "\"price\":10.0,\"matched_conditions\":[],\"fill_basis\":\"close\","
@@ -244,7 +245,7 @@ class AgentDecisionPersistenceTest {
         String today = LocalDate.now().toString();
 
         when(strategyClient.agentDecide(anyString(), eq("600519"), anyString(), isNull(), any(),
-                any(), any(), any(), any(), any()))
+                any(), any(), any(), any(), any(), any(), any(), anyBoolean()))
                 .thenReturn(mapper.readTree(
                         "{\"valid\":true,\"decision\":\"buy\",\"signal\":\"buy\",\"size_fraction\":0.5,"
                                 + "\"price\":10.0,\"matched_conditions\":[],\"fill_basis\":\"close\","
@@ -355,7 +356,7 @@ class AgentDecisionPersistenceTest {
         String today = LocalDate.now().toString();
 
         when(strategyClient.agentDecide(anyString(), eq("600519"), anyString(), isNull(), any(),
-                any(), any(), any(), any(), any()))
+                any(), any(), any(), any(), any(), any(), any(), anyBoolean()))
                 .thenReturn(mapper.readTree(
                         "{\"valid\":true,\"decision\":\"skip\",\"signal\":\"hold\","
                                 + "\"size_fraction\":0.0,\"skip_reason\":\"rule_not_met\","

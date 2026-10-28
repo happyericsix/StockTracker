@@ -103,6 +103,30 @@ const modeBadge = (mode) =>
   mode === 'agent' ? { label: '智囊', tone: 'accent' } : { label: '规则', tone: 'neutral' }
 const modeFullLabel = (mode) => (mode === 'agent' ? '智囊（多角色 AI 委员会决策）' : '规则（按既定条件自动执行）')
 
+/**
+ * 委员会活性一行话（P2）：回答"agent 到底还看不看盘"。三段式——
+ * 上次真开会多久前 · 保底什么时候再开 · 观察员最近一眼看到了什么。
+ * 观察员缺席（未启用/模型不可用）也要说出口：缺席与"看过说安静"是两回事。
+ */
+const committeeLine = (cs) => {
+  const parts = []
+  if (cs.lastCommitteeAt) {
+    parts.push(`上次开会 ${cs.lastCommitteeAt}（${cs.daysSinceRealMeeting ?? '?'} 天前）`)
+    if (cs.nextForcedMeetingAt) parts.push(`保底再开 ${cs.nextForcedMeetingAt}`)
+  } else {
+    parts.push('还没开过会（首次决策随时触发）')
+  }
+  if (cs.observerAttention) {
+    const level = { high: '高', med: '中', low: '低' }[cs.observerAttention] || cs.observerAttention
+    parts.push(cs.observerNote
+      ? `观察员（${level}注意力）：${cs.observerNote}`
+      : `观察员扫视过：安静（${level}注意力）`)
+  } else {
+    parts.push('观察员缺席（未启用或模型不可用）')
+  }
+  return parts.join(' · ')
+}
+
 const togglePaper = async (item) => {
   actionId.value = item.strategyId
   error.value = ''
@@ -463,6 +487,12 @@ onBeforeUnmount(() => {
             <p v-else-if="item.evaluated" class="mt-3 border-t border-dashed border-border pt-2.5 text-[12px] text-ink-3">
               还没有结算记录（痕迹共 {{ item.traceCount }} 条）
             </p>
+            <!-- 委员会活性（P2，2026-10-28）：agent 模式的正常态就是沉默，
+                 沉默的原因必须主动可见——否则每个安静的日子都得靠猜"是不是死了" -->
+            <p
+              v-if="item.decisionMode === 'agent' && item.committeeStatus"
+              class="mt-1.5 border-t border-dashed border-border pt-2 text-[11.5px] leading-relaxed text-ink-3"
+            >委员会：{{ committeeLine(item.committeeStatus) }}</p>
             <p v-if="configUpdatedNote(item)" class="mt-1.5 text-[11.5px] text-warn">{{ configUpdatedNote(item) }}</p>
           </button>
 
