@@ -1921,7 +1921,10 @@ def ths_qr_poll(qrSessionId: str = ""):
         QR_STORE.pop(qrSessionId, None)
         return _ths_error(e.message)
 
-    # 扫到了 —— 会话用完即弃。
+    # 扫到了 —— 会话用完即弃。这里必须 pop：不 pop 的话，Java 侧万一处理失败
+    # （比如曾经的 LazyInitializationException），前端每 4s 的下一次轮询会
+    # 重新确认一遍、重复写绑定、重复报错，直到二维码过期才消停。
+    QR_STORE.pop(qrSessionId, None)
     # 账号掩码（2026-10-15 安全测试 L3）：Java 侧日志只记前 3 后 2，Python 侧对齐
     # —— 完整账号是凭证级敏感信息，不该全文进日志。
     _acc = str(session["account"])

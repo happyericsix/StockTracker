@@ -27,11 +27,13 @@ const qrSessionId = ref('')
 
 let pollTimer = null
 let countdownTimer = null
+let pollFailCount = 0   // 连续失败计数：单次网络抖动不该打断流程，连错才停
 const isBind = computed(() => props.mode === 'bind')
 
 /** 生成二维码并在 canvas 上画出来 */
 const start = async () => {
   stopTimers()
+  pollFailCount = 0
   status.value = 'loading'
   message.value = ''
   try {
@@ -75,6 +77,7 @@ const poll = async () => {
       ? await pollQrForBind(qrSessionId.value)
       : await pollQr(qrSessionId.value)
     const data = res.data
+    pollFailCount = 0
 
     if (data.status === 'pending') {
       status.value = 'waiting'
@@ -98,12 +101,24 @@ const poll = async () => {
       message.value = data.message || '二维码已过期，请点击刷新'
     }
   } catch (e) {
-    // 轮询失败（比如会话被后端清掉）不打断整体流程，等下一轮或让用户刷新
+    // 轮询失败分两类：
+    //   过期/不存在 → 会话已死，停下让用户刷新；
+    //   其它（后端 500、网络抖动）→ 计数兜底。曾经这里对非"过期"错误一律静默，
+    //   后端一持续 500，页面就一直假装"等待扫码"到超时，用户完全看不到出了事
+    //   （2026-10-28 生产事故）。连续 3 次失败才停：单次抖动不值得打断扫码。
     const msg = e.response?.data?.message
     if (msg && msg.includes('过期')) {
       stopTimers()
       status.value = 'expired'
       message.value = msg
+      return
+    }
+    pollFailCount++
+    if (pollFailCount >= 3) {
+      stopTimers()
+      status.value = 'error'
+      message.value = msg || '扫码状态查询失败，请重试'
+      emit('error', message.value)
     }
   }
 }

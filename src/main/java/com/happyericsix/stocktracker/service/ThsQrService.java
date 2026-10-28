@@ -223,7 +223,12 @@ public class ThsQrService {
                 ThsCredentials cred = ThsCredentials.fromJson(
                         AesGcmCipher.decrypt(b.getSessionEncrypted(), aesKey));
                 if (thsAccount.equals(cred.account())) {
-                    return b.getUser();
+                    // b.getUser() 是未初始化的懒代理（ThsBinding.user = LAZY），getId()
+                    // 不触发加载，所以 saveBinding 里没事；但 pollQr 的 issueToken 在
+                    // 事务外调 getUsername()，代理一逃出会话就是 LazyInitializationException
+                    // （2026-10-28 生产事故：老账号扫码登录 100% 失败）。
+                    // 在事务内按 id 现查成完整实体，代理绝不出门。
+                    return userRepository.findById(b.getUser().getId()).orElse(null);
                 }
             } catch (Exception e) {
                 // 解密失败通常是 ths.aes.key 被改过 —— 跳过这条，不要让整个登录流程挂掉
