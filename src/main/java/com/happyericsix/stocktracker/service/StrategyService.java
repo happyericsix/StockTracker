@@ -64,12 +64,15 @@ public class StrategyService {
         if (request.getConfigJson() == null || request.getConfigJson().isBlank()) {
             throw new IllegalArgumentException("configJson 不能为空：策略 DSL（entry/exit）与风控参数是必填的");
         }
-        String createError = validateConfigOrReject(request.getConfigJson());
-        if (createError != null) {
-            throw new IllegalArgumentException("规则校验未通过：" + createError);
+        ConfigValidation validation = validateConfig(request.getConfigJson());
+        if (!validation.valid()) {
+            throw new IllegalArgumentException("规则校验未通过：" + validation.error());
         }
         Strategy strategy = Strategy.builder()
-                .name(request.getName())
+                // 规范名（ACCOUNT-GATE Part A）：名字是配置的输出——校验端点顺带回传
+                // canonical_name，提交的名字一律忽略，"60日线趋势跟随"配 window=2 的
+                // 名实错配在保存那一刻就不可能存在
+                .name(validation.canonicalNameOrDefault(request.getName()))
                 .symbol(request.getSymbol())
                 .configJson(request.getConfigJson())
                 .user(user)
@@ -113,17 +116,33 @@ public class StrategyService {
                     "暂不支持更换标的：账户与历史表现都挂在原标的上，换票请新建一条策略");
         }
         if (request.getName() != null && !request.getName().isBlank()) {
+            // 规范名（ACCOUNT-GATE Part A）：名字不再接受自由文本——统一在下面按
+            // config（新 config 优先，否则现有 config）重生成。这里的赋值只是让
+            // "只提交了名字"的老调用不至于报错，实际值随 canonical 覆盖。
             strategy.setName(request.getName());
         }
         if (request.getConfigJson() != null && !request.getConfigJson().isBlank()) {
-            String error = validateConfigOrReject(request.getConfigJson());
-            if (error != null) {
-                throw new IllegalArgumentException("规则校验未通过：" + error);
+            ConfigValidation validation = validateConfig(request.getConfigJson());
+            if (!validation.valid()) {
+                throw new IllegalArgumentException("规则校验未通过：" + validation.error());
             }
             strategy.setConfigJson(request.getConfigJson());
             // 口径分界（与 decisionModeSince 同一条纪律）：改过规则之后的净值
             // 与之前不可比，报告与页面据此画线。只打规则变更，改名不动它。
             strategy.setConfigUpdatedAt(java.time.LocalDateTime.now());
+            // config 变了名字必须跟着变（revision 审批也走这条路——此前它保留旧名，
+            // 是名实不符的确定性来源之一）
+            strategy.setName(validation.canonicalNameOrDefault(strategy.getName()));
+        } else {
+            // 没改 config 的更新也顺手把名字拉回规范口径（自愈存量漂移）。
+            // fail-open：校验服务不可用时保留原名——名字不新鲜不该挡住别的编辑。
+            ConfigValidation validation = validateConfig(strategy.getConfigJson());
+            if (validation.valid()) {
+                strategy.setName(validation.canonicalNameOrDefault(strategy.getName()));
+            } else {
+                log.info("canonical rename skipped for strategy id={} (validation unavailable)",
+                        strategy.getId());
+            }
         }
 
         strategy = strategyRepository.save(strategy);
@@ -133,22 +152,68 @@ public class StrategyService {
     }
 
     /**
-     * 规则 DSL 校验（编辑保存的守门员）。返回 null = 通过；非空 = 给用户看的错误。
+     * 规则 DSL 校验结果：valid + 错误信息 + **规范名**（ACCOUNT-GATE Part A）。
+     *
+     * <p>规范名由 Python 校验端点按配置确定性生成（canonical_name，跨语言单一真相源），
+     * 四个写入口（创建/编辑/AI 生成/revision 审批）都用它覆写 name。
      * 校验服务不可用时**fail-closed**：宁可不保存，也不把改坏的规则放进
      * 下一次结算 —— 那会在痕迹里炸出一串 unknown，而用户以为已经改好了。
      */
-    private String validateConfigOrReject(String configJson) {
+    public record ConfigValidation(boolean valid, String error, String canonicalName) {
+        public String canonicalNameOrDefault(String fallback) {
+            return canonicalName == null || canonicalName.isBlank() ? fallback : canonicalName;
+        }
+    }
+
+    private ConfigValidation validateConfig(String configJson) {
         try {
             tools.jackson.databind.JsonNode result = strategyClient.validateConfig(configJson);
             if (result != null && result.path("valid").asBoolean(false)) {
-                return null;
+                String canonical = result.path("canonical_name").asText(null);
+                return new ConfigValidation(true, null,
+                        canonical == null || canonical.isBlank() ? null : canonical);
             }
             String error = result == null ? null : result.path("error").asText("");
-            return error == null || error.isBlank() ? "规则结构无法识别" : error;
+            return new ConfigValidation(false,
+                    error == null || error.isBlank() ? "规则结构无法识别" : error, null);
         } catch (Exception e) {
             log.warn("规则校验服务不可用，编辑被拒绝: {}", e.getMessage());
-            return "校验服务暂不可用，请稍后再试";
+            return new ConfigValidation(false, "校验服务暂不可用，请稍后再试", null);
         }
+    }
+
+    /**
+     * 存量策略的一次性规范名回填（ACCOUNT-GATE Part A）：遍历该用户全部策略，
+     * 按各自 config 重生成名字。幂等（名字已规范则不变）；校验失败/服务不可用的
+     * 策略跳过并计数——回填是修复，不是新的失败面。
+     */
+    @Transactional
+    public java.util.Map<String, Object> renameAllToCanonical(String username) {
+        User user = getUser(username);
+        var renamed = new java.util.ArrayList<java.util.Map<String, String>>();
+        int skipped = 0;
+        for (Strategy strategy : strategyRepository.findByUserIdOrderByUpdatedAtDesc(user.getId())) {
+            ConfigValidation validation = validateConfig(strategy.getConfigJson());
+            if (!validation.valid()) {
+                skipped++;
+                log.info("canonical rename skipped for strategy id={} (invalid/unavailable config)",
+                        strategy.getId());
+                continue;
+            }
+            String canonical = validation.canonicalName();
+            String oldName = strategy.getName();
+            if (canonical != null && !canonical.equals(oldName)) {
+                strategy.setName(canonical);
+                strategyRepository.save(strategy);
+                renamed.add(java.util.Map.of(
+                        "id", String.valueOf(strategy.getId()),
+                        "from", oldName == null ? "" : oldName,
+                        "to", canonical));
+            }
+        }
+        log.info("User {} renamed {} strategies to canonical ({} skipped)",
+                username, renamed.size(), skipped);
+        return java.util.Map.of("renamed", renamed, "skipped", skipped);
     }
 
     @Transactional
@@ -601,7 +666,7 @@ public class StrategyService {
         User user = getUser(username);
         JsonNode safeJson = strategyJson != null ? strategyJson : null;
 
-        String name = textOr(safeJson == null ? null : safeJson.get("name"), "策略");
+        String submittedName = textOr(safeJson == null ? null : safeJson.get("name"), "策略");
         String symbol = textOr(safeJson == null ? null : safeJson.get("symbol"), "");
         String configJson = safeJson == null ? "{}" : safeJson.toString();
 
@@ -610,13 +675,15 @@ public class StrategyService {
         if (symbol.isBlank()) {
             throw new IllegalArgumentException("AI 生成的策略缺少标的代码（symbol），无法保存");
         }
-        String agentError = validateConfigOrReject(configJson);
-        if (agentError != null) {
-            throw new IllegalArgumentException("AI 生成的策略未通过规则校验：" + agentError);
+        ConfigValidation validation = validateConfig(configJson);
+        if (!validation.valid()) {
+            throw new IllegalArgumentException("AI 生成的策略未通过规则校验：" + validation.error());
         }
 
         Strategy strategy = Strategy.builder()
-                .name(name)
+                // 规范名（ACCOUNT-GATE Part A）：LLM 起的名字只当兜底，落库前按配置
+                // 重写——Python 侧 finalize/直出路径已重写一次，这里是最后一道闸
+                .name(validation.canonicalNameOrDefault(submittedName))
                 .symbol(symbol)
                 .configJson(configJson)
                 .user(user)

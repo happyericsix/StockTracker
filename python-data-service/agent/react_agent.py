@@ -192,26 +192,19 @@ _FULL_POSITION_REJECT_PROMPT = (
 
 
 def _describe_conditions(conditions):
-    labels = []
-    for cond in conditions or []:
-        ctype = cond.get("type", "")
-        if ctype == "ma_cross":
-            labels.append(f"MA{cond.get('fast')}/{cond.get('slow')} {cond.get('direction')}")
-        elif ctype == "price_cross_ma":
-            # 这是"事件"，中文里说"上穿/下穿"；直接拼 direction 会得到"价格above MA60"
-            labels.append(f"价格{'上穿' if cond.get('direction') == 'above' else '下穿'} "
-                          f"MA{cond.get('window')}")
-        elif ctype in {"price_above_ma", "price_below_ma"}:
-            labels.append(f"价格{'高于' if ctype == 'price_above_ma' else '低于'} "
-                          f"MA{cond.get('window')}")
-        elif ctype == "macd_cross":
-            labels.append(f"MACD {cond.get('direction')}")
-        elif ctype in {"rsi_above", "rsi_below", "price_above", "price_below",
-                       "stop_loss_pct", "take_profit_pct", "trailing_stop_pct"}:
-            labels.append(f"{ctype} {cond.get('value')}")
-        else:
-            labels.append(ctype)
-    return "；".join(labels) if labels else "未配置"
+    # 规范名同源（ACCOUNT-GATE Part A，2026-11-04）：描述逻辑收敛到 strategy_naming
+    # ——那里补齐了 bias_pct / volume_ratio / pe_percentile 三种此前只输出类型名的条件，
+    # 并统一数字格式。此处保留包装：老调用点与测试不换名，两处描述从此不会漂移。
+    from agent.strategy_naming import describe_conditions
+    return describe_conditions(conditions, logic="all")
+
+
+def _with_canonical_name(cfg):
+    """strategy_json 出口的统一包装：dump（exclude_none）后按配置重写 name。"""
+    from agent.strategy_naming import canonical_name
+    payload = cfg.model_dump(exclude_none=True)
+    payload["name"] = canonical_name(payload)
+    return payload
 
 
 def _build_strategy_reply(cfg, backtest, matrix=None):
@@ -1018,7 +1011,9 @@ def _run_loop(user_id, messages, tool_log=None, tool_mode=None, role=None, seen=
                         # exclude_none：条件模型有 6 个字段，不过滤的话每条条件都会带
                         # 一串 "fast": null —— 这份 JSON 会落库、也会给人看，噪音没有价值。
                         # 校验/引擎侧一律有默认值，缺字段不影响。
-                        "strategy_json": cfg.model_dump(exclude_none=True),
+                        # 规范名（ACCOUNT-GATE Part A）：正文直出的草稿同样按配置重写
+                        # name——与 finalize_strategy 出口同一纪律，防止从旁路落库错配名。
+                        "strategy_json": _with_canonical_name(cfg),
                         "backtest": backtest,
                         # 样本外验证结论随结果一起回传（前端/调用方可直接取用，
                         # 不必从汇报文本里再解析一遍）

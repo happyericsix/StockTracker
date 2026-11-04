@@ -167,12 +167,13 @@ const save = async () => {
             <template v-else>
               <div class="grid gap-3 [grid-template-columns:1.4fr_1fr]">
                 <label class="flex flex-col gap-1 text-[12.5px] text-ink-2">
-                  策略名称
+                  策略名称（由参数自动生成，保存后按新规则更新）
                   <input
                     v-model="name"
                     type="text"
-                    maxlength="40"
-                    class="h-[34px] rounded-lg border border-border bg-bg px-2.5 text-[13px] text-ink focus:border-accent focus:outline-none focus:ring-2 focus:ring-[color:var(--ring)]"
+                    maxlength="100"
+                    readonly
+                    class="h-[34px] cursor-not-allowed rounded-lg border border-border bg-surface-2 px-2.5 text-[13px] text-ink-2"
                   >
                 </label>
                 <label class="flex flex-col gap-1 text-[12.5px] text-ink-2">

@@ -1015,7 +1015,10 @@ async def validate_strategy_config_endpoint(req: Request):
         cfg, err = validate_strategy_config(data.get("strategy_json", {}))
         if err:
             return {"valid": False, "error": _friendly_rule_error(err)}
-        return {"valid": True}
+        # 规范名（ACCOUNT-GATE Part A）：校验通过即顺带返回 canonical_name，
+        # Java 四个写入口用它覆写 name——名字是配置的输出，跨语言单一真相源在这里。
+        from agent.strategy_naming import canonical_name
+        return {"valid": True, "canonical_name": canonical_name(cfg.model_dump())}
     except Exception as e:
         logger.error(f"strategy validate-config error: {e}", exc_info=True)
         return {"valid": False, "error": "校验服务异常，请稍后重试"}

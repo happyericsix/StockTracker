@@ -416,7 +416,12 @@ def _tool_finalize_strategy(args):
                       "再带 position_confirmed=true 重新调用 finalize_strategy；"
                       "用户没说仓位时请先询问，或改用已向用户披露的非满仓仓位（如 50%）。"),
         })
-    return tc.ok({"valid": True, "error": None, "strategy_json": cfg.model_dump()})
+    # 规范名（ACCOUNT-GATE Part A）：名字是配置的输出——finalize 出口的 strategy_json
+    # 一律按配置重写 name，LLM 起的宣传语（"60日线趋势跟随"配 window=2）在此覆灭。
+    from agent.strategy_naming import canonical_name
+    payload = cfg.model_dump()
+    payload["name"] = canonical_name(payload)
+    return tc.ok({"valid": True, "error": None, "strategy_json": payload})
 
 
 def _tool_backtest_matrix(args):

@@ -69,6 +69,17 @@ public class StrategyController {
         return Result.success(strategyService.updateStrategy(authentication.getName(), id, request));
     }
 
+    /**
+     * 存量策略一次性规范名回填（ACCOUNT-GATE Part A，2026-11-04）。
+     * 按各自 config 重生成名字（幂等）；返回改名清单（from → to）与跳过数。
+     * 此前名字是 LLM 自由发挥/revision 保留旧名——"60日线趋势跟随"配 window=2 的
+     * 名实不符由此一次性修正，之后的写入路径已不可能再产生漂移。
+     */
+    @PostMapping("/rename-to-canonical")
+    public Result<Map<String, Object>> renameToCanonical(Authentication authentication) {
+        return Result.success(strategyService.renameAllToCanonical(authentication.getName()));
+    }
+
     @DeleteMapping("/{id}")
     public Result<String> deleteStrategy(
             @PathVariable Long id,
