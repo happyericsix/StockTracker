@@ -117,7 +117,7 @@ onMounted(async () => {
         <p class="mt-2 text-center text-[12px] text-ink-3">数据来自 Stock Tracker 模拟盘，仅供交流，不构成投资建议。</p>
       </template>
     </main>
-    <!-- 备案合规：分享页在鉴权壳外，也要展示备案号 -->
-    <BeianFooter />
+    <!-- 备案合规：分享页在鉴权壳外，也要展示备案号。固定视口底，与主站一致 -->
+    <BeianFooter class="fixed inset-x-0 bottom-0 z-10 border-t border-border bg-bg/90 backdrop-blur-sm" />
   </div>
 </template>

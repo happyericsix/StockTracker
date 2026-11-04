@@ -275,11 +275,23 @@ const token = (name, fallback) => {
 }
 
 // 主题令牌 → klinecharts 样式（canvas 不认 CSS 变量名，取计算值）
+// 2026-10-29 补齐此前漏掉的三块（此前只主题化了蜡烛/网格/轴，其余吃库默认——
+// 库默认是面向浅色的西式配色，与 A 股口径冲突且深色下对比差）：
+//   ① indicator：VOL 柱默认涨绿跌红（西式），与主图涨红跌绿正好相反；
+//     MA/BOLL 线是库固定五色，--chart-ma* / --chart-boll 令牌从未喂给画布
+//   ② candle.tooltip / indicator.tooltip：常显 tooltip 文字恒为库灰 #76808F
+//   ③ crosshair / separator / 最新价虚线：同为库默认色
 const chartStylesOf = () => {
   const up = token('--up', '#d92c2c')
   const down = token('--down', '#0e9668')
   const border = token('--border', '#e3e6ec')
+  const ink2 = token('--ink-2', '#575e6e')
   const ink3 = token('--ink-3', '#8b92a5')
+  const crosshairBadge = {
+    color: '#ffffff',
+    borderColor: ink3,
+    backgroundColor: ink2,
+  }
   return {
     candle: {
       bar: {
@@ -290,12 +302,36 @@ const chartStylesOf = () => {
       area: { lineStyle: { color: token('--accent', '#2153d6'), size: 2 } },
       priceMark: {
         high: { color: ink3 }, low: { color: ink3 },
-        last: { upColor: up, downColor: down, noChangeColor: ink3, text: { color: ink3 } },
+        last: {
+          upColor: up, downColor: down, noChangeColor: ink3,
+          // 标签底色由库按涨跌自动填充（红/绿），文字保持白色才压得住底
+          text: { color: '#ffffff' },
+          // 虚线改中性色：跟随涨跌色时涨日红线横穿一片红蜡烛，几乎不可辨
+          line: { color: ink3 },
+        },
       },
+      tooltip: { title: { color: ink2 }, legend: { color: ink2 } },
     },
     grid: { horizontal: { show: true, style: 'dashed', color: border }, vertical: { show: false } },
     xAxis: { tickText: { color: ink3 }, axisLine: { color: border } },
     yAxis: { tickText: { color: ink3 }, axisLine: { color: border } },
+    separator: { color: border },
+    crosshair: {
+      horizontal: { line: { color: ink3 }, text: crosshairBadge },
+      vertical: { line: { color: ink3 }, text: crosshairBadge },
+    },
+    indicator: {
+      // VOL 等柱类指标：对齐 A 股口径（涨红跌绿），与主图蜡烛一致
+      bars: [{ upColor: up, downColor: down, noChangeColor: ink3 }],
+      // 线类指标（MA 取前四、BOLL 取前三）：从设计令牌取色，随主题翻转
+      lines: [
+        token('--chart-ma5', '#d97706'), token('--chart-ma10', '#7c3aed'),
+        token('--chart-ma20', '#0891b2'), token('--chart-ma60', '#64748b'),
+        token('--chart-boll', '#db2777'),
+      ].map((color) => ({ color })),
+      texts: [{ color: ink2 }],
+      tooltip: { title: { color: ink2 }, legend: { color: ink2 } },
+    },
   }
 }
 

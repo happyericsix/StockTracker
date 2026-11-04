@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import { RouterView } from 'vue-router'
 import { CandlestickChart, X } from 'lucide-vue-next'
 import Button from './components/ui/button.vue'
+import { drawerOpen } from './composables/uiState.js'
 
 /**
  * PWA 安装提示：五档降级。
@@ -111,9 +112,12 @@ onMounted(() => {
 <template>
   <RouterView />
 
-  <!-- PWA 安装横幅：浮层卡片（唯一带阴影的层级之一） -->
+  <!-- PWA 安装横幅：浮层卡片（唯一带阴影的层级之一）。
+       抽屉打开时让路（2026-10-29）：横幅固定视口底 z-50，抽屉 z-40 在其下——
+       手机上抽屉底部一行（主题切换/退出登录）正好被横幅盖住，点击全被拦截；
+       抽屉是瞬时导航，关掉后横幅回来，互斥比压层级更稳 -->
   <div
-    v-if="banner"
+    v-if="banner && !drawerOpen"
     class="fixed bottom-[calc(20px+env(safe-area-inset-bottom,0px))] left-1/2 z-50 flex w-[min(420px,calc(100%-32px))] -translate-x-1/2 items-center gap-3 rounded-xl border border-border bg-surface p-3.5"
     style="box-shadow: var(--shadow-pop)"
     role="dialog"

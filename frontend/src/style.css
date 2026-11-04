@@ -13,7 +13,11 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* ---------- 语义 tokens：两主题一套变量 ---------- */
+/* color-scheme（2026-10-29）：① 滚动条/表单控件等浏览器原生部件跟随应用主题；
+   ② Edge/Chrome 的"自动深色/强制暗化"在页面声明了 color-scheme 后会跳过该页——
+   未声明时强制暗化算法会把浅色主题处理成土褐色（桌面 PWA 用户实测"切换变棕色"） */
 :root {
+  color-scheme: light;
   --bg: #f5f6f8;
   --surface: #ffffff;
   --surface-2: #eef0f4;
@@ -56,6 +60,7 @@
 }
 
 .dark {
+  color-scheme: dark;
   --bg: #0e1015;
   --surface: #161a24;
   --surface-2: #1d2230;
@@ -79,6 +84,13 @@
   --down-soft: #11301f;
   --warn: #f0b13e;
   --warn-soft: #3a2c12;
+  /* 图表系列色深色版（2026-10-29）：浅色版明度直接放深底上会发闷
+     （尤其 ma60 石板灰、ma20 青），提亮一档保对比度 */
+  --chart-ma5: #f59e0b;
+  --chart-ma10: #a78bfa;
+  --chart-ma20: #22d3ee;
+  --chart-ma60: #94a3b8;
+  --chart-boll: #f472b6;
   --ring: rgba(125, 162, 255, 0.45);
   --overlay: rgba(4, 6, 10, 0.6);
   --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5);

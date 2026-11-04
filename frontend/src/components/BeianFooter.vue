@@ -16,7 +16,9 @@ const APP_VERSION = __APP_VERSION__
 </script>
 
 <template>
-  <footer class="mx-auto w-full max-w-[1200px] px-4 pb-6 sm:px-6 lg:px-8">
+  <!-- 定位（fixed/absolute）由使用方传入：本组件只管内容与内边距，紧凑上下留白
+       是为了 fixed 底栏形态不占过多视口（2026-10-28） -->
+  <footer class="mx-auto w-full max-w-[1200px] px-4 pb-2 pt-2 sm:px-6 lg:px-8">
     <p class="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[12px] text-ink-3">
       <!-- py-1.5：备案链接也是链接，19px 的纯文字在手机上基本点不中 -->
       <a :href="ICP_BEIAN_URL" target="_blank" rel="noopener noreferrer"

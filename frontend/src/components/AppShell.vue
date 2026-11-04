@@ -20,6 +20,7 @@ import { quoteBus } from '../composables/quoteBus.js'
 import { useMarketStatus } from '../composables/useMarketStatus.js'
 import { sessionBadgeFor } from '../utils/marketStatus.js'
 import { useTheme } from '../composables/useTheme.js'
+import { drawerOpen } from '../composables/uiState.js'
 import { getProfile, completeOnboarding } from '../api/user.js'
 import { getPaperOverview } from '../api/strategy.js'
 import UsageGuide from './UsageGuide.vue'
@@ -91,7 +92,8 @@ const loadPaper = async () => {
 }
 
 // ---------- 移动端抽屉 ----------
-const drawerOpen = ref(false)
+// drawerOpen 用共享 ref（uiState）：App.vue 的安装横幅据此在抽屉打开时让路，
+// 否则横幅（z-50，视口底）会盖住抽屉底部的主题切换/退出登录按钮
 const closeDrawer = () => { drawerOpen.value = false }
 const onNavKeydown = (e) => {
   if (e.key === 'Escape') closeDrawer()
@@ -235,13 +237,16 @@ watch(() => route.path, closeDrawer)
     ></div>
 
     <main class="lg:pl-[232px]">
-      <div class="mx-auto max-w-[1200px] px-4 py-6 sm:px-6 lg:px-8">
+      <!-- pb-16：给固定底栏（BeianFooter）留出净空，最后一屏内容不被压住 -->
+      <div class="mx-auto max-w-[1200px] px-4 pb-16 pt-6 sm:px-6 lg:px-8">
         <RouterView />
       </div>
-
-      <!-- 备案合规：ICP 与公安备案号都挂 footer（公安号审核通过后自动出现） -->
-      <BeianFooter />
     </main>
+
+    <!-- 备案合规：ICP 与公安备案号都挂 footer（公安号审核通过后自动出现）。
+         固定视口底（2026-10-28）：不随内容滚动/页面长短变化；桌面端让开 232px 侧栏，
+         z-10 压在正文之上、侧栏(z-40)/抽屉遮罩(z-30)/弹层(z-50)之下 -->
+    <BeianFooter class="fixed inset-x-0 bottom-0 z-10 border-t border-border bg-bg/90 backdrop-blur-sm lg:left-[232px]" />
 
     <!-- 首次登录的全屏使用说明（线性翻页，翻完才能开始使用） -->
     <UsageGuide :open="showOnboarding" mode="onboarding" @complete="finishOnboarding" />
