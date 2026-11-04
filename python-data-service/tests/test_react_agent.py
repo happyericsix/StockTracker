@@ -114,7 +114,9 @@ def test_tool_call_then_final_strategy():
     out = _run_with_completion(fake)
     assert calls["n"] == 2
     assert isinstance(out["strategy_json"], dict)
-    assert out["strategy_json"]["name"] == "MA cross"
+    # 规范名（ACCOUNT-GATE Part A）：strategy_json 出口的 name 一律按配置重写，
+    # LLM 起的 "MA cross" 不再落库——落库的是参数口径（600519·MA20上穿MA60→…）。
+    assert out["strategy_json"]["name"] == "600519·MA20上穿MA60→止损-8%·仓位50%"
     assert len(out["replies"]) >= 1
 
 
@@ -177,7 +179,9 @@ def test_malformed_tool_arguments_do_not_raise():
 
     out = _run_with_completion(fake, "u1", "做一个20日上穿60日买入", [])
     assert isinstance(out["strategy_json"], dict)
-    assert out["strategy_json"]["name"] == "MA cross"
+    # 规范名（ACCOUNT-GATE Part A）：strategy_json 出口的 name 一律按配置重写，
+    # LLM 起的 "MA cross" 不再落库——落库的是参数口径（600519·MA20上穿MA60→…）。
+    assert out["strategy_json"]["name"] == "600519·MA20上穿MA60→止损-8%·仓位50%"
 
 
 def test_schema_invalid_final_json_is_not_returned():
@@ -359,7 +363,9 @@ def test_finalize_tool_result_is_authoritative():
 
     assert calls["n"] == 2
     assert isinstance(out["strategy_json"], dict)
-    assert out["strategy_json"]["name"] == "MA cross"
+    # 规范名（ACCOUNT-GATE Part A）：strategy_json 出口的 name 一律按配置重写，
+    # LLM 起的 "MA cross" 不再落库——落库的是参数口径（600519·MA20上穿MA60→…）。
+    assert out["strategy_json"]["name"] == "600519·MA20上穿MA60→止损-8%·仓位50%"
     assert out["backtest"]["total_return_pct"] == 1.23
 
 

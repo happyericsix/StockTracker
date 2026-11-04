@@ -1340,6 +1340,9 @@ async def agent_decide_endpoint(req: Request):
             # 会前注入触发（P3，2026-10-28）：调用方判定的 auth_review（授权过期）等，
             # decide 内部校验 ∩ INJECTABLE_TRIGGERS 后并入 reasons。
             convene_flags=data.get("convene_flags") if isinstance(data.get("convene_flags"), list) else None,
+            # 守门员升级（ACCOUNT-GATE 阶段3，2026-11-04）：同签名裁决窗口内反复出现
+            # 的证据包（N 次记录），随 pattern_escalation 议题进委员会证据（fail-open）。
+            pattern_events=data.get("pattern_events") if isinstance(data.get("pattern_events"), dict) else None,
             # 影子会议（P5，2026-10-28）：跳过门控天天开会、响应带 shadow=true，
             # 结算侧只记录不执行 —— 攒"委员会 vs 门控路径"对比样本。
             shadow=bool(data.get("shadow")),

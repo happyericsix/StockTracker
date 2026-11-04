@@ -818,3 +818,32 @@ def test_judge_card_mentions_market_and_valuation():
     assert "market_context" in judge_system and "valuation_context" in judge_system
     assert "仓位判断的前置条件" in judge_system
     assert "低估值分位不是买入理由" in judge_system
+
+
+# ==================== 守门员升级（ACCOUNT-GATE 阶段3，2026-11-04） ====================
+
+def test_pattern_escalation_injection_forces_convene_and_carries_attribution_note():
+    """同签名裁决反复出现 → pattern_escalation 注入：必须开会 + 证据带归因纪律。
+
+    归因纪律是防跑偏的关键（docs/ACCOUNT-GATE.md §B3.2）："止损反复被触发"的
+    正确解读通常是入场质量差，绝不是"放宽止损"——这句话必须出现在证据包里。
+    """
+    bars = make_bars(90)
+    llm = FakeLLM()
+    pattern = {"signature": "buy_signal:price_cross_ma", "count": 3, "window_days": 14,
+               "events": [{"date": "2026-11-02", "action": "veto", "reason": "满仓下跌中",
+                           "executed": False}]}
+    result = tc.decide("600519", AS_OF, bars, completion=llm,
+                       convene_flags=["pattern_escalation"], pattern_events=pattern)
+
+    gate = result["committee"]["gate"]
+    assert "pattern_escalation" in gate["reasons"], "注入触发必须进开会理由"
+    assert gate.get("injected") == ["pattern_escalation"]
+    assert result["committee"]["llm_calls"] > 0, "注入触发必须真的开会（跳过门控）"
+
+    # 每个角色收到的证据里都有 gate_pattern，且带归因纪律与"放宽止损需回测"护栏
+    assert llm.calls, "必须真的问过模型"
+    joined = chr(10).join(c["system"] + c["user"] for c in llm.calls)
+    assert "gate_pattern" in joined or "buy_signal:price_cross_ma" in joined
+    assert "归因" in joined, "归因纪律（入场还是持有的问题）必须进证据"
+    assert "放宽止损" in joined, "放宽止损护栏（须回测对比）必须进证据"

@@ -158,6 +158,16 @@ public class PaperTradeTraceResponse {
                 "委员会授权已超过时效（持仓 3 天 / 空仓 5 天），旧边界不再管盘中的事 —— 等当日 15:30 委员会重划");
         map.put(ExecutionContract.SKIP_SHADOW_RECORDED,
                 "影子会议：委员会照常辩论并留档（完整结论在痕迹快照里），但按实验设计不执行、不改授权");
+        map.put(ExecutionContract.SKIP_STALE_DATA,
+                "数据护栏：最新完结 K 线已落后墙钟过远（疑似停牌/数据源卡住），本轮不拿旧行情做任何决策");
+        map.put(ExecutionContract.SKIP_DATA_GAP,
+                "数据护栏：K 线序列断档/乱序/盘前竞价柱，数据问题不当作\"没有信号\"");
+        map.put(ExecutionContract.SKIP_GATE_VETO,
+                "账户守门员否决了这一单（看过整个账户后给出的判断，理由在痕迹里）—— 买入之亏在入口被拦");
+        map.put(ExecutionContract.SKIP_GATE_HOLD,
+                "账户守门员看过整个账户后决定不动（含只标记给委员会的 flag）—— 这是它的判断，不是没看");
+        map.put(ExecutionContract.SKIP_GATE_BUDGET_EXCEEDED,
+                "账户守门员的当日调用预算用完 —— 预算是成本止损线，不是模型的结论");
         return map;
     }
 

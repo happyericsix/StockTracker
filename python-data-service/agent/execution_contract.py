@@ -154,6 +154,12 @@ SKIP_AUTH_EXPIRED = "auth_expired"
 # 判定在 agent/data_guards.py（单一真相源），由 Java 结算侧落痕迹。
 SKIP_STALE_DATA = "stale_data"
 SKIP_DATA_GAP = "data_gap"
+# ===== 账户守门员三因（ACCOUNT-GATE 阶段1/2，2026-11-04）=====
+# 由 Java 结算侧在裁决落地时判定与落痕迹（Python 侧 account_gate 输出的是动作封闭集，
+# 不产 skip 原因）；在此声明是为了跨语言枚举镜像一致（test_execution_contract_java）。
+SKIP_GATE_VETO = "gate_veto"
+SKIP_GATE_HOLD = "gate_hold"
+SKIP_GATE_BUDGET_EXCEEDED = "gate_budget_exceeded"
 # ===== 影子会议（P5，2026-10-28）：天天开会只记录、不执行 =====
 # shadow 模式下委员会照常辩论、结论照常进痕迹（snapshot 里有完整审计），
 # 但**不执行、不落授权、不计入"真开会"统计**（agent_llm_calls 记 0，
@@ -189,6 +195,9 @@ SKIP_REASONS = (
     SKIP_AUTH_EXPIRED,
     SKIP_STALE_DATA,
     SKIP_DATA_GAP,
+    SKIP_GATE_VETO,
+    SKIP_GATE_HOLD,
+    SKIP_GATE_BUDGET_EXCEEDED,
     SKIP_SHADOW_RECORDED,
 )
 

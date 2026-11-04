@@ -225,6 +225,12 @@ public final class ExecutionContract {
      * 混进"为什么开委员会"的决策口径。
      */
     public static final String CONVENE_FLAG_AUTH_REVIEW = "auth_review";
+    /**
+     * 守门员升级（ACCOUNT-GATE 阶段3，2026-11-04）：同签名裁决在窗口内反复出现
+     * （默认 14 天 ≥3 次）——委员会必须开会复盘"为什么同一件事一再发生"，
+     * 证据包带完整历史记录；并自动触发 revision 提案（待用户审批）。
+     */
+    public static final String CONVENE_FLAG_PATTERN_ESCALATION = "pattern_escalation";
 
     public static final List<String> TRACE_TRIGGERS =
             List.of(TRIGGER_CRON, TRIGGER_EVENT, TRIGGER_MANUAL, TRIGGER_WATCH,

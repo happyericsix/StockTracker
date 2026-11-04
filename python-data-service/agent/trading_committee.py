@@ -125,7 +125,10 @@ _JUDGE_CORRECTION_PROMPT = (
 #   sector_move —— 板块当日涨跌越过阈值而个股没到自己的阈值（背离才值得看）；
 # - 会前注入（不走 convene_reasons，由 decide 的调用方带给 reasons）：
 #   observer_flag —— 每日观察员（daily_observer）看完盘面提议开会；
-#   auth_review   —— 盘中授权已过期（Java TTL 判定），开会第一件事就是重划边界。
+#   auth_review   —— 盘中授权已过期（Java TTL 判定），开会第一件事就是重划边界；
+#   pattern_escalation（ACCOUNT-GATE 阶段3，2026-11-04）—— 守门员同签名裁决在
+#   窗口内反复出现（默认 14 天 ≥3 次）：委员会必须复盘"为什么同一件事一再发生"，
+#   证据包（pattern_events）带 N 次完整记录。
 TRIGGER_RULE_SIGNAL = "rule_signal"
 TRIGGER_VOLATILITY_SPIKE = "volatility_spike"
 TRIGGER_STALE = "stale"
@@ -134,15 +137,16 @@ TRIGGER_NEWS_SIGNAL = "news_signal"
 TRIGGER_SECTOR_MOVE = "sector_move"
 TRIGGER_OBSERVER = "observer_flag"
 TRIGGER_AUTH_REVIEW = "auth_review"
+TRIGGER_PATTERN_ESCALATION = "pattern_escalation"
 #: 调用方可以不经价量判断直接注入的触发（封闭集；decide 会校验后合并）。
-INJECTABLE_TRIGGERS = (TRIGGER_OBSERVER, TRIGGER_AUTH_REVIEW)
+INJECTABLE_TRIGGERS = (TRIGGER_OBSERVER, TRIGGER_AUTH_REVIEW, TRIGGER_PATTERN_ESCALATION)
 #: shadow 模式（P5，2026-10-28）的触发标记：不是"市场值得开会"，是"为攒样本开会"。
 #: 刻意不进 CONVENE_TRIGGERS —— 它只出现在 shadow 响应的 gate.reasons 里，
 #: 统计"真实触发频率"时必须排除它。
 TRIGGER_SHADOW = "shadow_mode"
 CONVENE_TRIGGERS = (TRIGGER_RULE_SIGNAL, TRIGGER_VOLATILITY_SPIKE, TRIGGER_STALE,
                     TRIGGER_FIRST_DECISION, TRIGGER_NEWS_SIGNAL, TRIGGER_SECTOR_MOVE,
-                    TRIGGER_OBSERVER, TRIGGER_AUTH_REVIEW)
+                    TRIGGER_OBSERVER, TRIGGER_AUTH_REVIEW, TRIGGER_PATTERN_ESCALATION)
 
 #: 空仓时最多几天不开会（自然日）。空仓时"错过机会"的代价与"没盯着"的代价都更小。
 MAX_DAYS_FLAT = 10
@@ -770,7 +774,8 @@ def decide(symbol: str, as_of: str, records: list[dict],
            sector_context: dict | None = None,
            valuation_context: dict | None = None,
            skills: list | None = None,
-           lessons: list | None = None) -> dict:
+           lessons: list | None = None,
+           pattern_events: dict | None = None) -> dict:
     """跑一轮委员会并返回**与 `evaluate_bar` 同形状**的决策。
 
     形状相同是刻意的：结算侧只需要换一个调用地址，执行路径一行不改
@@ -814,6 +819,15 @@ def decide(symbol: str, as_of: str, records: list[dict],
     if isinstance(news_briefing, dict) and news_briefing:
         # 条件性注入（二轮）：给信息面补强度注记（events 为空 = 无单事件级信息）
         evidence["news_briefing"] = _annotate_briefing(news_briefing)
+    if isinstance(pattern_events, dict) and pattern_events:
+        # 守门员升级（ACCOUNT-GATE 阶段3）：同签名裁决反复出现的完整历史记录。
+        # 第一议程必须是**归因**（亏损来自入场决策还是持有决策，§B3.2）——
+        # "止损反复被触发"的正确解读通常是入场质量差，绝不是"放宽止损"。
+        evidence["gate_pattern"] = dict(pattern_events)
+        evidence["gate_pattern"]["note"] = (
+            "守门员同类裁决反复出现（见 events 列表）。复盘第一议程是归因："
+            "问题出在入场决策还是持有决策？以'放宽止损'作为亏损解药的结论"
+            "必须附回测对比，否则不采纳。")
     if isinstance(experience, dict) and experience:
         evidence["experience"] = experience
         # 校准提示（2026-10-18，P2）：把定量战绩翻译成**可执行的置信纪律**。
@@ -1067,7 +1081,9 @@ def attach_meeting_context(evidence: dict, gate: dict, reasons: list[str],
                  "结论要说清它对论点的方向性影响；observer_flag 表示观察员认为盘面"
                  "出现了价量阈值之外的迹象——你要么证实它、要么明确否定它；"
                  "auth_review 表示盘中授权已过期——重划授权边界是本次会议的"
-                 "第一议程，不是附带产出；shadow_mode 表示这是影子会议"
+                 "第一议程，不是附带产出；pattern_escalation 表示守门员的同类裁决"
+                 "在近期反复出现（gate_pattern 证据里有完整记录）——归因复盘是本次"
+                 "会议的第一议程，而不是附带产出；shadow_mode 表示这是影子会议"
                  "（只为留档复盘，不影响真实执行）。"),
     }
     if config:

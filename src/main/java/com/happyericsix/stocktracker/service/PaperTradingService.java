@@ -44,6 +44,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -130,6 +131,15 @@ public class PaperTradingService {
      * agent 模式盘中回落到盯盘（intraday_watch）的现行行为，一行不变。
      */
     private final AccountGateService accountGateService;
+    /**
+     * 守门员裁决事件（ACCOUNT-GATE 阶段3）：记忆回路的落库。可空（单测）——
+     * null 时不记录事件（升级计数自然为零，fail-open 不挡裁决）。
+     */
+    private final com.happyericsix.stocktracker.repository.PaperGateEventRepository gateEventRepository;
+    /**
+     * 策略修订提案（ACCOUNT-GATE 阶段3）：升级后的自动提案入口。可空（单测）。
+     */
+    private final StrategyRevisionService strategyRevisionService;
     private final ObjectMapper mapper = new ObjectMapper();
     private final TransactionTemplate transactionTemplate;
 
@@ -167,6 +177,13 @@ public class PaperTradingService {
      */
     private static final int AUTH_TTL_DAYS_HOLDING = 3;
     private static final int AUTH_TTL_DAYS_FLAT = 5;
+    /**
+     * 守门员升级回路（ACCOUNT-GATE 阶段3）：同一签名在窗口内出现 ≥N 次 → 注入
+     * pattern_escalation 强制委员会复盘 + 自动生成 revision 提案（待用户审批）。
+     * 窗口 14 天 / 阈值 3 次（docs/ACCOUNT-GATE.md §B5 的既定参数）。
+     */
+    private static final int GATE_ESCALATE_WINDOW_DAYS = 14;
+    private static final int GATE_ESCALATE_THRESHOLD = 3;
     /** 同一事件类型的冷却窗口：一次急涨往往连着几根 bar 都"在触发"，不冷却会被同一件事叫醒多次。 */
     private static final long WATCH_EVENT_COOLDOWN_MS = 15 * 60 * 1000L;
     /** 事件冷却表：strategyId:eventType → 上次触发时刻。重启丢失无害（最多多问几次模型）。 */
@@ -215,7 +232,9 @@ public class PaperTradingService {
                                com.happyericsix.stocktracker.repository.PaperPositionLotRepository lotRepository,
                                MarketRulesService marketRulesService,
                                StockDataGateway stockDataGateway,
-                               AccountGateService accountGateService) {
+                               AccountGateService accountGateService,
+                               com.happyericsix.stocktracker.repository.PaperGateEventRepository gateEventRepository,
+                               StrategyRevisionService strategyRevisionService) {
         this.strategyRepository = strategyRepository;
         this.paperAccountRepository = paperAccountRepository;
         this.paperTradeRepository = paperTradeRepository;
@@ -239,6 +258,8 @@ public class PaperTradingService {
         this.marketRulesService = marketRulesService;
         this.stockDataGateway = stockDataGateway;
         this.accountGateService = accountGateService;
+        this.gateEventRepository = gateEventRepository;
+        this.strategyRevisionService = strategyRevisionService;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         // REQUIRED（非 REQUIRES_NEW）：无环境事务时自己开一个（与此前行为一致）；
         // 有环境事务时**合并** —— evaluateStrategy 尾部把"成交落库 + 净值快照"包在
@@ -1283,13 +1304,45 @@ public class PaperTradingService {
             JsonNode newsPulse = newsPulseQuietly(strategy.getSymbol(), lastMeeting);
             // 授权过期复核（P3，2026-10-28）：盘中授权超过 TTL → 注入 auth_review，
             // 委员会当天的第一议程就是重划边界（不再是"上次开会怎么说就一直怎么样"）。
-            List<String> conveneFlags = authorizationStale(strategy, account)
-                    ? List.of(ExecutionContract.CONVENE_FLAG_AUTH_REVIEW) : List.of();
-            result = strategyClient.agentDecide(strategy.getConfigJson(), strategy.getSymbol(),
-                    today.toString(), position, lastMeeting,
-                    newsBriefing, experience, portfolio,
-                    strategy.getUser() != null ? strategy.getUser().getId() : null,
-                    strategy.getId(), newsPulse, conveneFlags, shadowCommitteeEnabled);
+            // 守门员升级（ACCOUNT-GATE 阶段3）：同签名裁决窗口内 ≥3 次 → 注入
+            // pattern_escalation，委员会**必须开会**且证据包带 N 次完整记录——
+            // "同一件事反复发生"不再依赖任何人碰巧注意到。
+            JsonNode patternBrief = patternEscalationQuietly(strategy);
+            List<String> conveneFlags = new java.util.ArrayList<>();
+            if (authorizationStale(strategy, account)) {
+                conveneFlags.add(ExecutionContract.CONVENE_FLAG_AUTH_REVIEW);
+            }
+            if (patternBrief != null) {
+                conveneFlags.add(ExecutionContract.CONVENE_FLAG_PATTERN_ESCALATION);
+            }
+            // 分岔说明：14 参重载只在真的有升级证据时走——不是给测试让路，而是
+            // "无升级"是绝对多数路径，保持 13 参签名让既有调用方/桩零变化。
+            result = patternBrief != null
+                    ? strategyClient.agentDecide(strategy.getConfigJson(), strategy.getSymbol(),
+                            today.toString(), position, lastMeeting,
+                            newsBriefing, experience, portfolio,
+                            strategy.getUser() != null ? strategy.getUser().getId() : null,
+                            strategy.getId(), newsPulse, conveneFlags, shadowCommitteeEnabled,
+                            patternBrief)
+                    : strategyClient.agentDecide(strategy.getConfigJson(), strategy.getSymbol(),
+                            today.toString(), position, lastMeeting,
+                            newsBriefing, experience, portfolio,
+                            strategy.getUser() != null ? strategy.getUser().getId() : null,
+                            strategy.getId(), newsPulse, conveneFlags, shadowCommitteeEnabled);
+            // 升级后的自动提案（§B6 闭环）：产出待审批的 revision 提案——绝不自动改
+            // 配置；pending 已存在/预算尽由 generate 内部规则兜住，失败只记日志。
+            if (patternBrief != null && strategyRevisionService != null
+                    && strategy.getUser() != null) {
+                try {
+                    strategyRevisionService.generate(strategy.getUser().getUsername(),
+                            strategy.getId());
+                    log.info("pattern_escalation → revision proposal generated for strategy {}",
+                            strategy.getId());
+                } catch (Exception e) {
+                    log.info("pattern_escalation revision proposal skipped for strategy {}（{}）",
+                            strategy.getId(), e.getMessage());
+                }
+            }
         } else {
             result = strategyClient.evaluateBar(strategy.getConfigJson(), strategy.getSymbol(),
                     today.toString(), position);
@@ -2014,7 +2067,7 @@ public class PaperTradingService {
             }
             default -> {
                 return gateApplyVerdicts(strategy, account, result, authorization, barTime,
-                        call.response());
+                        call.response(), call.signature(), "signal");
             }
         }
     }
@@ -2025,10 +2078,15 @@ public class PaperTradingService {
      *
      * <p>影子模式（上线观察期）：可执行类 verdict 只留痕不执行（skip_reason=
      * shadow_recorded，完整裁决审计在结果快照里）——先攒"守门员说得对不对"的样本。
+     *
+     * <p>记忆回路（阶段3）：每个 verdict 落一行 {@code paper_gate_events}——
+     * 同签名窗口内反复出现即 pattern_escalation（见 {@link #patternEscalationQuietly}）。
+     * 落库失败绝不影响裁决（fail-open：记忆是回路，不是账）。
      */
     private PaperAccount gateApplyVerdicts(Strategy focusStrategy, PaperAccount focusAccount,
                                            JsonNode result, PaperAuthorization authorization,
-                                           String barTime, JsonNode gateResponse) {
+                                           String barTime, JsonNode gateResponse,
+                                           String roundSignature, String wakeSource) {
         JsonNode verdicts = gateResponse.path("verdicts");
         PaperAccount outcome = focusAccount;
         boolean anyApplied = false;
@@ -2056,8 +2114,11 @@ public class PaperTradingService {
             // verdict 专属痕迹结果：沿用触发 bar 的价格/指纹/快照（成交口径一致），
             // matched_conditions 写守门员动作与理由——"为什么动/为什么不动"一眼可读。
             ObjectNode synth = gateSynthResult(result, action, reason, verdict, gateResponse);
+            boolean shadowed = accountGateService.shadow()
+                    && List.of("approve", "downsize", "sell", "partial_sell").contains(action);
             outcome = gateApplyOne(target, targetAccount, targetAuth, synth, verdict, action,
                     barTime, target.getId().equals(focusStrategy.getId()));
+            recordGateEventQuietly(target, roundSignature, action, reason, !shadowed, wakeSource);
             anyApplied = true;
         }
         if (!anyApplied) {
@@ -2067,6 +2128,76 @@ public class PaperTradingService {
                     ExecutionContract.SKIP_GATE_HOLD);
         }
         return outcome;
+    }
+
+    /** 裁决事件落库（fail-open）：记忆回路的一部分，失败只少一段历史，不挡裁决。 */
+    private void recordGateEventQuietly(Strategy strategy, String signature, String action,
+                                        String reason, boolean executed, String wakeSource) {
+        if (gateEventRepository == null || strategy.getUser() == null || signature == null) {
+            return;
+        }
+        try {
+            gateEventRepository.save(com.happyericsix.stocktracker.entity.PaperGateEvent.builder()
+                    .user(strategy.getUser())
+                    .strategy(strategy)
+                    .signature(signature.length() > 190 ? signature.substring(0, 190) : signature)
+                    .action(action)
+                    .reason(reason == null ? "" : (reason.length() > 500 ? reason.substring(0, 500) : reason))
+                    .executed(executed)
+                    .wakeSource(wakeSource)
+                    .build());
+        } catch (Exception e) {
+            log.debug("gate event record failed for strategy {}（不挡裁决）: {}",
+                    strategy.getId(), e.toString());
+        }
+    }
+
+    /**
+     * 升级检查（ACCOUNT-GATE 阶段3）：该用户是否有**同签名**裁决在窗口内 ≥N 次。
+     * 命中即返回证据包（N 次的记录），供委员会 pattern_escalation 议题与自动提案用；
+     * 未命中返回 null（零成本，不注入）。
+     */
+    private JsonNode patternEscalationQuietly(Strategy strategy) {
+        if (gateEventRepository == null || strategy.getUser() == null) {
+            return null;
+        }
+        try {
+            LocalDateTime since = LocalDateTime.now(ZoneId.of("Asia/Shanghai"))
+                    .minusDays(GATE_ESCALATE_WINDOW_DAYS);
+            // 该用户近窗口内全部裁决，按签名分组计数（一次查询，内存分组——量级：≤预算/日×窗口）
+            var events = gateEventRepository.findByUserIdAndCreatedAtAfterOrderByCreatedAtDesc(
+                    strategy.getUser().getId(), since);
+            var bySignature = new java.util.LinkedHashMap<String,
+                    java.util.List<com.happyericsix.stocktracker.entity.PaperGateEvent>>();
+            for (var event : events) {
+                bySignature.computeIfAbsent(event.getSignature(), k -> new java.util.ArrayList<>())
+                        .add(event);
+            }
+            for (var entry : bySignature.entrySet()) {
+                if (entry.getValue().size() < GATE_ESCALATE_THRESHOLD) {
+                    continue;
+                }
+                ObjectNode brief = mapper.createObjectNode();
+                brief.put("signature", entry.getKey());
+                brief.put("count", entry.getValue().size());
+                brief.put("window_days", GATE_ESCALATE_WINDOW_DAYS);
+                ArrayNode rows = brief.putArray("events");
+                entry.getValue().stream()
+                        .sorted(java.util.Comparator.comparing(
+                                e -> e.getCreatedAt() == null ? LocalDateTime.MIN : e.getCreatedAt()))
+                        .forEach(e -> rows.addObject()
+                                .put("date", e.getCreatedAt() == null ? "" : e.getCreatedAt().toString())
+                                .put("strategy", e.getStrategy() == null ? "" : e.getStrategy().getName())
+                                .put("action", e.getAction())
+                                .put("reason", e.getReason() == null ? "" : e.getReason())
+                                .put("executed", Boolean.TRUE.equals(e.getExecuted())));
+                return brief;
+            }
+            return null;
+        } catch (Exception e) {
+            log.debug("pattern escalation check failed（fail-open 不注入）: {}", e.toString());
+            return null;
+        }
     }
 
     private PaperAccount gateApplyOne(Strategy strategy, PaperAccount account,
@@ -2238,7 +2369,7 @@ public class PaperTradingService {
                         "risk-scan:" + java.time.LocalDateTime.now(
                                 java.time.ZoneId.of("Asia/Shanghai"))
                                 .format(java.time.format.DateTimeFormatter.ofPattern("HHmm")),
-                        call.response());
+                        call.response(), call.signature(), "risk-scan");
             } catch (Exception e) {
                 log.warn("account gate scan failed for user {}: {}", userId, e.toString());
             }

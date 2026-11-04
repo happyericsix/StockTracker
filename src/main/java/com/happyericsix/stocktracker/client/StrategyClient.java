@@ -192,6 +192,22 @@ public class StrategyClient {
                                 JsonNode portfolio, Long userId, Long strategyId,
                                 JsonNode newsPulse, java.util.List<String> conveneFlags,
                                 boolean shadow) {
+        // 13 参版：委托 14 参版（patternBrief=null）——实现只有一份，重载只是签名糖。
+        return agentDecide(configJson, symbol, date, position, lastDecisionAt, newsBriefing,
+                experience, portfolio, userId, strategyId, newsPulse, conveneFlags, shadow, null);
+    }
+
+    /**
+     * 守门员升级版（ACCOUNT-GATE 阶段3，2026-11-04）：{@code patternBrief} 是同签名
+     * 裁决在窗口内反复出现的证据包（N 次完整记录），随 pattern_escalation 议题
+     * 进委员会证据——"同一件事一再发生"必须在会上被看见，而不是靠人翻痕迹。
+     * null 等价于不带键（fail-open，与其它证据块同一条纪律）。
+     */
+    public JsonNode agentDecide(String configJson, String symbol, String date, JsonNode position,
+                                String lastDecisionAt, JsonNode newsBriefing, JsonNode experience,
+                                JsonNode portfolio, Long userId, Long strategyId,
+                                JsonNode newsPulse, java.util.List<String> conveneFlags,
+                                boolean shadow, JsonNode patternBrief) {
         var body = new HashMap<String, Object>();
         body.put("strategy_json", raw(configJson));
         body.put("symbol", symbol);
@@ -209,14 +225,14 @@ public class StrategyClient {
         if (newsPulse != null && !newsPulse.isEmpty()) body.put("news_pulse", newsPulse);
         if (conveneFlags != null && !conveneFlags.isEmpty()) body.put("convene_flags", conveneFlags);
         if (shadow) body.put("shadow", true);
+        if (patternBrief != null && !patternBrief.isEmpty()) body.put("pattern_events", patternBrief);
         // BYOK（2026-10-25）：委员会是用户级任务里最贵的一档（8 棒串行 ~21k tokens/次），
         // 必须花用户自己的 Key。**永远带这个字段**（userId 缺席也带空数组）——
         // Python 侧以它区分用户级调用，不带就会静默烧部署者的全局 key。
         body.put("llm_providers", userId != null
                 ? userLlmConfigService.providersFor(userId) : List.of());
         // 委员会是 8 次**串行** LLM 调用（每个角色一次），60s 的通用超时会在半途掐断：
-        // 异常上抛后当天既无痕迹也无净值快照，"为什么今天没结算"只存在于日志。
-        // 这里单独放宽到 240s（8 次 × 每次 15~30s 的量级），其余端点维持 60s。
+        // 异常上抛后当天既无痕迹也无净值快照。240s = 8 次 × 每次 15~30s 的量级。
         return post("/api/v1/agent/decide", body, Duration.ofSeconds(240));
     }
 
