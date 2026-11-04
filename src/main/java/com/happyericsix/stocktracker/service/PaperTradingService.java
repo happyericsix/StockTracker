@@ -124,6 +124,12 @@ public class PaperTradingService {
      * 拿不到昨收就不挡（fail-open），挡单是真实性增强，不是结算的生存线。
      */
     private final StockDataGateway stockDataGateway;
+    /**
+     * 账户守门员（ACCOUNT-GATE 阶段1/2，2026-11-04）：agent 模式盘中的账户级裁决者
+     * （面板组装 + 唤醒检测 + 1 次 LLM）。可空（单测）：null 或 enabled=false 时
+     * agent 模式盘中回落到盯盘（intraday_watch）的现行行为，一行不变。
+     */
+    private final AccountGateService accountGateService;
     private final ObjectMapper mapper = new ObjectMapper();
     private final TransactionTemplate transactionTemplate;
 
@@ -208,7 +214,8 @@ public class PaperTradingService {
                                MessageService messageService,
                                com.happyericsix.stocktracker.repository.PaperPositionLotRepository lotRepository,
                                MarketRulesService marketRulesService,
-                               StockDataGateway stockDataGateway) {
+                               StockDataGateway stockDataGateway,
+                               AccountGateService accountGateService) {
         this.strategyRepository = strategyRepository;
         this.paperAccountRepository = paperAccountRepository;
         this.paperTradeRepository = paperTradeRepository;
@@ -231,6 +238,7 @@ public class PaperTradingService {
         this.lotRepository = lotRepository;
         this.marketRulesService = marketRulesService;
         this.stockDataGateway = stockDataGateway;
+        this.accountGateService = accountGateService;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         // REQUIRED（非 REQUIRES_NEW）：无环境事务时自己开一个（与此前行为一致）；
         // 有环境事务时**合并** —— evaluateStrategy 尾部把"成交落库 + 净值快照"包在
@@ -1656,7 +1664,20 @@ public class PaperTradingService {
                     CnTime.today(), barTime, result, reason);
         }
 
-        // ===== 盘中盯盘 agent（agent 模式盘中的唯一决策者，2026-10-15 收权）=====
+        // ===== 账户守门员（ACCOUNT-GATE 阶段1/2，2026-11-04）：agent 模式盘中的主裁决路径 =====
+        // 信号（含规则信号）降级为**唤醒源**：DSL 不再直接执行，先过看着整个账户的
+        // 守门员（1 次 LLM：全持仓面板 + 大盘语境 + 方向不对称裁决纪律）。
+        // 守门员不参与（冷却/预算/降级/未启用）时持仓留痕等下一次唤醒——不回落规则
+        // 自动执行，与 2026-10-15 收权同一条纪律：agent 盘中的动作只能由 agent 签发。
+        // 例外不变：止损（hardStopSell）走硬通道不等任何模型。
+        if (isAgentMode(strategy) && intradayAuthorized && !hardStopSell
+                && accountGateService != null && accountGateService.enabled()) {
+            return gateOnSignal(strategy, account, result, authorization, barTime, trigger,
+                    pendingSignal);
+        }
+
+        // ===== 盘中盯盘 agent（2026-10-15 收权；守门员启用时的降级底座）=====
+        // 守门员未启用（account-gate.enabled=false 或单测未装配）时走原路径：
         // 事件（含 rule_signal —— 规则引擎的信号降级为事件源）叫起轻量盯盘交易员，
         // 在授权边界内下单。**规则不再有自动执行权**：此前"盯盘不参与就回落规则执行"
         // 的设计，让 10-15 09:32 那笔亏损卖出发生在 LLM 降级、无人过目的情况下——
@@ -1915,6 +1936,314 @@ public class PaperTradingService {
         }
     }
 
+
+    // ==================== 账户守门员（ACCOUNT-GATE 阶段1/2，2026-11-04） ====================
+
+    /**
+     * 信号路径：一条策略的规则信号唤醒守门员，裁决**整个账户**语境下该不该动。
+     *
+     * <p>守门员不参与时（冷却/预算/降级）持仓留痕等下一次——与盯盘路径同一条纪律，
+     * 不回落规则自动执行。裁决与执行分离：本方法组装面板与唤醒源并调用守门员，
+     * verdicts 的落地在 {@link #gateApplyVerdicts}（走与盯盘同一套守卫栈）。
+     */
+    private PaperAccount gateOnSignal(Strategy strategy, PaperAccount account, JsonNode result,
+                                      PaperAuthorization authorization, String barTime,
+                                      String trigger, String pendingSignal) {
+        Long userId = strategy.getUser() == null ? null : strategy.getUser().getId();
+        tools.jackson.databind.node.ObjectNode payload;
+        try {
+            payload = accountGateService.buildAccountPanel(userId);
+        } catch (Exception e) {
+            log.warn("gate panel build failed for user {}（持仓留痕）: {}", userId, e.toString());
+            return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME, trigger,
+                    CnTime.today(), barTime, result, ExecutionContract.SKIP_DATA_UNAVAILABLE);
+        }
+        // 唤醒源：信号事件 + 同一根 bar 上的市场事件（急涨急跌/量能/盘中穿线，纯代码已算好）
+        tools.jackson.databind.node.ArrayNode wake = mapper.createArrayNode();
+        tools.jackson.databind.node.ObjectNode signalWake = wake.addObject();
+        signalWake.put("source", "signal");
+        signalWake.put("strategy_id", strategy.getId());
+        signalWake.put("detail", String.format("策略引擎给出 %s 信号（%s）", pendingSignal,
+                joinMatchedConditions(result.get("matched_conditions"))));
+        JsonNode events = result.get("events");
+        if (events != null && events.isArray()) {
+            for (JsonNode event : events) {
+                tools.jackson.databind.node.ObjectNode row = wake.addObject();
+                row.put("source", "market_event");
+                row.put("detail", event.path("type").asText("") + " "
+                        + event.path("detail").asText(""));
+            }
+        }
+        // 信号明细（守门员裁决的对象）：哪条策略、什么信号、命中了什么、这根 bar 的价
+        tools.jackson.databind.node.ArrayNode signals = payload.putArray("signals");
+        tools.jackson.databind.node.ObjectNode signal = signals.addObject();
+        signal.put("strategy_id", strategy.getId());
+        signal.put("symbol", strategy.getSymbol());
+        signal.put("signal", pendingSignal);
+        signal.set("matched_conditions", result.get("matched_conditions"));
+        if (result.hasNonNull("price")) {
+            signal.put("price", result.get("price").asDouble());
+        }
+        // 今日语境 + 经验回流（fail-open：缺失只是少证据）
+        payload.set("today_context", todayContextNode(strategy));
+        JsonNode experience = strategyExperienceQuietly(strategy);
+        if (experience != null && !experience.isEmpty()) {
+            payload.set("experience", experience);
+        }
+
+        String signature = "signal:" + pendingSignal + ":"
+                + joinMatchedConditions(result.get("matched_conditions"));
+        AccountGateService.GateCall call = accountGateService.decide(userId, payload, wake, signature);
+        switch (call.status()) {
+            case "cooldown" -> {
+                // 同一件事刚问过：不是新信息（与盯盘 no_new_information 同语义）
+                return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                        ExecutionContract.TRIGGER_ACCOUNT_GATE, CnTime.today(), barTime, result,
+                        ExecutionContract.SKIP_AGENT_NO_NEW_INFORMATION);
+            }
+            case "budget_exceeded" -> {
+                return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                        ExecutionContract.TRIGGER_ACCOUNT_GATE, CnTime.today(), barTime, result,
+                        ExecutionContract.SKIP_GATE_BUDGET_EXCEEDED);
+            }
+            case "unavailable" -> {
+                alertLlmDegradedQuietly(strategy, null);
+                return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                        ExecutionContract.TRIGGER_ACCOUNT_GATE, CnTime.today(), barTime, result,
+                        ExecutionContract.SKIP_AGENT_LLM_UNAVAILABLE);
+            }
+            default -> {
+                return gateApplyVerdicts(strategy, account, result, authorization, barTime,
+                        call.response());
+            }
+        }
+    }
+
+    /**
+     * 守门员裁决的落地：verdicts 逐条走**与盯盘同一套守卫栈**（授权方向边界/组合熔断/
+     * 往返守卫/T+1/整手），成交与留痕进既有执行管线（trigger=account_gate）。
+     *
+     * <p>影子模式（上线观察期）：可执行类 verdict 只留痕不执行（skip_reason=
+     * shadow_recorded，完整裁决审计在结果快照里）——先攒"守门员说得对不对"的样本。
+     */
+    private PaperAccount gateApplyVerdicts(Strategy focusStrategy, PaperAccount focusAccount,
+                                           JsonNode result, PaperAuthorization authorization,
+                                           String barTime, JsonNode gateResponse) {
+        JsonNode verdicts = gateResponse.path("verdicts");
+        PaperAccount outcome = focusAccount;
+        boolean anyApplied = false;
+        for (JsonNode verdict : verdicts.isArray() ? verdicts : List.<JsonNode>of()) {
+            long strategyId = verdict.path("strategy_id").asLong();
+            String action = verdict.path("action").asText("hold");
+            String reason = verdict.path("reason").asText("");
+            Strategy target = strategyId == focusStrategy.getId() ? focusStrategy
+                    : strategyRepository.findById(strategyId).orElse(null);
+            if (target == null || target.getUser() == null
+                    || !java.util.Objects.equals(target.getUser().getId(),
+                            focusStrategy.getUser() == null ? null : focusStrategy.getUser().getId())) {
+                log.warn("gate verdict references unknown/foreign strategy id={} — ignored", strategyId);
+                continue;
+            }
+            PaperAccount targetAccount = target.getId().equals(focusStrategy.getId())
+                    ? focusAccount
+                    : paperAccountRepository.findByStrategyId(target.getId()).orElse(null);
+            if (targetAccount == null) {
+                continue;
+            }
+            PaperAuthorization targetAuth = target.getId().equals(focusStrategy.getId())
+                    ? authorization
+                    : paperAuthorizationRepository.findLatest(target.getId()).orElse(null);
+            // verdict 专属痕迹结果：沿用触发 bar 的价格/指纹/快照（成交口径一致），
+            // matched_conditions 写守门员动作与理由——"为什么动/为什么不动"一眼可读。
+            ObjectNode synth = gateSynthResult(result, action, reason, verdict, gateResponse);
+            outcome = gateApplyOne(target, targetAccount, targetAuth, synth, verdict, action,
+                    barTime, target.getId().equals(focusStrategy.getId()));
+            anyApplied = true;
+        }
+        if (!anyApplied) {
+            // 模型没给任何 verdict：看过但没说话，按 hold 留痕（dedupe 一天一行）
+            return traceOnly(focusStrategy, focusAccount, ExecutionContract.SETTLEMENT_REALTIME,
+                    ExecutionContract.TRIGGER_ACCOUNT_GATE, CnTime.today(), barTime, result,
+                    ExecutionContract.SKIP_GATE_HOLD);
+        }
+        return outcome;
+    }
+
+    private PaperAccount gateApplyOne(Strategy strategy, PaperAccount account,
+                                      PaperAuthorization authorization, ObjectNode synth,
+                                      JsonNode verdict, String action, String barTime,
+                                      boolean isFocus) {
+        // 影子模式：可执行类只留痕（裁决审计已随 synth 落进快照）
+        boolean actionable = "approve".equals(action) || "downsize".equals(action)
+                || "sell".equals(action) || "partial_sell".equals(action);
+        if (actionable && accountGateService.shadow()) {
+            return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                    ExecutionContract.TRIGGER_ACCOUNT_GATE, CnTime.today(), barTime, synth,
+                    ExecutionContract.SKIP_SHADOW_RECORDED);
+        }
+        switch (action) {
+            case "veto", "hold", "flag" -> {
+                return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                        ExecutionContract.TRIGGER_ACCOUNT_GATE, CnTime.today(), barTime, synth,
+                        "veto".equals(action) ? ExecutionContract.SKIP_GATE_VETO
+                                : ExecutionContract.SKIP_GATE_HOLD);
+            }
+            default -> {
+                // 方向边界（授权）：越界不执行，留痕给委员会复盘
+                boolean isBuyDirection = "approve".equals(action) || "downsize".equals(action);
+                if (isBuyDirection) {
+                    if (!accountGateService.allowOpen()) {
+                        // 全局"只减不加"开关：开仓决定权留在 15:30 委员会（慢层）
+                        return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                                ExecutionContract.TRIGGER_ACCOUNT_GATE, CnTime.today(), barTime, synth,
+                                ExecutionContract.SKIP_OUTSIDE_AUTHORIZATION);
+                    }
+                    if (authorization != null && !Boolean.TRUE.equals(authorization.getAllowOpen())) {
+                        return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                                ExecutionContract.TRIGGER_ACCOUNT_GATE, CnTime.today(), barTime, synth,
+                                ExecutionContract.SKIP_OUTSIDE_AUTHORIZATION);
+                    }
+                    if (roundtripGuardEnabled && paperTradeRepository
+                            .existsByStrategyIdAndTradeDate(strategy.getId(), CnTime.today())) {
+                        return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                                ExecutionContract.TRIGGER_ACCOUNT_GATE, CnTime.today(), barTime, synth,
+                                ExecutionContract.SKIP_ALREADY_TRADED_TODAY);
+                    }
+                    if (portfolioService != null && strategy.getUser() != null
+                            && portfolioService.haltsNewOpens(strategy.getUser().getId())) {
+                        return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                                ExecutionContract.TRIGGER_ACCOUNT_GATE, CnTime.today(), barTime, synth,
+                                ExecutionContract.SKIP_PORTFOLIO_HALTED);
+                    }
+                } else if (authorization != null
+                        && !Boolean.TRUE.equals(authorization.getAllowClose())) {
+                    return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                            ExecutionContract.TRIGGER_ACCOUNT_GATE, CnTime.today(), barTime, synth,
+                            ExecutionContract.SKIP_OUTSIDE_AUTHORIZATION);
+                }
+                markFingerprintDecisionMode(synth);   // agentSizeFraction 只认 agent 指纹
+                return applyBarResult(strategy, account, synth, CnTime.today(), barTime,
+                        ExecutionContract.SETTLEMENT_REALTIME,
+                        ExecutionContract.TRIGGER_ACCOUNT_GATE, false,
+                        authorization == null ? null : authorization.getMaxPositionPct());
+            }
+        }
+    }
+
+    /** verdict → 执行结果节点：沿用触发 bar 的价格/指纹/快照，matched_conditions 写守门员结论。 */
+    private ObjectNode gateSynthResult(JsonNode baseResult, String action, String reason,
+                                       JsonNode verdict, JsonNode gateResponse) {
+        ObjectNode synth = mapper.createObjectNode();
+        boolean isBuyDirection = "approve".equals(action) || "downsize".equals(action);
+        synth.put("signal", isBuyDirection ? "buy" : "sell");
+        if (baseResult.hasNonNull("price")) {
+            synth.set("price", baseResult.get("price"));
+        }
+        double size = verdict.path("size_fraction").asDouble(0);
+        synth.put("size_fraction", "sell".equals(action) ? 1.0
+                : ("partial_sell".equals(action) ? (size > 0 ? size : 0.5)
+                : ("downsize".equals(action) ? (size > 0 ? size : 0.3) : 1.0)));
+        ArrayNode conditions = synth.putArray("matched_conditions");
+        conditions.add("gate_" + action);
+        if (!reason.isBlank()) {
+            conditions.add(reason);
+        }
+        if (verdict.hasNonNull("thesis_check")) {
+            conditions.add("thesis:" + verdict.get("thesis_check").asText());
+        }
+        if (baseResult.has("fingerprint")) {
+            synth.set("fingerprint", baseResult.get("fingerprint"));
+        }
+        if (baseResult.has("snapshot")) {
+            synth.set("snapshot", baseResult.get("snapshot"));
+        }
+        // 守门员完整裁决审计随痕迹落库（shadow/veto 复盘都靠它）
+        ObjectNode audit = synth.putObject("gate");
+        audit.set("verdict", verdict);
+        if (gateResponse.hasNonNull("summary")) {
+            audit.put("summary", gateResponse.get("summary").asText());
+        }
+        if (gateResponse.hasNonNull("escalate")) {
+            audit.set("escalate", gateResponse.get("escalate"));
+        }
+        return synth;
+    }
+
+    /**
+     * 持仓风险扫描（ACCOUNT-GATE 阶段2）：{@code AccountGateJob} 每 5 分钟调用。
+     * 电平触发——对"实际持仓状态 vs 风险政策"的差值行动（near_stop/drawdown_warning/
+     * concentration/auth_expired），越界才唤醒守门员；无越界零 LLM 成本。
+     */
+    public void runAccountGateScan() {
+        if (accountGateService == null || !accountGateService.enabled()) {
+            return;
+        }
+        var userIds = strategyRepository.findByPaperEnabledTrue().stream()
+                .map(Strategy::getUser)
+                .filter(u -> u != null)
+                .map(u -> u.getId())
+                .distinct()
+                .toList();
+        for (Long userId : userIds) {
+            try {
+                ObjectNode panel = accountGateService.buildAccountPanel(userId);
+                var wakes = accountGateService.detectRiskWakes(panel);
+                if (wakes.isEmpty()) {
+                    continue;   // 没有值得叫醒守门员的事：零成本
+                }
+                boolean anyHolding = panel.path("account").path("positions").iterator().hasNext()
+                        && !panel.path("account").path("total_position_value").asText("0").equals("0");
+                if (!anyHolding) {
+                    continue;   // 空仓账户没有"持仓风险"可扫（授权过期由 15:30 委员会管）
+                }
+                ArrayNode wake = mapper.createArrayNode();
+                for (var w : wakes) {
+                    ObjectNode row = wake.addObject();
+                    row.put("source", String.valueOf(w.get("source")));
+                    row.put("detail", String.valueOf(w.get("detail")));
+                    if (w.get("strategy_id") != null) {
+                        row.put("strategy_id", ((Number) w.get("strategy_id")).longValue());
+                    }
+                }
+                String signature = "risk:" + wakes.stream()
+                        .map(w -> String.valueOf(w.get("source"))).distinct()
+                        .sorted().collect(java.util.stream.Collectors.joining("+"));
+                AccountGateService.GateCall call = accountGateService.decide(userId, panel, wake, signature);
+                if (!call.ok() || call.response() == null) {
+                    continue;   // 冷却/预算/降级：扫描路径不留策略级痕迹（无具体策略可挂）
+                }
+                // 风险唤醒的 verdicts：挂在**第一个被点名的策略**上执行（verdict 本身
+                // 可指向任意策略），无信号——裁决的是"该不该降风险"
+                JsonNode verdicts = call.response().path("verdicts");
+                Strategy anchor = null;
+                for (JsonNode v : verdicts.isArray() ? verdicts : List.<JsonNode>of()) {
+                    anchor = strategyRepository.findById(v.path("strategy_id").asLong()).orElse(null);
+                    if (anchor != null) {
+                        break;
+                    }
+                }
+                if (anchor == null) {
+                    continue;
+                }
+                PaperAccount anchorAccount = paperAccountRepository
+                        .findByStrategyId(anchor.getId()).orElse(null);
+                if (anchorAccount == null) {
+                    continue;
+                }
+                ObjectNode baseResult = mapper.createObjectNode();
+                baseResult.put("bar_time", java.time.LocalDateTime.now(
+                        java.time.ZoneId.of("Asia/Shanghai")).toString());
+                gateApplyVerdicts(anchor, anchorAccount, baseResult,
+                        paperAuthorizationRepository.findLatest(anchor.getId()).orElse(null),
+                        "risk-scan:" + java.time.LocalDateTime.now(
+                                java.time.ZoneId.of("Asia/Shanghai"))
+                                .format(java.time.format.DateTimeFormatter.ofPattern("HHmm")),
+                        call.response());
+            } catch (Exception e) {
+                log.warn("account gate scan failed for user {}: {}", userId, e.toString());
+            }
+        }
+    }
 
     /** 委员会的信息面证据包（P3）：组装失败/为空都返回 null（不带字段，fail-open）。 */
     private JsonNode committeeBriefingQuietly(String symbol) {

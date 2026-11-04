@@ -306,6 +306,29 @@ public class StrategyClient {
     }
 
     /**
+     * **账户守门员**（ACCOUNT-GATE 阶段1，2026-11-04）：账户级裁决（1 次 LLM）。
+     *
+     * <p>与 {@link #intradayWatch} 的分工：盯盘只看单策略切片；守门员看整个账户
+     * （Java 组装好的完整面板随 payload 透传，Python 不再取数，只补 market_context）。
+     * 超时 20s：面板大、verdicts 可能多条，比单策略盯盘略宽。
+     * BYOK 同盯盘：userId 非 null 时用用户自己的 Key。
+     */
+    public JsonNode accountGate(tools.jackson.databind.JsonNode payload, Long userId) {
+        var body = new HashMap<String, Object>();
+        body.put("wake", payload.path("wake"));
+        body.put("account", payload.path("account"));
+        if (payload.hasNonNull("signals")) body.put("signals", payload.get("signals"));
+        if (payload.hasNonNull("today_context")) body.put("today_context", payload.get("today_context"));
+        if (payload.hasNonNull("experience")) body.put("experience", payload.get("experience"));
+        if (payload.hasNonNull("lessons")) body.put("lessons", payload.get("lessons"));
+        if (payload.hasNonNull("market_context")) body.put("market_context", payload.get("market_context"));
+        if (userId != null) body.put("user_id", userId);
+        body.put("llm_providers", userId != null
+                ? userLlmConfigService.providersFor(userId) : List.of());
+        return post("/api/v1/agent/account-gate", body, Duration.ofSeconds(20));
+    }
+
+    /**
      * 周反思（P2，经验回流的定性半环，参考 TradingAgents 的 memory log 循环）：
      * 把本周战绩/成交/委员会过程整体发给 Python 做一次 LLM 反思，产出 ≤3 条结构化教训。
      * 60s 超时（1 次调用）；失败/空教训由调用方按无操作处理（反思是旁路，不影响复盘主链路）。

@@ -66,6 +66,14 @@ public class PortfolioService {
         }
     }
 
+    /**
+     * 熔断阈值（0/负 = 关闭）。守门员（AccountGateService）的 drawdown_warning
+     * "回撤过半"判定与 /paper 面板共用这一口径——阈值只此一处。
+     */
+    public java.math.BigDecimal haltThresholdPct() {
+        return java.math.BigDecimal.valueOf(haltThresholdPct);
+    }
+
     /** 组合总览（Paper 页面板用）。空仓/没开过模拟盘就返回空标记，前端整块隐藏。 */
     public Map<String, Object> portfolio(Long userId) {
         Map<String, Object> out = new LinkedHashMap<>();
@@ -185,7 +193,8 @@ public class PortfolioService {
     }
 
     /** 当前总回撤（%）：正=涨，负=跌。基准 = 各策略最近收盘快照之和。 */
-    private double dayDrawdownPct(Long userId) {
+    /** 当前总净值 vs 最近收盘快照基准的日回撤（%）。守门员面板与熔断共用这一口径。 */
+    public double dayDrawdownPct(Long userId) {
         double current = 0;
         double baseline = 0;
         for (Strategy s : strategiesOf(userId)) {

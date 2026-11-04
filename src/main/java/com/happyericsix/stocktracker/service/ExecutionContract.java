@@ -176,6 +176,17 @@ public final class ExecutionContract {
      */
     public static final String SKIP_STALE_DATA = "stale_data";
     public static final String SKIP_DATA_GAP = "data_gap";
+    /**
+     * 账户守门员三因（ACCOUNT-GATE 阶段1/2，2026-11-04）：守门员是 agent 模式盘中的
+     * 主裁决路径，它的"看过不动/否决/预算尽"必须都能被用户在痕迹里找到。
+     *
+     * <p>{@link #SKIP_GATE_VETO}：守门员否决了信号/提案（看过且给出账户级理由）；
+     * {@link #SKIP_GATE_HOLD}：守门员看过决定不动（含 flag 只标记不下单）；
+     * {@link #SKIP_GATE_BUDGET_EXCEEDED}：当日守门员 LLM 预算用完。
+     */
+    public static final String SKIP_GATE_VETO = "gate_veto";
+    public static final String SKIP_GATE_HOLD = "gate_hold";
+    public static final String SKIP_GATE_BUDGET_EXCEEDED = "gate_budget_exceeded";
 
     // ---------- 归一与版本 ----------
     public static final String UNKNOWN_PREFIX = "unknown_";
@@ -198,6 +209,12 @@ public final class ExecutionContract {
     public static final String TRIGGER_MANUAL = "manual";
     /** 盘中盯盘 agent（量化事件触发的轻量判断，见 `intraday_watch.py`）。 */
     public static final String TRIGGER_WATCH = "watch";
+    /**
+     * 账户守门员（ACCOUNT-GATE 阶段1/2，2026-11-04）：信号事件与持仓风险阈值唤醒的
+     * 账户级裁决（见 {@code account_gate.py} 与 {@code AccountGateService}）。
+     * 取代 watch 成为 agent 模式盘中的主决策触发来源。
+     */
+    public static final String TRIGGER_ACCOUNT_GATE = "account_gate";
     /** 公司行动（分红除权调整）：不是一次"决策"，但同样改变账户数字，必须留痕。 */
     public static final String TRIGGER_CORPORATE_ACTION = "corporate_action";
     /**
@@ -211,7 +228,7 @@ public final class ExecutionContract {
 
     public static final List<String> TRACE_TRIGGERS =
             List.of(TRIGGER_CRON, TRIGGER_EVENT, TRIGGER_MANUAL, TRIGGER_WATCH,
-                    TRIGGER_CORPORATE_ACTION);
+                    TRIGGER_CORPORATE_ACTION, TRIGGER_ACCOUNT_GATE);
 
     /** 请求体里声明结算类型的字段名（Python 侧 `app.py` 读同名键）。 */
     public static final String SETTLEMENT_KIND_FIELD = "settlement_kind";
@@ -242,7 +259,8 @@ public final class ExecutionContract {
             SKIP_AGENT_INTRADAY_DISABLED, SKIP_WATCH_HOLD,
             SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED, SKIP_PORTFOLIO_HALTED,
             SKIP_VOLUME_CAPPED, SKIP_AUTH_EXPIRED, SKIP_SHADOW_RECORDED,
-            SKIP_STALE_DATA, SKIP_DATA_GAP);
+            SKIP_STALE_DATA, SKIP_DATA_GAP,
+            SKIP_GATE_VETO, SKIP_GATE_HOLD, SKIP_GATE_BUDGET_EXCEEDED);
 
     /** 结算类型 → 成交价口径。**唯一的映射处**（Python 侧同名映射）。 */
     public static final Map<String, String> FILL_BASIS_BY_SETTLEMENT = Map.of(

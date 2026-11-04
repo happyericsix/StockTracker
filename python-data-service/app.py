@@ -1463,6 +1463,45 @@ async def intraday_decide_endpoint(req: Request):
                 "reason": f"盯盘端点异常：{type(e).__name__}", "watch_tokens": 0}
 
 
+@app.post("/api/v1/agent/account-gate")
+async def account_gate_endpoint(req: Request):
+    """**账户守门员**（ACCOUNT-GATE 阶段1，2026-11-04）：盘中 agent 模式的唯一裁决者。
+
+    与盯盘（/agent/intraday-decide）的分工：盯盘只看单策略切片；守门员看**整个账户**
+    （Java 组装好的面板：全部持仓/距止损线距离/授权边界/同标的叠加度），
+    对信号与风险阈值唤醒做裁决。1 次 LLM 调用；degraded=true 时结算侧持仓留痕。
+
+    请求体：Java 组装的完整面板
+        {"wake": [...], "account": {...}, "signals": [...], "today_context": {...},
+         "experience": {...}, "lessons": [...], "user_id": 1}
+    market_context 缺席时本端点自己取（TTL 缓存，与委员会/盯盘共用）。
+    """
+    from agent import account_gate
+    try:
+        data = await req.json()
+        payload = data if isinstance(data, dict) else {}
+        if not isinstance(payload.get("account"), dict):
+            return {"valid": False, "error": "account 面板不能为空"}
+        # 大盘语境：与委员会/盯盘共用 TTL 缓存；AGENT_MARKET_CONTEXT=0 时关闭
+        if not isinstance(payload.get("market_context"), dict) \
+                and os.getenv("AGENT_MARKET_CONTEXT", "1").strip().lower() not in ("0", "off", "false"):
+            try:
+                from agent import market_context as _mc
+                payload["market_context"] = await asyncio.to_thread(_mc.get_market_context)
+            except Exception as e:  # noqa: BLE001 —— 大盘语境取不到不该挡守门员
+                logger.info("守门员大盘语境取数失败（不带该块）：%s", type(e).__name__)
+        completion = _llm_callables(data, data.get("user_id"))[0]
+        result = await asyncio.to_thread(account_gate.gate_decide, payload, completion)
+        result["valid"] = True
+        return result
+    except Exception as e:
+        logger.error(f"account gate error: {e}", exc_info=True)
+        # 端点级异常按"没问成"处理：degraded=true，结算侧持仓留痕等下一次唤醒
+        return {"valid": False, "degraded": True, "verdicts": [], "escalate": None,
+                "next_review": None, "summary": f"守门员端点异常：{type(e).__name__}",
+                "warnings": ["endpoint_error"], "gate_tokens": 0}
+
+
 # ==================== 周反思（P2 经验回流闭环，2026-10-12） ====================
 # 设计参考 TradingAgents（Apache-2.0）的 memory log：决策落日志 → 持有期到 → 结算
 # 实际收益并生成一段反思 → 下次决策回读。我们的差异：定量半环（5 日对账的成绩单）

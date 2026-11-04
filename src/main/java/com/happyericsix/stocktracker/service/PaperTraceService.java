@@ -71,7 +71,12 @@ public class PaperTraceService {
             // 数据护栏两因（ACCOUNT-GATE 阶段0）：数据坏了必须显形——stale_data/gap
             // 被判成"不阻塞"会从痕迹里消失，数据源故障就被静默解读成市场平静。
             ExecutionContract.SKIP_STALE_DATA,
-            ExecutionContract.SKIP_DATA_GAP);
+            ExecutionContract.SKIP_DATA_GAP,
+            // 守门员三因（ACCOUNT-GATE 阶段1/2）：守门员是 agent 盘中的主裁决路径，
+            // 它的"否决/看过不动/预算尽"正是用户要找的答案——必须可见。
+            ExecutionContract.SKIP_GATE_VETO,
+            ExecutionContract.SKIP_GATE_HOLD,
+            ExecutionContract.SKIP_GATE_BUDGET_EXCEEDED);
 
     private final PaperTradeTraceRepository repository;
     private final AtomicLong writeFailures = new AtomicLong();

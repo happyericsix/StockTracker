@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  应用日志落盘 + 滚动留存（2026-11-04 公安联网备案·安全评估合规改造）：
+  《网络安全法》第 21 条要求网络日志留存不少于六个月——之前应用日志只进
+  docker json-file（50MB×3 按大小轮转），既不落宿主机也保不满 180 天。
+  这里加一个按天滚动的文件 appender：maxHistory 180 天 + totalSizeCap 兜底，
+  LOG_DIR 未设置时写到 ./logs（本地开发，已被 .gitignore 覆盖），
+  服务器容器由 compose 注入 LOG_DIR=/logs 并挂载到宿主机 ./logs/app。
+  CONSOLE appender 保留：docker logs / 本地终端看日志的习惯不变。
+-->
+<configuration>
+    <property name="LOG_HOME" value="${LOG_DIR:-logs}"/>
+
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+    <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
+
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_HOME}/app.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_HOME}/app.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>100MB</maxFileSize>
+            <maxHistory>180</maxHistory>
+            <totalSizeCap>2GB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %5p --- [%t] %logger{40} : %m%n</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
+    </root>
+</configuration>

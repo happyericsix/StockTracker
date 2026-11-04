@@ -113,9 +113,13 @@ services:
       # （本地冒烟实测踩过：FileNotFoundException class path resource [run/secrets/app.pub]）
       - RSA_PRIVATE_KEY_PATH=file:/run/secrets/app.key
       - RSA_PUBLIC_KEY_PATH=file:/run/secrets/app.pub
+      # 应用日志落盘（2026-11-04 备案合规）：logback 按天滚动留 180 天，写到
+      # 挂载目录（宿主机 ./logs/app），不再只依赖 docker json-file 的 50MB×3
+      - LOG_DIR=/logs
     volumes:
       - ./secrets/app.key:/run/secrets/app.key:ro
       - ./secrets/app.pub:/run/secrets/app.pub:ro
+      - ./logs/app:/logs
     depends_on:
       redis:
         condition: service_healthy
@@ -141,6 +145,10 @@ services:
       # 证书挂载（只读）：acme.sh 装到宿主机 ./secrets/certs/，不进镜像不进 git
       #（secrets/ 已被 .gitignore 覆盖）。目录不存在时 Docker 会建空目录，无害
       - ./secrets/certs:/etc/nginx/certs:ro
+      # 访问日志落盘（2026-11-04 备案合规）：nginx 镜像默认把 access.log 软链到
+      # stdout，挂载宿主机目录后软链被覆盖、日志变成真实文件，配合宿主机
+      # logrotate（/etc/logrotate.d/stock-tracker，daily×180）满足留存≥6个月
+      - ./logs/nginx:/var/log/nginx
     depends_on:
       - app
     restart: unless-stopped

@@ -10,6 +10,8 @@ const ICP_BEIAN = '浙ICP备2026090205号-1'
 const ICP_BEIAN_URL = 'https://beian.miit.gov.cn/'
 const GONGAN_BEIAN = ''   // 公安备案通过后填，如 '浙公网安备 330106020xxxxx号'
 const GONGAN_BEIAN_URL = 'https://beian.mps.gov.cn/'
+// 公安联网备案·安全评估：投诉/举报联系邮箱须全站公示（2026-11-04）
+const CONTACT_EMAIL = '13758588978@163.com'
 // 构建时刻（vite.config.js define 注入）：排查"我跑的哪版 / 服务器哪版"用，
 // 与 main.js 的更新提示条配套——更新生效与否从此不用猜
 const APP_VERSION = __APP_VERSION__
@@ -25,6 +27,8 @@ const APP_VERSION = __APP_VERSION__
          class="inline-flex items-center py-1.5 transition-colors hover:text-ink">{{ ICP_BEIAN }}</a>
       <a v-if="GONGAN_BEIAN" :href="GONGAN_BEIAN_URL" target="_blank" rel="noopener noreferrer"
          class="inline-flex items-center py-1.5 transition-colors hover:text-ink">{{ GONGAN_BEIAN }}</a>
+      <a :href="`mailto:${CONTACT_EMAIL}`"
+         class="inline-flex items-center py-1.5 transition-colors hover:text-ink">举报/联系：{{ CONTACT_EMAIL }}</a>
       <span class="num inline-flex items-center py-1.5">v{{ APP_VERSION }}</span>
     </p>
   </footer>
