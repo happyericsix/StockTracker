@@ -778,11 +778,86 @@ public class NewsService {
         if (cached != null) {
             return cached.isBlank() ? null : readTreeQuietly(cached);
         }
+        List<JsonNode> items = marketSynthesisItems();
+        if (items.isEmpty()) {
+            marketReadCache.put("market", "");
+            return null;
+        }
+        JsonNode response = newsClient.synthesizeMarket(items);
+        return usableMarketReadOrForget(response);
+    }
+
+    /**
+     * 市场综合的流式版（2026-10-28 资讯雷达体验重订）：read 段的安全前缀边生成边
+     * 回调给 {@code onDelta}（前端打字机），返回值与非流式版同形且**权威**。
+     *
+     * <p>失败语义与 ChatService 的流式纪律同源：**一个增量都没吐**就失败
+     * （流式端点不可用的部署组合）→ 退回非流式重来；已经吐过增量后失败 →
+     * 返回 null（前端收起整块）——重试会让用户看到同一段话重复两遍。
+     * 缓存命中时把整段 read 一次发出（瞬时到达，无打字机）。
+     */
+    public JsonNode marketReadStream(java.util.function.Consumer<String> onDelta) {
+        String cached = marketReadCache.getIfPresent("market");
+        if (cached != null) {
+            if (cached.isBlank()) {
+                return null;
+            }
+            JsonNode data = readTreeQuietly(cached);
+            if (data != null) {
+                String read = data.path("read").asText("");
+                if (!read.isBlank()) {
+                    onDelta.accept(read);
+                }
+            }
+            return data;
+        }
+        List<JsonNode> items = marketSynthesisItems();
+        if (items.isEmpty()) {
+            marketReadCache.put("market", "");
+            return null;
+        }
+        java.util.concurrent.atomic.AtomicBoolean anyDelta =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        JsonNode data;
+        try {
+            data = newsClient.synthesizeMarketStream(items, piece -> {
+                anyDelta.set(true);
+                onDelta.accept(piece);
+            });
+        } catch (Exception e) {
+            if (!anyDelta.get()) {
+                log.warn("市场综合流式失败且尚未输出任何增量，退回非流式: {}", e.getMessage());
+                return usableMarketReadOrForget(newsClient.synthesizeMarket(items));
+            }
+            log.warn("市场综合流式中断（已输出增量，不重试）: {}", e.getMessage());
+            return null;
+        }
+        return cacheableMarketData(data);
+    }
+
+    /** 综合结果可用就回写缓存并返回；不可用返回 null（失败不缓存，下次进来重试）。 */
+    private JsonNode usableMarketReadOrForget(JsonNode response) {
+        JsonNode data = NewsClient.isOk(response) ? response.path("data") : null;
+        return cacheableMarketData(data);
+    }
+
+    /** 流式结果本身就是 data 形状（没有 ok/data 信封）：可用即缓存，否则 null。 */
+    private JsonNode cacheableMarketData(JsonNode data) {
+        boolean usable = data != null && data.path("ok").asBoolean(false)
+                && !data.path("read").asText("").isBlank();
+        if (!usable) {
+            return null;
+        }
+        marketReadCache.put("market", data.toString());
+        return data;
+    }
+
+    /** 组装市场综合的输入（近 48h 快讯，已解读优先、标题补位）；空 = 没有可综合的。 */
+    private List<JsonNode> marketSynthesisItems() {
         List<NewsEvent> recent = newsEventRepository.findByPublishedAtGreaterThanEqualOrderByPublishedAtDesc(
                 LocalDateTime.now().minusHours(48), PageRequest.of(0, 60));
         if (recent.isEmpty()) {
-            marketReadCache.put("market", "");
-            return null;
+            return List.of();
         }
         List<NewsEvent> analyzedFirst = new ArrayList<>(recent.stream()
                 .filter(e -> !isBlank(e.getPlainSummary())).toList());
@@ -792,18 +867,7 @@ public class NewsService {
                     .limit(40 - analyzedFirst.size())
                     .forEach(analyzedFirst::add);
         }
-        List<JsonNode> items = analyzedFirst.stream().map(this::toSynthesisItem).toList();
-        JsonNode response = newsClient.synthesizeMarket(items);
-        JsonNode data = NewsClient.isOk(response) ? response.path("data") : null;
-        boolean usable = data != null && data.path("ok").asBoolean(false)
-                && !data.path("read").asText("").isBlank();
-        if (!usable) {
-            // 失败不缓存（下次进来重试），但也别让前端空转
-            return null;
-        }
-        String serialized = data.toString();
-        marketReadCache.put("market", serialized);
-        return data;
+        return analyzedFirst.stream().map(this::toSynthesisItem).toList();
     }
 
     /** 综合输入的紧凑形状：时间/来源级别/来源/标题/摘要（已解读的用转述）。 */

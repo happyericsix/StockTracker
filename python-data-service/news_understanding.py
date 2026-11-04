@@ -706,29 +706,10 @@ def _market_topic(raw: str) -> str:
     return text.strip().rstrip("，,。；;、（( ")[:16]
 
 
-def synthesize_market(items: list[dict]) -> dict:
-    """把一批全市场快讯**按主题关联**起来（资讯雷达顶部的"今日信息面"）。
-
-    与 {@code synthesize_read} 的分工：那个回答"这只票的信息面"（个股页），
-    这个回答"这屏快讯合起来在说什么"——用户明确反馈过新闻之间没有关联，
-    逐条标签回答不了"合起来呢"。失败一律 ok=false（前端隐藏整块）。
-    """
+def _shape_market_result(parsed) -> dict:
+    """把模型输出的 JSON 整形为对外结果（synthesize_market 与流式版共用同一口径）。"""
     result = {"read": "", "themes": [], "conflicts": "", "notice": AI_NOTICE, "ok": False}
-    selected = [item for item in (items or []) if (item.get("title") or "").strip()]
-    if not selected:
-        return result
-    if not llm_service._is_available():
-        logger.info("市场综合跳过：AI 服务未配置")
-        return result
-    try:
-        parsed, text = _chat_json(llm_service._load_prompt("news_market_synthesis"),
-                                  _market_synthesis_input(selected),
-                                  MARKET_SYNTHESIS_MAX_TOKENS)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("市场综合失败: %s", exc)
-        return result
     if not isinstance(parsed, dict):
-        logger.warning("市场综合输出无法解析: %.120s", text)
         return result
     read = str(parsed.get("read") or "").strip()
     if not read:
@@ -753,3 +734,159 @@ def synthesize_market(items: list[dict]) -> dict:
     result["conflicts"] = sanitize(str(parsed.get("conflicts") or "").strip())
     result["ok"] = True
     return result
+
+
+class _ReadStreamExtractor:
+    """从**流式到达**的 JSON 文本里增量提取 read 字段的可见前缀。
+
+    模型输出是 {"read": "...", "themes": ...}，read 排在最前（prompt 规定的）。
+    这里做的是"安全的部分渲染"：只把**不可能再变**的前缀发出去 ——
+      - 还没定位到 "read":" 的开引号 → 一个字都不发；
+      - 遇到转义序列（\\" \\\\ \\n \\uXXXX）→ 等凑齐再解码；
+      - 遇到闭引号 → read 值结束，停止（themes 不是给流式看的）。
+    任何解析意外都只停止增量（done 事件的权威结果兜底），绝不抛出。
+    """
+
+    _KEY = re.compile(r'"read"\s*:\s*"')
+
+    _ESCAPES = {'"': '"', "\\": "\\", "/": "/", "n": "\n",
+                "t": "\t", "r": "\r", "b": "\b", "f": "\f"}
+
+    def __init__(self):
+        self.buf = ""
+        self.value_start = None   # read 值第一个字符在 buf 里的位置；None=未定位
+        self.pos = 0              # 已扫描到 buf 的位置
+        self.decoded: list = []   # 已安全解码的字符
+        self.emitted = 0          # 已通过回调发出的字符数
+        self.closed = False
+
+    def feed(self, delta, emit) -> None:
+        """喂一段增量；把新解锁的安全前缀经 emit(text) 发出去。"""
+        try:
+            self.buf += str(delta or "")
+            if self.closed:
+                return
+            if self.value_start is None:
+                m = self._KEY.search(self.buf)
+                if not m:
+                    return
+                self.value_start = m.end()
+                self.pos = m.end()
+            i = self.pos
+            buf = self.buf
+            n = len(buf)
+            while i < n:
+                ch = buf[i]
+                if ch == '"':
+                    # 未被转义的闭引号：read 值结束（转义引号在下面分支消费）
+                    self.closed = True
+                    self.pos = i + 1
+                    break
+                if ch == "\\":
+                    if i + 1 >= n:
+                        break          # 转义还差一个字符，等下一段增量
+                    nxt = buf[i + 1]
+                    if nxt == "u":
+                        if i + 6 > n:
+                            break      # \\uXXXX 没凑齐
+                        try:
+                            self.decoded.append(chr(int(buf[i + 2:i + 6], 16)))
+                        except ValueError:
+                            self.decoded.append("?")
+                        i += 6
+                    else:
+                        self.decoded.append(self._ESCAPES.get(nxt, nxt))
+                        i += 2
+                    continue
+                self.decoded.append(ch)
+                i += 1
+            self.pos = i
+            if len(self.decoded) > self.emitted:
+                piece = "".join(self.decoded[self.emitted:])
+                self.emitted = len(self.decoded)
+                emit(piece)
+        except Exception:  # noqa: BLE001 —— 增量提取挂了只停止流式展示
+            self.closed = True
+
+
+def synthesize_market(items: list[dict]) -> dict:
+    """把一批全市场快讯**按主题关联**起来（资讯雷达顶部的"今日信息面"）。
+
+    与 {@code synthesize_read} 的分工：那个回答"这只票的信息面"（个股页），
+    这个回答"这屏快讯合起来在说什么"——用户明确反馈过新闻之间没有关联，
+    逐条标签回答不了"合起来呢"。失败一律 ok=false（前端隐藏整块）。
+    """
+    result = {"read": "", "themes": [], "conflicts": "", "notice": AI_NOTICE, "ok": False}
+    selected = [item for item in (items or []) if (item.get("title") or "").strip()]
+    if not selected:
+        return result
+    if not llm_service._is_available():
+        logger.info("市场综合跳过：AI 服务未配置")
+        return result
+    try:
+        parsed, text = _chat_json(llm_service._load_prompt("news_market_synthesis"),
+                                  _market_synthesis_input(selected),
+                                  MARKET_SYNTHESIS_MAX_TOKENS)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("市场综合失败: %s", exc)
+        return result
+    if not isinstance(parsed, dict):
+        logger.warning("市场综合输出无法解析: %.120s", text)
+        return result
+    return _shape_market_result(parsed)
+
+
+def synthesize_market_stream(items: list[dict], on_delta) -> dict:
+    """synthesize_market 的流式版（2026-10-28 资讯雷达体验重订）。
+
+    read 段边生成边把**安全前缀**回调给 on_delta(piece)（打字机效果），
+    最终返回值与 synthesize_market 完全同形（权威，调用方拿它覆盖流式内容）。
+
+    解析纪律与非流式版同源：流式全文解析失败 → 按既有约定**非流式重试一次**
+    （把上一轮输出作为 assistant 消息发回、指出不是合法 JSON —— 模型最易自纠的
+    一类错误）；重试期间不再吐增量（前缀可能被推翻，宁停勿错）。
+    """
+    result = {"read": "", "themes": [], "conflicts": "", "notice": AI_NOTICE, "ok": False}
+    selected = [item for item in (items or []) if (item.get("title") or "").strip()]
+    if not selected:
+        return result
+    if not llm_service._is_available():
+        logger.info("市场综合跳过：AI 服务未配置")
+        return result
+    messages = [{"role": "system", "content": llm_service._load_prompt("news_market_synthesis")},
+                {"role": "user", "content": _market_synthesis_input(selected)}]
+    extractor = _ReadStreamExtractor()
+    raw = ""
+    try:
+        choice = llm_service.chat_completion_stream(
+            messages, temperature=TEMPERATURE,
+            max_tokens=MARKET_SYNTHESIS_MAX_TOKENS,
+            on_delta=lambda piece: extractor.feed(piece, on_delta))
+        raw = str(((choice or {}).get("message") or {}).get("content") or "")
+    except Exception as exc:  # noqa: BLE001
+        # 已吐过增量后断流：半截 read 已到前端，result(ok=false) 会让前端整块收起，
+        # 不做换供应商重试（重试会把同一段话拼两遍 —— 与 chat_completion_stream 同一条纪律）
+        logger.warning("市场综合流式失败: %s", exc)
+        return result
+    parsed = extract_json(raw) if raw else None
+    if parsed is None:
+        logger.info("市场综合流式输出无法解析，退回非流式重试一次")
+        try:
+            parsed, _retry_text = _chat_json_retry(messages, raw)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("市场综合非流式重试失败: %s", exc)
+            return result
+    return _shape_market_result(parsed)
+
+
+def _chat_json_retry(messages: list, last_text: str):
+    """_chat_json 的"带前情"单次重试：把流式那轮的输出原样发回让模型自己纠格式。"""
+    retry = list(messages)
+    if last_text:
+        retry.append({"role": "assistant", "content": last_text[:500]})
+        retry.append({"role": "user",
+                      "content": "上面的输出不是合法 JSON。只输出 JSON，不要任何其他文字。"})
+    choice = llm_service.chat_completion(retry, temperature=TEMPERATURE,
+                                         max_tokens=MARKET_SYNTHESIS_MAX_TOKENS)
+    text = str(((choice or {}).get("message") or {}).get("content") or "")
+    return extract_json(text), text

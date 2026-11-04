@@ -27,25 +27,46 @@ const DAY_OPTIONS = [3, 7, 30, 90]
 const form = reactive({ keyword: '', symbol: '', types: [], days: 7 })
 const mode = ref('market')
 const activeSymbol = ref('')
-const searchOpen = ref(false)
 
 // ---- 热榜（东财个股人气榜，2026-10-16）：瞬态视图，5 分钟粒度足够，不做轮询 ----
+// 2026-10-30 加"展开更多"：默认 20 条，一键展开到 50（Java/Python 两侧的上限）。
+// 上游拉的是全榜 + 5 分钟缓存，展开不产生额外取数成本。
+const HOT_PAGE_SIZE = 20
+const HOT_MAX = 50
 const hotRank = ref([])
 const hotError = ref('')
-const selectHot = async () => {
-  if (mode.value === 'hot') return
-  stopAnalysisPolling()
-  mode.value = 'hot'
-  activeSymbol.value = ''
-  if (hotRank.value.length) return       // 已有数据不重复拉（热榜 5 分钟缓存，回切无需刷新）
+const hotLimit = ref(HOT_PAGE_SIZE)
+const hotLoading = ref(false)
+const fetchHot = async () => {
+  hotLoading.value = true
   hotError.value = ''
   try {
-    const res = await getHotRank(20)
+    const res = await getHotRank(hotLimit.value)
     hotRank.value = Array.isArray(res.data?.items) ? res.data.items : []
     if (!hotRank.value.length) hotError.value = '热榜暂不可用，稍后再试'
   } catch {
     hotError.value = '热榜暂不可用，稍后再试'
+  } finally {
+    hotLoading.value = false
   }
+}
+const selectHot = () => {
+  if (mode.value === 'hot') return
+  stopAnalysisPolling()
+  mode.value = 'hot'
+  activeSymbol.value = ''
+  // 让位时把新闻列表的分页状态收干净：否则"加载更多"按钮会泄漏进热榜视图，
+  // 点了还会以空表单发一次搜索请求（结果无处渲染）—— 2026-10-29 实发
+  hasMore.value = false
+  results.value = []
+  if (hotRank.value.length) return       // 已有数据不重复拉（热榜 5 分钟缓存，回切无需刷新）
+  hotLimit.value = HOT_PAGE_SIZE
+  fetchHot()
+}
+const loadMoreHot = () => {
+  if (hotLoading.value || hotLimit.value >= HOT_MAX) return
+  hotLimit.value = HOT_MAX               // 一次展开到上限：榜单是排名序列，分页没有意义
+  fetchHot()
 }
 
 const CHANNELS = {
@@ -192,15 +213,92 @@ const loadMore = async () => { if (loadingMore.value || !hasMore.value) return; 
 
 const selectMarket = () => { if (mode.value === 'market') return; stopAnalysisPolling(); mode.value = 'market'; activeSymbol.value = ''; load(); loadTopics('') }
 const selectStock = (s) => { if (mode.value === 'stock' && activeSymbol.value === s) return; stopAnalysisPolling(); mode.value = 'stock'; activeSymbol.value = s; load(); loadTopics(s) }
-const toggleSearch = () => { searchOpen.value = !searchOpen.value; if (searchOpen.value) mode.value = 'search'; else if (mode.value === 'search') selectMarket() }
+// 搜索是常驻的独立搜索栏（不再藏在切换行里）：提交即进入搜索态；
+// 切回大盘/个股就是退出搜索，不需要单独的"关闭搜索"动作
+const submitSearch = () => { mode.value = 'search'; load() }
 
 const marketRead = ref(null)
 const marketReadAt = ref('')
-const loadMarketRead = async () => { try { const res = await getMarketRead(); if (res.data?.read) { marketRead.value = res.data; marketReadAt.value = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) } else marketRead.value = null } catch { marketRead.value = null } }
+// 今日信息面的三段式呈现（2026-10-28 体验重订）：
+//   localStorage 缓存秒显（SWR）→ 骨架占位（第一次/缓存空）→ SSE 流式逐段流入。
+// 修的是"每次进来都要等 LLM 生成，然后整块弹出把页面顶下去"的突兀感。
+const marketReadSource = ref('')     // 'cache' | 'live'：缓存内容标注来源，时间戳旁边明示
+const marketStreaming = ref('')      // 正在流入的 read 前缀（只有还没有可显内容时才用）
+const marketPending = ref(false)     // 流未收线（决定骨架是否占位）
+let marketEs = null
+const MARKET_CACHE_KEY = 'news.marketRead.v1'
+
+const loadCachedMarketRead = () => {
+  try {
+    const cached = JSON.parse(localStorage.getItem(MARKET_CACHE_KEY) || 'null')
+    if (cached?.payload?.read) {
+      marketRead.value = cached.payload
+      marketReadSource.value = 'cache'
+      const t = String(cached.savedAt || '').replace('T', ' ')
+      marketReadAt.value = t ? t.slice(11, 16) : ''
+    }
+  } catch {}
+}
+const saveCachedMarketRead = (payload) => {
+  try { localStorage.setItem(MARKET_CACHE_KEY, JSON.stringify({ savedAt: new Date().toISOString().slice(0, 19), payload })) } catch {}
+}
+const finishMarketRead = (data) => {
+  marketStreaming.value = ''
+  marketPending.value = false
+  if (data && data.ok && data.read) {
+    // 权威结果覆盖一切中间态（流式前缀可能被非流式重试推翻）
+    marketRead.value = data
+    marketReadSource.value = 'live'
+    marketReadAt.value = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+    saveCachedMarketRead(data)
+  } else if (!marketRead.value) {
+    // 拿不到且没有缓存可兜底：收起整块（与旧行为一致——"给不出结论"是合法状态）
+    marketPending.value = false
+  }
+}
+/** REST 兜底：SSE 通道整个不可用时回到旧的一次性加载 */
+const loadMarketRead = async () => {
+  try {
+    const res = await getMarketRead()
+    if (res.data?.read) { marketRead.value = res.data; marketReadSource.value = 'live'; marketReadAt.value = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }); saveCachedMarketRead(res.data) }
+    else if (!marketRead.value) marketRead.value = null
+  } catch { if (!marketRead.value) marketRead.value = null }
+  finally { marketPending.value = false; marketStreaming.value = '' }
+}
+const openMarketReadStream = () => {
+  const token = localStorage.getItem('token')
+  if (!token) return
+  marketPending.value = true
+  try {
+    marketEs = new EventSource(`/api/v1/news/market-read/stream?token=${encodeURIComponent(token)}`)
+  } catch { loadMarketRead(); return }
+  // 已有缓存内容时不做打字机（每次进来都重放一遍很吵）；流式前缀只在"没东西可显"时呈现
+  marketEs.addEventListener('delta', (e) => {
+    if (marketRead.value) return
+    try { marketStreaming.value += JSON.parse(e.data) } catch {}
+  })
+  marketEs.addEventListener('result', (e) => {
+    let data = null
+    try { data = JSON.parse(e.data) } catch {}
+    marketEs && marketEs.close(); marketEs = null
+    finishMarketRead(data)
+  })
+  marketEs.onerror = () => {
+    // 一次性流：不自动重连（EventSource 默认会重连，这里明确关掉），失败走 REST 兜底
+    marketEs && marketEs.close(); marketEs = null
+    if (!marketRead.value) loadMarketRead()
+    else { marketPending.value = false; marketStreaming.value = '' }
+  }
+}
 
 const topics = ref([])
+const topicsLoading = ref(false)
 let topicsSeq = 0
-const loadTopics = async (symbol = '') => { const seq = ++topicsSeq; try { const res = await getNewsTopics(7, symbol); if (seq === topicsSeq) topics.value = Array.isArray(res.data) ? res.data : [] } catch { topics.value = [] } }
+const loadTopics = async (symbol = '') => {
+  const seq = ++topicsSeq; topicsLoading.value = true
+  try { const res = await getNewsTopics(7, symbol); if (seq === topicsSeq) topics.value = Array.isArray(res.data) ? res.data : [] } catch { if (seq === topicsSeq) topics.value = [] }
+  finally { if (seq === topicsSeq) topicsLoading.value = false }
+}
 const visibleTopics = computed(() => topics.value.slice(0, 5))
 const firstSentence = (t) => { const c = String(t || '').trim(); const m = c.match(/^[^。！？；]{2,40}[。！？；]?/); return m ? m[0] : c.slice(0, 40) }
 const topicDigest = (t) => t.digest || firstSentence(t.summary)
@@ -215,8 +313,8 @@ const toggleTopic = async (topic) => {
   try { const res = await getTopicDetail(topic.id); topicMembers[topic.id] = res.data?.events || [] } catch { topicMembers[topic.id] = [] } finally { topicLoading[topic.id] = false }
 }
 
-onMounted(() => { loadFavorites(); loadMarketRead(); loadTopics(''); load(); pollNewCount(); newCountTimer = setInterval(pollNewCount, 60000) })
-onUnmounted(() => { stopAnalysisPolling(); if (newCountTimer) clearInterval(newCountTimer) })
+onMounted(() => { loadFavorites(); loadCachedMarketRead(); openMarketReadStream(); loadTopics(''); load(); pollNewCount(); newCountTimer = setInterval(pollNewCount, 60000) })
+onUnmounted(() => { stopAnalysisPolling(); if (newCountTimer) clearInterval(newCountTimer); if (marketEs) { marketEs.close(); marketEs = null } })
 </script>
 
 <template>
@@ -226,27 +324,116 @@ onUnmounted(() => { stopAnalysisPolling(); if (newCountTimer) clearInterval(newC
       <p class="mt-0.5 text-[12.5px] text-ink-3">AI 为你过滤噪音 · 不构成投资建议</p>
     </div>
 
-    <!-- 今日信息面 -->
-    <section v-if="marketRead && mode !== 'hot'" class="mb-4 rounded-xl border border-border bg-surface p-4">
+    <!-- 今日信息面：位置先占住（缓存秒显/骨架），内容流式流入 —— 不再整块弹出（2026-10-28） -->
+    <section
+      v-if="mode !== 'hot' && (marketRead || marketStreaming || marketPending)"
+      class="mb-4 rounded-xl border border-border bg-surface p-4"
+    >
       <div class="mb-2 flex items-baseline justify-between">
         <h2 class="text-[14px] font-semibold text-ink">今日信息面</h2>
-        <span class="num text-[12px] text-ink-3">{{ marketReadAt }}</span>
+        <span v-if="marketReadAt" class="num text-[12px] text-ink-3">
+          {{ marketReadAt }}<template v-if="marketReadSource === 'cache'"> · 缓存</template>
+        </span>
       </div>
-      <p class="text-[13.5px] leading-7 text-ink">{{ marketRead.read }}</p>
-      <div v-if="marketRead.themes && marketRead.themes.length" class="mt-2.5 grid gap-1.5">
-        <div v-for="t in marketRead.themes" :key="t.topic" class="flex gap-2.5 text-[13px] leading-relaxed">
-          <span class="w-28 shrink-0 text-ink-2">{{ t.topic }}<template v-if="t.count"> · {{ t.count }} 条</template></span>
-          <span class="min-w-0 text-ink">{{ t.line }}</span>
+
+      <!-- 有内容（缓存秒显或流式收线后的权威结果）：静态呈现 -->
+      <template v-if="marketRead">
+        <p class="text-[13.5px] leading-7 text-ink">{{ marketRead.read }}</p>
+        <div v-if="marketRead.themes && marketRead.themes.length" class="mt-2.5 grid gap-1.5">
+          <div v-for="t in marketRead.themes" :key="t.topic" class="flex gap-2.5 text-[13px] leading-relaxed">
+            <span class="w-28 shrink-0 text-ink-2">{{ t.topic }}<template v-if="t.count"> · {{ t.count }} 条</template></span>
+            <span class="min-w-0 text-ink">{{ t.line }}</span>
+          </div>
         </div>
-      </div>
-      <p v-if="marketRead.conflicts" class="mt-2 flex items-start gap-1.5 text-[12.5px] text-ink-2">
-        <AlertTriangle :size="14" :stroke-width="1.75" class="mt-0.5 shrink-0 text-warn" aria-hidden="true" />{{ marketRead.conflicts }}
+        <p v-if="marketRead.conflicts" class="mt-2 flex items-start gap-1.5 text-[12.5px] text-ink-2">
+          <AlertTriangle :size="14" :stroke-width="1.75" class="mt-0.5 shrink-0 text-warn" aria-hidden="true" />{{ marketRead.conflicts }}
+        </p>
+      </template>
+
+      <!-- 正在流入（首次/缓存空）：read 前缀逐段出现 -->
+      <p v-else-if="marketStreaming" class="text-[13.5px] leading-7 text-ink">
+        {{ marketStreaming }}<span class="animate-pulse text-ink-3" aria-hidden="true">▍</span>
       </p>
+
+      <!-- 还没有任何内容：骨架占位，位置先显示出来 -->
+      <div v-else class="space-y-2.5" role="status" aria-label="正在生成今日信息面">
+        <Skeleton width="58%" height="14px" />
+        <Skeleton width="94%" height="14px" />
+        <Skeleton width="80%" height="14px" />
+        <p class="pt-0.5 text-[12px] text-ink-3">正在生成今日信息面…</p>
+      </div>
     </section>
 
-    <!-- 要闻专题 -->
-    <section v-if="visibleTopics.length && mode !== 'hot'" class="mb-4 rounded-xl border border-border bg-surface p-4">
+    <!-- 新消息横幅 -->
+    <button
+      v-if="mode === 'market' && newCount > 0"
+      type="button"
+      class="mb-3 w-full rounded-lg border border-accent bg-accent-soft py-2 text-[13px] text-accent transition-colors hover:bg-accent hover:text-on-accent"
+      @click="loadNewest"
+    >
+      有 {{ newCount }} 条新资讯 · 点击载入
+    </button>
+
+    <!-- 信息流切换：大盘 / 自选个股 / 热榜（搜索独立成常驻搜索栏，不挤在切换行里） -->
+    <div class="mb-3 flex flex-wrap items-center gap-2" role="tablist" aria-label="资讯流">
+      <button
+        type="button"
+        class="h-[30px] rounded-full border px-3.5 text-[13px] transition-colors"
+        :class="mode === 'market' ? 'border-accent bg-accent text-on-accent' : 'border-border bg-surface text-ink-2 hover:bg-surface-2 hover:text-ink'"
+        @click="selectMarket"
+      >大盘</button>
+      <button
+        v-for="fav in favorites"
+        :key="fav.symbol"
+        type="button"
+        class="h-[30px] rounded-full border px-3.5 text-[13px] transition-colors"
+        :class="mode === 'stock' && activeSymbol === fav.symbol ? 'border-accent bg-accent text-on-accent' : 'border-border bg-surface text-ink-2 hover:bg-surface-2 hover:text-ink'"
+        @click="selectStock(fav.symbol)"
+      >{{ chipLabel(fav) }}</button>
+      <button
+        type="button"
+        class="h-[30px] rounded-full border px-3.5 text-[13px] transition-colors"
+        :class="mode === 'hot' ? 'border-accent bg-accent text-on-accent' : 'border-border bg-surface text-ink-2 hover:bg-surface-2 hover:text-ink'"
+        @click="selectHot"
+      >热榜</button>
+    </div>
+
+    <!-- 搜索栏（常驻独立）：提交即进入搜索态；点大盘/个股切回信息流 -->
+    <form
+      class="mb-4 flex flex-wrap gap-2.5 rounded-xl border bg-surface p-3 transition-colors"
+      :class="mode === 'search' ? 'border-accent' : 'border-border'"
+      @submit.prevent="submitSearch"
+    >
+      <input
+        v-model.trim="form.keyword"
+        type="search"
+        placeholder="关键词（如：回购 / 重组）"
+        class="h-[34px] min-w-[180px] flex-1 rounded-lg border border-border bg-bg px-3 text-[13px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none focus:ring-2 focus:ring-[color:var(--ring)]"
+      >
+      <input
+        v-model.trim="form.symbol"
+        type="text"
+        placeholder="600519"
+        class="num h-[34px] w-[100px] rounded-lg border border-border bg-bg px-3 text-[13px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none focus:ring-2 focus:ring-[color:var(--ring)]"
+      >
+      <select
+        v-model.number="form.days"
+        class="h-[34px] rounded-lg border border-border bg-bg px-2.5 text-[13px] text-ink focus:border-accent focus:outline-none"
+      >
+        <option v-for="d in DAY_OPTIONS" :key="d" :value="d">{{ d }} 天内</option>
+      </select>
+      <Button type="submit" variant="primary" :loading="loading">搜索</Button>
+    </form>
+
+    <!-- 要闻专题：加载中也占位（骨架），不再弹入（2026-10-29 移到切换/搜索栏之下） -->
+    <section v-if="mode !== 'hot' && (visibleTopics.length || topicsLoading)" class="mb-4 rounded-xl border border-border bg-surface p-4">
       <h2 class="mb-1 text-[14px] font-semibold text-ink">要闻专题</h2>
+      <div v-if="!visibleTopics.length && topicsLoading" class="space-y-3 py-1.5" role="status" aria-label="正在加载要闻专题">
+        <div v-for="i in 3" :key="i" class="space-y-1.5">
+          <Skeleton :width="i === 2 ? '62%' : '45%'" height="13px" />
+          <Skeleton width="88%" height="12px" />
+        </div>
+      </div>
       <article v-for="topic in visibleTopics" :key="topic.id" class="border-b border-border py-2.5 last:border-b-0">
         <button type="button" class="flex w-full items-start justify-between gap-3 text-start" @click="toggleTopic(topic)">
           <span class="flex items-start gap-1.5 text-[13.5px] font-medium leading-relaxed text-ink">
@@ -278,46 +465,6 @@ onUnmounted(() => { stopAnalysisPolling(); if (newCountTimer) clearInterval(newC
       </article>
     </section>
 
-    <!-- 新消息横幅 -->
-    <button
-      v-if="mode === 'market' && newCount > 0"
-      type="button"
-      class="mb-3 w-full rounded-lg border border-accent bg-accent-soft py-2 text-[13px] text-accent transition-colors hover:bg-accent hover:text-on-accent"
-      @click="loadNewest"
-    >
-      有 {{ newCount }} 条新资讯 · 点击载入
-    </button>
-
-    <!-- 信息流切换：大盘 / 自选个股 / 搜索 -->
-    <div class="mb-3 flex flex-wrap items-center gap-2" role="tablist" aria-label="资讯流">
-      <button
-        type="button"
-        class="h-[30px] rounded-full border px-3.5 text-[13px] transition-colors"
-        :class="mode === 'market' ? 'border-accent bg-accent text-on-accent' : 'border-border bg-surface text-ink-2 hover:bg-surface-2 hover:text-ink'"
-        @click="selectMarket"
-      >大盘</button>
-      <button
-        v-for="fav in favorites"
-        :key="fav.symbol"
-        type="button"
-        class="h-[30px] rounded-full border px-3.5 text-[13px] transition-colors"
-        :class="mode === 'stock' && activeSymbol === fav.symbol ? 'border-accent bg-accent text-on-accent' : 'border-border bg-surface text-ink-2 hover:bg-surface-2 hover:text-ink'"
-        @click="selectStock(fav.symbol)"
-      >{{ chipLabel(fav) }}</button>
-      <button
-        type="button"
-        class="h-[30px] rounded-full border px-3.5 text-[13px] transition-colors"
-        :class="mode === 'search' ? 'border-accent bg-accent text-on-accent' : 'border-border bg-surface text-ink-2 hover:bg-surface-2 hover:text-ink'"
-        @click="toggleSearch"
-      >搜索</button>
-      <button
-        type="button"
-        class="h-[30px] rounded-full border px-3.5 text-[13px] transition-colors"
-        :class="mode === 'hot' ? 'border-accent bg-accent text-on-accent' : 'border-border bg-surface text-ink-2 hover:bg-surface-2 hover:text-ink'"
-        @click="selectHot"
-      >热榜</button>
-    </div>
-
     <!-- 热榜（东财个股人气榜）：点一行直达该股资讯 -->
     <section v-if="mode === 'hot'" class="rounded-xl border border-border bg-surface p-4">
       <div class="mb-1 flex items-baseline justify-between">
@@ -345,6 +492,14 @@ onUnmounted(() => { stopAnalysisPolling(); if (newCountTimer) clearInterval(newC
           >{{ item.change_pct > 0 ? '+' : '' }}{{ item.change_pct }}%</span>
         </li>
       </ul>
+      <!-- 热榜自己的展开：默认 20 → 上限 50（上游拉全榜 5 分钟缓存，展开零额外成本） -->
+      <Button
+        v-if="!hotError && hotRank.length && hotLimit < HOT_MAX"
+        variant="secondary"
+        class="mx-auto my-3 block"
+        :loading="hotLoading"
+        @click="loadMoreHot"
+      >展开到前 {{ HOT_MAX }} 名</Button>
     </section>
 
     <!-- 频道 -->
@@ -358,29 +513,6 @@ onUnmounted(() => { stopAnalysisPolling(); if (newCountTimer) clearInterval(newC
         @click="selectChannel(key)"
       >{{ ch.label }}</button>
     </div>
-
-    <!-- 搜索面板 -->
-    <form v-if="searchOpen" class="mb-3.5 flex flex-wrap gap-2.5 rounded-xl border border-border bg-surface p-3" @submit.prevent="load">
-      <input
-        v-model.trim="form.keyword"
-        type="search"
-        placeholder="关键词（如：回购 / 重组）"
-        class="h-[34px] min-w-[180px] flex-1 rounded-lg border border-border bg-bg px-3 text-[13px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none focus:ring-2 focus:ring-[color:var(--ring)]"
-      >
-      <input
-        v-model.trim="form.symbol"
-        type="text"
-        placeholder="600519"
-        class="num h-[34px] w-[100px] rounded-lg border border-border bg-bg px-3 text-[13px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none focus:ring-2 focus:ring-[color:var(--ring)]"
-      >
-      <select
-        v-model.number="form.days"
-        class="h-[34px] rounded-lg border border-border bg-bg px-2.5 text-[13px] text-ink focus:border-accent focus:outline-none"
-      >
-        <option v-for="d in DAY_OPTIONS" :key="d" :value="d">{{ d }} 天内</option>
-      </select>
-      <Button type="submit" variant="primary" :loading="loading">搜索</Button>
-    </form>
 
     <!-- 状态 -->
     <p v-if="marketRefreshing" class="my-2 text-[13px] text-ink-2" role="status">首次查看，正在同步资讯…</p>
@@ -430,7 +562,8 @@ onUnmounted(() => { stopAnalysisPolling(); if (newCountTimer) clearInterval(newC
       </ul>
     </section>
 
-    <Button v-if="hasMore" variant="secondary" class="mx-auto my-5 block" :loading="loadingMore" @click="loadMore">
+    <!-- 加载更多只属于新闻列表：热榜视图里不显示（热榜固定 20 条无分页） -->
+    <Button v-if="hasMore && mode !== 'hot'" variant="secondary" class="mx-auto my-5 block" :loading="loadingMore" @click="loadMore">
       加载更多
     </Button>
 

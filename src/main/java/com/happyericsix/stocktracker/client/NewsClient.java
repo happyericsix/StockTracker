@@ -174,6 +174,48 @@ public class NewsClient {
     }
 
     /**
+     * 市场综合的流式版（2026-10-28）：消费 Python {@code /news/synthesize/stream}
+     * 的 SSE 事件。delta 事件（read 段安全前缀）原样交给 onDelta，result 事件
+     * 作为返回值（形状与非流式版一致）；error 事件/流断开抛异常由调用方兜底。
+     * 超时 120s 与全委会同档：这是"一次 LLM 调用 + 网络"的上界，不是常态。
+     */
+    public JsonNode synthesizeMarketStream(List<JsonNode> items,
+                                           java.util.function.Consumer<String> onDelta) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("mode", "market");
+        body.put("items", items == null ? List.of() : items);
+        java.util.concurrent.atomic.AtomicReference<JsonNode> result = new java.util.concurrent.atomic.AtomicReference<>();
+        webClient.post()
+                .uri("/api/v1/news/synthesize/stream")
+                .bodyValue(body)
+                .retrieve()
+                .bodyToFlux(new org.springframework.core.ParameterizedTypeReference<org.springframework.http.codec.ServerSentEvent<String>>() {})
+                .timeout(Duration.ofSeconds(120))
+                .doOnNext(event -> {
+                    String payload = event.data();
+                    if (payload == null || payload.isBlank()) {
+                        return;
+                    }
+                    try {
+                        JsonNode evt = mapper.readTree(payload);
+                        String type = evt.path("type").asText("");
+                        if ("delta".equals(type)) {
+                            String text = evt.path("text").asText("");
+                            if (!text.isEmpty()) {
+                                onDelta.accept(text);
+                            }
+                        } else if ("result".equals(type)) {
+                            result.set(evt.path("result"));
+                        }
+                    } catch (Exception e) {
+                        log.warn("市场综合流事件解析失败: {}", e.getMessage());
+                    }
+                })
+                .blockLast();
+        return result.get();
+    }
+
+    /**
      * 抓取资讯原文正文（article_fetcher 白名单管线）。
      *
      * <p>失败时 Python 返回 {@code ok=false} + 人话原因（不在白名单/JS 渲染页/

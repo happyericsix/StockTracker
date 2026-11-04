@@ -119,6 +119,74 @@ public class NewsController {
         return Result.success(newsService.marketRead());
     }
 
+    /**
+     * 市场综合的流式版（2026-10-28 资讯雷达体验重订）：SSE，token 走查询参数
+     * （{@code TokenParamFilter}，EventSource 带不了请求头，与消息流同一条纪律）。
+     *
+     * <p>事件按序两种：
+     * <ul>
+     *   <li>{@code delta}：read 段的安全前缀（data 是 JSON 字符串），缓存命中时
+     *       整段一次发出；</li>
+     *   <li>{@code result}：权威结果（data 是完整 JSON，形状与非流式版一致；
+     *       {@code ok=false} 表示拿不到 —— 前端收起整块，这是合法状态不是错误）。</li>
+     * </ul>
+     * 发完即 complete：这是一次性的请求-响应流，不是消息流那种常驻订阅。
+     */
+    @GetMapping("/market-read/stream")
+    public org.springframework.web.servlet.mvc.method.annotation.SseEmitter marketReadStream() {
+        org.springframework.web.servlet.mvc.method.annotation.SseEmitter emitter =
+                new org.springframework.web.servlet.mvc.method.annotation.SseEmitter(0L);
+        // 一次性流（缓存命中秒级、未命中最长 ~2 分钟的 LLM 生成），绝不占 MVC
+        // 工作线程等 LLM；页面访问频率下 cachedThreadPool 足够
+        STREAM_EXECUTOR.execute(() -> {
+            try {
+                JsonNode data = newsService.marketReadStream(piece -> {
+                    try {
+                        emitter.send(SSE_EVENT().name("delta").data(toJsonText(piece)));
+                    } catch (Exception sendError) {
+                        // 客户端断开（页面切换）：发送失败不是错误，后续 send 自然短路
+                        log.debug("market-read 流 delta 发送失败: {}", sendError.getMessage());
+                    }
+                });
+                emitter.send(SSE_EVENT().name("result")
+                        .data(data == null ? "{\"ok\":false}" : data.toString()));
+                emitter.complete();
+            } catch (Exception e) {
+                // 尽力补一个失败事件再收线（客户端可能已断开，失败也无妨）
+                try {
+                    emitter.send(SSE_EVENT().name("result").data("{\"ok\":false}"));
+                } catch (Exception ignored) {
+                    // 断开后的补发失败可以忽略
+                }
+                emitter.complete();
+                log.warn("market-read 流收线失败: {}", e.getMessage());
+            }
+        });
+        return emitter;
+    }
+
+    private static org.springframework.web.servlet.mvc.method.annotation.SseEmitter.SseEventBuilder SSE_EVENT() {
+        return org.springframework.web.servlet.mvc.method.annotation.SseEmitter.event();
+    }
+
+    private static final java.util.concurrent.ExecutorService STREAM_EXECUTOR =
+            java.util.concurrent.Executors.newCachedThreadPool(r -> {
+                Thread t = new Thread(r, "market-read-stream");
+                t.setDaemon(true);
+                return t;
+            });
+
+    /** delta 的 data 是 JSON 字符串（前端 JSON.parse 拿到纯文本，转义由序列化负责）。 */
+    private String toJsonText(String piece) {
+        try {
+            return MAPPER.writeValueAsString(piece);
+        } catch (Exception e) {
+            return "\"\"";
+        }
+    }
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     @GetMapping("/stock-read")
     public Result<String> stockRead(
             @RequestParam String symbol,

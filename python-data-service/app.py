@@ -2199,6 +2199,68 @@ async def news_synthesize(req: Request):
     return {"ok": True, "data": data}
 
 
+@app.post("/api/v1/news/synthesize/stream")
+async def news_market_synthesize_stream(req: Request):
+    """市场综合的流式版（2026-10-28 资讯雷达体验重订，mode=market 专用）。
+
+    请求体与非流式 market 模式一致：`{"mode":"market","items":[…]}`。
+    响应是 text/event-stream，每个事件一行 `data: {"type": ...}`，按序三种
+    （与 /agent/chat/stream 同形，Java 侧可复用同一套桥接姿势）：
+
+    - {"type":"delta","text":"..."}    read 段的安全前缀增量（打字机）
+    - {"type":"result","result":{…}}   权威结果，与非流式 market 模式的 data 同形
+    - {"type":"error","error":"..."}   worker 异常（调用方按失败兜底）
+
+    为什么 read 可以边生成边发：模型输出 read 在 JSON 最前（prompt 规定），
+    news_understanding._ReadStreamExtractor 只放行"不可能再变"的前缀；
+    result 永远以权威解析覆盖流式内容。
+    """
+    from fastapi.responses import StreamingResponse
+
+    try:
+        body = await req.json()
+        items = body.get("items") if isinstance(body, dict) else None
+        if not isinstance(items, list):
+            items = []
+    except Exception:
+        items = []
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    _SENTINEL = object()
+
+    def _emit(evt):
+        loop.call_soon_threadsafe(queue.put_nowait, evt)
+
+    def _work():
+        try:
+            result = news_understanding.synthesize_market_stream(
+                items, on_delta=lambda piece: _emit({"type": "delta", "text": piece}))
+            _emit({"type": "result", "result": result})
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"news market synthesize stream worker error: {exc}",
+                         exc_info=True)
+            _emit({"type": "error", "error": str(exc)})
+        finally:
+            _emit(_SENTINEL)
+
+    task = asyncio.create_task(asyncio.to_thread(_work))
+    _STREAM_TASKS.add(task)
+    task.add_done_callback(_STREAM_TASKS.discard)
+
+    async def event_gen():
+        import json as _json
+        while True:
+            evt = await queue.get()
+            if evt is _SENTINEL:
+                break
+            yield f"data: {_json.dumps(evt, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
 @app.post("/api/v1/news/body")
 async def news_body(req: Request):
     """抓取资讯原文正文（"去链接化"的取数端点）。
