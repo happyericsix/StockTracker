@@ -1132,8 +1132,10 @@ async def evaluate_bar_endpoint(req: Request):
             return {"valid": False, "error": err}
         symbol = data.get("symbol") or cfg.symbol
         period = str(data.get("period", "day")).lower()
+        period_minutes = 0
         if period in ("1", "5", "15", "30", "60"):
-            records = await asyncio.to_thread(get_minute_kline, symbol, int(period))
+            period_minutes = int(period)
+            records = await asyncio.to_thread(get_minute_kline, symbol, period_minutes)
         else:
             records = await asyncio.to_thread(get_history, symbol)
         if not records:
@@ -1144,6 +1146,22 @@ async def evaluate_bar_endpoint(req: Request):
                     "decision": ec.DECISION_SKIP, "skip_reason": ec.SKIP_DATA_UNAVAILABLE,
                     "error_detail": {"type": "history_empty", "symbol": symbol},
                     **ec.no_bar_facts(settlement_kind, ADJUST_MODE)}
+        # ===== 数据护栏（ACCOUNT-GATE 阶段0，2026-11-04）：盘中只消费完结/未过期/连续的 bar =====
+        # 三道护栏（半根柱/数据年龄/序列断档）的判定在 agent/data_guards.py——单一真相源。
+        # 失败时带 bar_time 回传：Java 侧空 bar_time 会静默 return，护栏失败必须落痕迹。
+        if settlement_kind == ec.SETTLEMENT_REALTIME and period_minutes:
+            from agent import data_guards
+            records, guard = await asyncio.to_thread(
+                data_guards.guard_minute_records, records, period_minutes)
+            if guard:
+                return {"error": guard.get("detail", ""), "signal": "hold",
+                        "matched_conditions": [],
+                        "decision": ec.DECISION_SKIP,
+                        "skip_reason": ec.normalize_skip_reason(guard.get("skip_reason")),
+                        "error_detail": {"type": "data_guard", **guard},
+                        "bar_time": str(records[-1].get("date", "")) if records else "",
+                        "data_guard": guard,
+                        **ec.no_bar_facts(settlement_kind, ADJUST_MODE)}
         bar_time = str(records[-1].get("date", ""))
         position = data.get("position")
         if isinstance(position, dict) and "quantity" in position and "shares" not in position:
@@ -1154,6 +1172,20 @@ async def evaluate_bar_endpoint(req: Request):
             settlement_kind, ADJUST_MODE
         )
         result["bar_time"] = bar_time
+        # 信号吃「完结柱」、成交吃「实时价」（ACCOUNT-GATE 阶段0）：护栏之后 evaluate_bar
+        # 只看完结柱（防重绘，与回测口径对齐），但 realtime_last 的成交口径仍然成立——
+        # 下单那一刻能拿到的最新价是快照价，不是上一根完结柱的 close。取不到快照时
+        # 退回柱 close（信号与成交同源，偏差最多一个 period，可接受且可解释）。
+        if settlement_kind == ec.SETTLEMENT_REALTIME and period_minutes:
+            from akshare_client import get_quote
+            quote = await asyncio.to_thread(get_quote, symbol)
+            try:
+                live_price = float(quote.get("最新价")) if isinstance(quote, dict) else None
+            except (TypeError, ValueError):
+                live_price = None
+            if live_price and live_price > 0:
+                result["price"] = live_price
+                result["price_source"] = "realtime_quote"
         # 盘中路径附带"盯盘事件"（纯代码检测，零 LLM 成本）：结算侧拿到非空 events
         # 才会去调盯盘交易员（/agent/intraday-decide）。规则信号在这里降级为一条事件
         # （rule_signal）—— agent 模式下"要不要按规则动"由盯盘 agent 判断。
@@ -1374,6 +1406,17 @@ async def intraday_decide_endpoint(req: Request):
 
         config = data.get("strategy_json") or {}
         minute_bars = await asyncio.to_thread(get_minute_kline, symbol, 1)
+        # 数据护栏（ACCOUNT-GATE 阶段0）：盯盘面板/事件检测与信号同一口径——只看完结柱。
+        # 护栏失败 = 这一轮不该问模型（拿旧数据问出来的结论比不问更糟）：
+        # degraded=true 让结算侧持仓留痕、等下一个事件，一次 LLM 都不浪费。
+        from agent import data_guards
+        minute_bars, watch_guard = await asyncio.to_thread(
+            data_guards.guard_minute_records, minute_bars, 1)
+        if watch_guard:
+            return {"valid": True, "degraded": True, "action": "hold", "size_fraction": 0.0,
+                    "confidence": None, "reason": f"数据护栏拦截：{watch_guard.get('detail', '')}",
+                    "warnings": [f"data_guard:{watch_guard.get('skip_reason')}"],
+                    "watch_tokens": 0}
         day_records = await asyncio.to_thread(get_history, symbol)
         # news_shock 详情（P3）：Java 检测到 high impact 新闻时随请求带来，None = 与新闻无关
         news_alert = data.get("news_alert") if isinstance(data.get("news_alert"), dict) else None

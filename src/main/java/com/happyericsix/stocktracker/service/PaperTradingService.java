@@ -1593,14 +1593,18 @@ public class PaperTradingService {
             log.debug("Realtime evaluateBar missing bar_time for strategy id={}", strategy.getId());
             return account;
         }
-        // ===== 已完结 bar 门控（2026-10-14）：只对走完的分钟 bar 结算 =====
-        // 数据源的分钟 bar 按【结束时刻】标注，且会在盘前预创建当天首根 bar（含 9:25
-        // 集合竞价数据）。在 bar 结束时刻之前评估它 = 在不可能成交的时刻、用半程数据
-        // 出信号——2026-10-12 09:27:04 的"盘前买入"就是这么发生的（成交价是竞价价
-        // 6.79，而 9:30 实际开盘 6.84）；盘中同理，10:42:51 评估"10:43"这根走了一半
-        // 的 bar，交叉信号可能在 bar 收尾时消失（重绘）。规则一条：墙钟必须走到
-        // bar 标注时刻之后，这根 bar 才算"已完结、可结算"。盘前/午休/收盘后被它
-        // 天然挡住，不需要另维护一张时段表；未完结前不占 lastBarTime（不吞掉完结后的结算）。
+        // ===== 已完结 bar 门控（2026-10-14；2026-11-04 ACCOUNT-GATE 阶段0 口径校正）=====
+        // 只对走完的分钟 bar 结算：在 bar 走完之前评估它 = 用半程数据出信号，交叉
+        // 可能在收尾时消失（重绘）。2026-10-12 09:27:04 的"盘前买入"（成交价是竞价价
+        // 6.79，而 9:30 实际开盘 6.84）就是这么发生的。
+        //
+        // 口径校正：Python 侧 `akshare_client._minute_bar_start_label` 此前已把分钟 bar
+        // 的标签从【结束时刻】统一回退成【窗口起点】（open-time 口径，TradingView 同款），
+        // 而本门控仍按结束时刻判定——标签改了门控没跟，bar 开始几秒即可放行，恰好新浪
+        // 最后一根本就是"正在走的柱"（close=最新价），于是半根柱进了信号计算
+        // （2026-10-14 10:12:12 的成交即此）。现在**完结判定以 Python 数据护栏为准**
+        // （agent/data_guards.py：评估前丢掉未走完的柱，单一真相源）；本门控退居二线，
+        // 只挡标签在未来（时钟回拨/脏数据）的极端情况，未完结前不占 lastBarTime。
         LocalDateTime barEnd = parseBarTime(barTime);
         if (barEnd == null) {
             log.warn("Realtime bar_time unparsable ({}), skip settlement for strategy id={}",
@@ -1610,6 +1614,18 @@ public class PaperTradingService {
         if (CnTime.now().isBefore(barEnd)) {
             log.debug("Realtime bar {} not finished yet for strategy id={}", barTime, strategy.getId());
             return account;
+        }
+        // ===== 数据护栏（ACCOUNT-GATE 阶段0）：数据坏了必须显形，且不能吞掉后续恢复 =====
+        // Python 侧判定 stale_data（最新完结 bar 落后墙钟过远：停牌/数据源卡住）或
+        // data_gap（序列断档/乱序/盘前竞价柱）时带 data_guard 标记。这里只负责把它
+        // 变成一行可见的 skip 痕迹（dedupe 一天一原因一行，不刷屏）。
+        // 刻意放在 lastBarTime 去重**之前**：数据源卡死时同一根旧 bar 早已结算过，
+        // 先走去重会静默返回——"数据坏了"必须显形而不是消失。也**不消费** lastBarTime：
+        // 数据恢复后同一根 bar 仍应正常结算。
+        if (result.hasNonNull("data_guard")) {
+            return traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME, trigger,
+                    CnTime.today(), barTime, result,
+                    textOr(result.path("skip_reason"), ExecutionContract.SKIP_DATA_UNAVAILABLE));
         }
         if (barTime.equals(account.getLastBarTime())) {
             log.debug("Realtime bar already settled for strategy id={} at {}", strategy.getId(), barTime);

@@ -147,6 +147,13 @@ SKIP_VOLUME_CAPPED = "volume_capped"            # 单 bar 成交量参与率不�
 # 不是"委员会关掉了盘中"（agent_intraday_disabled）也不是"从没授权过"
 # （awaiting_authorization）——三者的复盘动作完全不同。由 Java 结算侧判定与落痕迹。
 SKIP_AUTH_EXPIRED = "auth_expired"
+# ===== 数据护栏（ACCOUNT-GATE 阶段0，2026-11-04）：数据坏了必须显形 =====
+# stale_data：最新完结 bar 距墙钟过远（停牌/数据源卡住/缓存穿透失败）——
+# 与 data_unavailable（取数失败）分开：取到了数据但它是旧的，是另一种故障。
+# data_gap：bar 序列断档/乱序/盘前竞价柱——数据问题不能被当成"没有信号"。
+# 判定在 agent/data_guards.py（单一真相源），由 Java 结算侧落痕迹。
+SKIP_STALE_DATA = "stale_data"
+SKIP_DATA_GAP = "data_gap"
 # ===== 影子会议（P5，2026-10-28）：天天开会只记录、不执行 =====
 # shadow 模式下委员会照常辩论、结论照常进痕迹（snapshot 里有完整审计），
 # 但**不执行、不落授权、不计入"真开会"统计**（agent_llm_calls 记 0，
@@ -180,6 +187,8 @@ SKIP_REASONS = (
     SKIP_PORTFOLIO_HALTED,
     SKIP_VOLUME_CAPPED,
     SKIP_AUTH_EXPIRED,
+    SKIP_STALE_DATA,
+    SKIP_DATA_GAP,
     SKIP_SHADOW_RECORDED,
 )
 

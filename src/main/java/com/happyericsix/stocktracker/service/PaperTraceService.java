@@ -67,7 +67,11 @@ public class PaperTraceService {
             ExecutionContract.SKIP_WATCH_HOLD,
             ExecutionContract.SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED,
             // 组合熔断：触发了就该被看见（一天一行），否则"为什么突然不下单"无从回答。
-            ExecutionContract.SKIP_PORTFOLIO_HALTED);
+            ExecutionContract.SKIP_PORTFOLIO_HALTED,
+            // 数据护栏两因（ACCOUNT-GATE 阶段0）：数据坏了必须显形——stale_data/gap
+            // 被判成"不阻塞"会从痕迹里消失，数据源故障就被静默解读成市场平静。
+            ExecutionContract.SKIP_STALE_DATA,
+            ExecutionContract.SKIP_DATA_GAP);
 
     private final PaperTradeTraceRepository repository;
     private final AtomicLong writeFailures = new AtomicLong();

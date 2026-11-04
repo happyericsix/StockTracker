@@ -163,6 +163,19 @@ public final class ExecutionContract {
      * （agent_llm_calls 记 0，让 stale 门控不被影子会议喂饱）。由结算侧判定与落痕迹。
      */
     public static final String SKIP_SHADOW_RECORDED = "shadow_recorded";
+    /**
+     * 数据护栏（ACCOUNT-GATE 阶段0，2026-11-04）：数据坏了必须显形，由 Python 侧
+     * {@code agent/data_guards.py} 判定（单一真相源），本侧只负责落痕迹。
+     *
+     * <p>{@link #SKIP_STALE_DATA}：最新完结 bar 距墙钟过远（停牌/数据源卡住/缓存穿透失败）
+     * —— 与 {@link #SKIP_DATA_UNAVAILABLE}（取数失败）分开：取到了数据但它是旧的，
+     * 是另一种故障，复盘动作也不同（前者查数据链路，后者查数据源可用性）。
+     *
+     * <p>{@link #SKIP_DATA_GAP}：bar 序列断档/乱序/盘前竞价柱——数据问题不能被
+     * 当成"没有信号"，否则数据源故障会被静默解读成市场平静。
+     */
+    public static final String SKIP_STALE_DATA = "stale_data";
+    public static final String SKIP_DATA_GAP = "data_gap";
 
     // ---------- 归一与版本 ----------
     public static final String UNKNOWN_PREFIX = "unknown_";
@@ -228,7 +241,8 @@ public final class ExecutionContract {
             SKIP_AWAITING_AUTHORIZATION, SKIP_OUTSIDE_AUTHORIZATION,
             SKIP_AGENT_INTRADAY_DISABLED, SKIP_WATCH_HOLD,
             SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED, SKIP_PORTFOLIO_HALTED,
-            SKIP_VOLUME_CAPPED, SKIP_AUTH_EXPIRED, SKIP_SHADOW_RECORDED);
+            SKIP_VOLUME_CAPPED, SKIP_AUTH_EXPIRED, SKIP_SHADOW_RECORDED,
+            SKIP_STALE_DATA, SKIP_DATA_GAP);
 
     /** 结算类型 → 成交价口径。**唯一的映射处**（Python 侧同名映射）。 */
     public static final Map<String, String> FILL_BASIS_BY_SETTLEMENT = Map.of(
