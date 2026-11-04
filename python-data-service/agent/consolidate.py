@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 
 import llm_service
@@ -29,6 +30,20 @@ from agent import lessons as lessons_mod
 from agent import memory_store
 
 logger = logging.getLogger(__name__)
+
+
+def _env_float(name: str, default: str) -> float:
+    try:
+        return float(os.getenv(name, default))
+    except ValueError:
+        return float(default)
+
+
+# 经验语义查重阈值（2026-10-30）：新经验与**同 taskType** 既有经验的余弦相似度达到它，
+# 就算"同一个坑的第 N 次出现"——改挂既有 symptom 键落库（occurrences+1），
+# 而不是又开一条措辞略异的雷同经验。0.85 起步：同义改写通常 >0.9、不同问题 <0.75，
+# 宁可漏合并（只是多一张卡片），也不要把两个不同的问题并成一条。
+LESSON_DEDUP_THRESHOLD = _env_float("LESSON_DEDUP_THRESHOLD", "0.85")
 
 # 少于这么多条事件不值得总结（例如用户只发了一句就再没回来）
 MIN_EVENTS_FOR_RECAP = 2
@@ -91,13 +106,7 @@ SUMMARY_SYSTEM_PROMPT = """你是对话记忆整理器。把一段"用户 × 股
     {"subject": "user", "predicate": "stop_loss_pct", "object": "5",
      "fact_type": "constraint", "confidence": 0.9, "time_hint": "", "source_refs": [3]}
   ],
-  "lessons": [
-    {"task_type": "backtest", "symptom": "回测提示历史数据不足",
-     "attempts": ["直接用默认参数重跑", "仍然失败"],
-     "resolution": "先取更长周期标的的历史再回测",
-     "reusable_rule": "回测前先确认历史条数≥20，不足就先换标的或周期",
-     "confidence": 0.7, "evidence_refs": [4, 6]}
-  ]
+  "lessons": []
 }
 
 source_refs / evidence_refs（记忆可回溯的关键）：这条 fact/lesson 依据的是对话的**哪几行**，
@@ -106,7 +115,7 @@ source_refs / evidence_refs（记忆可回溯的关键）：这条 fact/lesson �
 
 memorable（显著性判定，先于其它一切输出决定，2026-10-20 门控）：只有出现以下信号之一才给 true ——
 用户做出决定或设定（"就按这个来""止损改成 3%"）、表达偏好/约束/目标、修正之前的结论、
-陈述关于自己或持仓的新事实、出现"遇到问题 → 解决掉"的过程（经验的原料）。
+陈述关于自己或持仓的新事实、出现"遇到问题 → 解决掉"或"发现非默认有效做法"的过程（经验的原料）。
 以下情形一律给 false：寒暄打招呼、单轮行情或新闻查询且没有后续讨论、纯客套闲聊、
 只有系统播报或助手单方面输出。memorable=false 时 summary 写空字符串，
 key_points/open_questions/entities/facts/lessons 全部给空数组 —— **不要**为了填格子
@@ -137,14 +146,28 @@ facts 是"值得跨会话记住的原子事实"，只在用户**明确说过**�
 - confidence：0~1。用户原话直接说的给 0.8~0.95；需要一点推断才得出的给 0.6 以下
 - time_hint：**只在用户原话里出现时间说法时**填那个说法本身（如"去年""上个月"），否则留空字符串
 
-lessons 是"这类问题这次是怎么解决的"，用来避免以后重复踩坑：
+lessons 是"什么情境下用什么做法才有效"，用来让下次同样的情境少走弯路。
+唯一的判据：**不知道这条经验，下次同样的情境下助手会做错或做差吗？**
+- 会——写。踩坑后修复的如此；平顺完成但做法**非默认**（要传特定参数、换数据源、
+  绕过某个数据坑、用户的词和系统的对不上）的也如此。
+- 不会（助手本来就会这么做，或这只是一句常识）——不写。
+用户查过什么、关心什么属于 facts，不是 lessons。
+字段（完整示例）：
+{"task_type": "news_lookup", "symptom": "查个股新闻返回的是大盘要闻",
+ "attempts": [], "resolution": "news_lookup 带上 symbol 重查",
+ "reusable_rule": "查个股新闻必须传 symbol",
+ "why_nontrivial": "不带 symbol 时接口返回的是大盘要闻，用户会拿到无关结果",
+ "confidence": 0.8, "evidence_refs": [4]}
 - task_type：generate_strategy（生成策略） / backtest（回测） / quote_lookup（查行情） /
   analysis（技术分析） / screening（选股） / news_lookup（新闻公告） / general
-- symptom：**可复现的现象**（"回测提示历史数据不足""取不到行情"），不是情绪描述
-- attempts：试过哪些做法、为什么不行
-- resolution：最后是怎么做成的
+- symptom：**触发情境**——下次靠什么认出"又是这种情况"（"查个股新闻返回的是大盘要闻"
+  "回测提示历史数据不足"）。不要求是故障，平顺任务里的意外现象也算。
+- attempts：试过哪些做法、为什么不行；没有试错过程就给空数组
+- resolution：实际有效的做法
 - reusable_rule：一句可执行、可验证的做法（比如"回测前先确认历史条数≥20"）
-- confidence：0~1。只有对话里确实出现过"遇到问题 → 解决掉"的过程才写；平顺完成的任务不写。
+- why_nontrivial：**一句话说清"不知道这条，下次会怎么错/差"**（"不带 symbol 查出来的是
+  大盘要闻"）。写不出具体后果（只能说"更准确""效果更好"）就不要这条经验。
+- confidence：0~1
 
 规则（必须遵守）：
 - 只写对话里**确实出现过**的内容。不要推测，不要补充常识，不要写投资建议，不要预测价格。
@@ -385,6 +408,58 @@ def _invalidate_semantic_index(user_id):
         logger.debug("语义索引失效失败: %s", exc)
 
 
+def _align_duplicate_lessons(user_id, normalized: list[dict]) -> list[dict]:
+    """写入前的语义查重：与既有经验高度相似的新经验改挂既有 symptom 键。
+
+    <h3>为什么要"改键"而不是"丢弃"（2026-10-30）</h3>
+    Java 侧按 (taskType, symptom) 精确计数复发（MemoryLessonService），而 symptom 由
+    LLM 生成——同一个现象每次措辞几乎必然不同，只做字符级归一化永远匹配不上键，
+    "复发 3 次建议升格 skill"的信号一次也触发不了，记忆页还每会话多一张雷同卡片。
+    这里用语义索引（vector_index）找"同 taskType 且余弦 ≥ 阈值"的既有经验，
+    把新经验的 symptom 换成那行的规范化键（symptomKey）：同一现象的第 N 次出现
+    于是落成既有键下的新一行——occurrences+1、页面收敛成一张卡片。
+
+    embedding 不可用 / 索引失败：原样返回（fail-open），与这条链路的既有纪律一致。
+    """
+    if not normalized:
+        return normalized
+    try:
+        from agent import embeddings, vector_index
+
+        if not embeddings.is_enabled():
+            return normalized
+    except Exception:  # noqa: BLE001
+        return normalized
+
+    aligned: list[dict] = []
+    for lesson in normalized:
+        text = " ".join(part for part in (
+            lesson.get("task_type"), lesson.get("symptom"),
+            lesson.get("resolution"), lesson.get("reusable_rule")) if part)
+        try:
+            hits = vector_index.semantic_search(user_id, text, kinds=["lesson"], top_k=5)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("经验语义查重失败，按新经验落库: %s", exc)
+            hits = []
+        existing_key = None
+        for item, score in hits or []:
+            payload = item.get("payload") if isinstance(item, dict) else None
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("taskType") or "") != lesson.get("task_type"):
+                # 不同任务类型的现象不算同一个坑（"回测数据不足"≠"选股数据不足"）
+                continue
+            key = str(payload.get("symptomKey") or "").strip()
+            if score >= LESSON_DEDUP_THRESHOLD and key:
+                existing_key = key
+                break
+        if existing_key and existing_key != lesson.get("symptom"):
+            logger.info("经验判定为复发，改挂既有键 user=%s %s", user_id, existing_key)
+            lesson = {**lesson, "symptom": existing_key}
+        aligned.append(lesson)
+    return aligned
+
+
 def _save_lessons(user_id, session_key, raw_lessons, source_event_ids, line_ids=None) -> list:
     """规范化并写入经验（一律 pending 落库）。失败只记日志。"""
     try:
@@ -395,6 +470,7 @@ def _save_lessons(user_id, session_key, raw_lessons, source_event_ids, line_ids=
         return []
     if not normalized:
         return []
+    normalized = _align_duplicate_lessons(user_id, normalized)
     try:
         result = memory_store.save_lessons(user_id, session_key, normalized, source_event_ids)
     except Exception as exc:  # noqa: BLE001

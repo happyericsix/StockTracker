@@ -1,13 +1,17 @@
 """经验的规范化（与 facts.py 对称）。
 
-经验是"这类问题上次是怎么解决的"：症状 → 试过什么 → 最后怎么做成的 → 可复用做法。
+经验是"什么情境下用什么做法才有效"：情境 → 有效做法 → 不知道会怎样做差。
+它不要求踩坑——平顺完成的任务里发现的非默认做法同样是经验；
+判据只有一条：不知道这条，下次同样的情境下助手会做错或做差吗？
 
 <h3>为什么要专门的规范化</h3>
 1. **task_type 必须收敛**：中文"生成策略"和 `generate_strategy` 如果是两个键，
    同一个坑的复发次数就统计不出来，而复发次数正是"值不值得升格成 skill"的判据。
-2. **症状必须保留原始现象**：注入时靠它做匹配，"回测数据不足"比"出错了"有用得多。
-3. **必须有解法**：没有"怎么解决的"就不算经验，只是一句抱怨 —— 直接丢弃。
-4. **一律只做整理、不做判断**：去重与复发计数由 Java 侧按行数推导（见 MemoryLessonService）。
+2. **情境必须保留原始现象**：注入时靠它做匹配，"回测数据不足"比"出错了"有用得多。
+3. **必须有解法**：没有"怎么做成的"就不算经验，只是一句抱怨 —— 直接丢弃。
+4. **必须自证价值**：写不出"不知道这条会怎样做差"（why_nontrivial）的经验是
+   常识复述，挤占注入窗口还误导以后的对话 —— 直接丢弃。
+5. **一律只做整理、不做判断**：去重与复发计数由 Java 侧按行数推导（见 MemoryLessonService）。
 """
 from __future__ import annotations
 
@@ -40,6 +44,9 @@ MIN_CONFIDENCE = 0.3
 MAX_LESSONS_PER_SESSION = 5
 MAX_SYMPTOM_CHARS = 200
 MAX_FIELD_CHARS = 500
+# why_nontrivial 的最短长度：它要一句话说清"不知道这条，下次会怎么错/差"。
+# 撑不到这个长度的（"更稳""少走弯路"）等于没说，按写不出处理。
+MIN_WHY_CHARS = 8
 # 单条经验最多引用几行来源（防 LLM 把整段对话都标成"依据"）
 MAX_EVIDENCE_REFS = 8
 
@@ -100,7 +107,12 @@ def normalize(raw_lessons, source_event_ids=None, line_ids=None) -> list[dict]:
         resolution = str(item.get("resolution") or "").strip()
         rule = str(item.get("reusable_rule") or item.get("reusableRule") or "").strip()
         if not symptom or (not resolution and not rule):
-            # 没有症状、或者没有解法：不是一条可复用的经验
+            # 没有情境、或者没有解法：不是一条可复用的经验
+            continue
+        why = str(item.get("why_nontrivial") or item.get("whyNontrivial") or "").strip()
+        if len(why) < MIN_WHY_CHARS:
+            # 写不出"不知道这条会怎样做差"的是常识复述：一条平庸的记忆比没有更糟，
+            # 它会挤占注入窗口、误导以后每一次对话
             continue
         if _confidence(item.get("confidence")) < MIN_CONFIDENCE:
             continue

@@ -330,11 +330,34 @@ class MemoryLessonServiceTest {
         // 展示用原文，不是规范化键
         assertEquals("回测，数据不足。", item.get("symptom"));
         assertEquals("回测，数据不足。", item.get("symptomRaw"));
+        // 规范化键单独暴露：写入侧语义查重靠它把同义复发现象对齐到既有键
+        assertEquals("回测数据不足", item.get("symptomKey"));
         assertEquals("strategy:1", item.get("scope"));
         assertEquals(Map.of("标的", "600519"), item.get("context"));
         assertEquals(List.of("直接重跑", "仍然失败"), item.get("attempts"));
         // Jackson 把小数字解析成 Integer（不是 Long）——断言按内容比
         assertEquals(List.of(11, 13), item.get("evidenceEventIds"));
+    }
+
+    /**
+     * 同键收敛（2026-10-30）：同一个坑的第 N 次复发是键下的一行历史，不是 N 张卡片。
+     * 没有这一层，每巩固一次记忆页就多一条措辞略异的雷同条目，
+     * 而"复发 3 次建议升格"的信号又因为键对不上永远数不起来。
+     */
+    @Test
+    void recurrenceRowsCollapseToOneEntryPerKey() {
+        when(lessonRepo.findByUserIdOrderByIdDesc(1L)).thenReturn(List.of(
+                stored(3L, "backtest", "数据不足", MemoryLesson.STATUS_PENDING),   // 第 3 次复发
+                stored(2L, "backtest", "数据不足", MemoryLesson.STATUS_PENDING),
+                stored(1L, "backtest", "数据不足", MemoryLesson.STATUS_PENDING)));
+        when(lessonRepo.countByUserIdAndTaskTypeAndSymptomAndSupersedesIdIsNull(1L, "backtest", "数据不足"))
+                .thenReturn(3L);
+
+        List<Map<String, Object>> found = service.listForUser(1L, 10);
+
+        assertEquals(1, found.size());
+        assertEquals(3L, found.get(0).get("id"));
+        assertEquals(3L, found.get(0).get("occurrences"));
     }
 
     @Test

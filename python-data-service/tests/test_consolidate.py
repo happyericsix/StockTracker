@@ -249,6 +249,7 @@ LESSON_PAYLOAD = {
     "attempts": ["原样重跑"],
     "resolution": "先取更长周期的数据",
     "reusable_rule": "回测前确认历史条数≥20",
+    "why_nontrivial": "不知道要先数历史条数，回测会直接失败或全程空仓",
     "confidence": 0.7,
 }
 
@@ -341,6 +342,7 @@ def test_evidence_refs_resolve_to_specific_event_ids(monkeypatch):
     payload["lessons"] = [{
         "task_type": "backtest", "symptom": "回测显示回撤偏大",
         "resolution": "收紧止损到 5%", "reusable_rule": "回撤偏大先收紧止损再观察",
+        "why_nontrivial": "不收紧止损的话回撤会超出用户容忍度",
         "confidence": 0.8, "evidence_refs": [2, 3],
     }]
     calls = _patch(monkeypatch, EVENTS, json.dumps(payload, ensure_ascii=False))
@@ -379,6 +381,73 @@ def test_prompt_carries_line_numbers_and_ref_instructions(monkeypatch):
     assert "行号" in user_content and "[1]" in user_content
     assert "evidence_refs" in calls["messages"][0]["content"]
     assert "source_refs" in calls["messages"][0]["content"]
+
+
+# ==================== why_nontrivial 闸门（2026-10-30） ====================
+
+def test_lesson_without_a_reason_is_not_written(monkeypatch):
+    """写不出"不知道这条会怎样做差"的经验是常识复述，不落库。"""
+    payload = dict(VALID_SUMMARY)
+    payload["lessons"] = [dict(LESSON_PAYLOAD, why_nontrivial="")]   # 模型硬凑的空 why
+    calls = _patch(monkeypatch, EVENTS, json.dumps(payload, ensure_ascii=False))
+
+    consolidate.consolidate_session(1, "1:2026-09-14")
+
+    assert calls["lessons"] is None
+
+
+# ==================== 写入时语义查重（2026-10-30） ====================
+
+def _enable_semantic_dedup(monkeypatch, hits):
+    from agent import embeddings, vector_index
+
+    monkeypatch.setattr(embeddings, "is_enabled", lambda: True)
+    monkeypatch.setattr(vector_index, "semantic_search",
+                        lambda user_id, query, kinds=None, top_k=10: hits)
+
+
+def test_recurring_lesson_is_aligned_to_the_existing_key(monkeypatch):
+    """同一现象换措辞再现：改挂既有 symptom 键落库，让复发计数数得起来。"""
+    hits = [({"payload": {"taskType": "backtest", "symptomKey": "回测提示历史数据不足"}},
+             consolidate.LESSON_DEDUP_THRESHOLD + 0.05)]
+    _enable_semantic_dedup(monkeypatch, hits)
+    payload = dict(VALID_SUMMARY)
+    payload["lessons"] = [dict(LESSON_PAYLOAD, symptom="回测时报数据不够用")]  # 同义改写
+    calls = _patch(monkeypatch, EVENTS, json.dumps(payload, ensure_ascii=False))
+
+    consolidate.consolidate_session(1, "1:2026-09-14")
+
+    assert calls["lessons"]["lessons"][0]["symptom"] == "回测提示历史数据不足"
+
+
+def test_semantic_match_of_a_different_task_type_does_not_align(monkeypatch):
+    """不同任务类型的现象不是同一个坑：taskType 对不上就不改键。"""
+    hits = [({"payload": {"taskType": "screening", "symptomKey": "回测提示历史数据不足"}},
+             0.99)]
+    _enable_semantic_dedup(monkeypatch, hits)
+    payload = dict(VALID_SUMMARY)
+    payload["lessons"] = [LESSON_PAYLOAD]
+    calls = _patch(monkeypatch, EVENTS, json.dumps(payload, ensure_ascii=False))
+
+    consolidate.consolidate_session(1, "1:2026-09-14")
+
+    assert calls["lessons"]["lessons"][0]["symptom"] == "回测提示历史数据不足"  # 原样
+
+
+def test_dedup_fails_open_when_embeddings_are_disabled(monkeypatch):
+    """embedding 不可用：查重静默关闭，退回"每条按新键落库"的现状。"""
+    from agent import embeddings, vector_index
+
+    monkeypatch.setattr(embeddings, "is_enabled", lambda: False)
+    monkeypatch.setattr(vector_index, "semantic_search",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("不该查")))
+    payload = dict(VALID_SUMMARY)
+    payload["lessons"] = [LESSON_PAYLOAD]
+    calls = _patch(monkeypatch, EVENTS, json.dumps(payload, ensure_ascii=False))
+
+    consolidate.consolidate_session(1, "1:2026-09-14")
+
+    assert calls["lessons"]["lessons"][0]["symptom"] == "回测提示历史数据不足"
 
 
 # ==================== 显著性门控（2026-10-20）：寒暄不配成为经验 ====================

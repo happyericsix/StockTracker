@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """经验记忆的规范化，以及"工具结果入账"（经验的原料）。
 
-经验 = 症状 → 试过什么 → 最后怎么做成的 → 可复用做法。
-它会被注入到以后的对话里，所以两个边界必须钉死：
+经验 = 情境 → 有效做法 → 不知道会怎样做差。它不要求踩坑。
+它会被注入到以后的对话里，所以三个边界必须钉死：
 1. **没有解法的"经验"直接丢弃**（那只是一句抱怨）；
-2. **task_type 必须收敛成同一个键**，否则同一个坑的复发次数统计不出来，
+2. **写不出 why_nontrivial 的直接丢弃**（"不知道这条会怎样做差"说不出来，
+   它就是常识复述——一条平庸的记忆比没有更糟）；
+3. **task_type 必须收敛成同一个键**，否则同一个坑的复发次数统计不出来，
    而复发次数正是"值不值得升格成 skill"的判据。
 """
 import json
@@ -15,6 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import agent.react_agent as ra
 from agent import lessons, memory_store, tool_contract as tc
+
+
+WHY = "不带 symbol 查出来的是大盘要闻，用户会拿到无关结果"
 
 
 # ==================== task_type 收敛 ====================
@@ -38,6 +43,7 @@ def test_lesson_is_normalized():
         "attempts": ["原样重跑", "换参数"],
         "resolution": "先取更长周期的数据",
         "reusable_rule": "回测前确认历史条数≥20",
+        "why_nontrivial": "不知道要先数历史条数，回测会直接失败或全程空仓",
         "confidence": 0.8,
     }], source_event_ids=[11, 12])
 
@@ -55,23 +61,64 @@ def test_lesson_is_normalized():
 
 def test_lesson_without_a_resolution_is_dropped():
     """没有"怎么解决的"就不是经验，只是一句抱怨。"""
-    assert lessons.normalize([{"task_type": "回测", "symptom": "回测很慢"}]) == []
+    assert lessons.normalize([{
+        "task_type": "回测", "symptom": "回测很慢", "why_nontrivial": WHY,
+    }]) == []
 
 
 def test_lesson_without_a_symptom_is_dropped():
-    assert lessons.normalize([{"task_type": "回测", "resolution": "换数据源"}]) == []
+    assert lessons.normalize([{
+        "task_type": "回测", "resolution": "换数据源", "why_nontrivial": WHY,
+    }]) == []
 
 
 def test_low_confidence_lesson_is_dropped():
     assert lessons.normalize([{
-        "task_type": "回测", "symptom": "慢", "resolution": "换数据源", "confidence": 0.05,
+        "task_type": "回测", "symptom": "慢", "resolution": "换数据源",
+        "why_nontrivial": WHY, "confidence": 0.05,
     }]) == []
+
+
+# ==================== why_nontrivial 闸门（2026-10-30） ====================
+
+def test_lesson_without_why_is_dropped():
+    """写不出"不知道这条会怎样做差"的经验是常识复述，不值得占注入窗口。"""
+    raw = [{"task_type": "backtest", "symptom": "数据不足", "resolution": "换标的"}]
+    assert lessons.normalize(raw) == []
+
+
+def test_lesson_with_vacuous_why_is_dropped():
+    """空话式的 why（"更准确""效果更好"）撑不过最短长度，等于没说。"""
+    raw = [{"task_type": "backtest", "symptom": "数据不足",
+            "resolution": "换标的", "why_nontrivial": "更稳"}]
+    assert lessons.normalize(raw) == []
+
+
+def test_smooth_task_with_non_default_method_passes_the_gate():
+    """平顺完成的任务也能产生经验：判据是"做法非默认"，不是"踩过坑"。
+
+    用户问个股新闻、agent 发现不带 symbol 拿到的是大盘要闻——全程没有失败，
+    但这条经验下次能改变行为，必须放行。
+    """
+    normalized = lessons.normalize([{
+        "task_type": "news_lookup", "symptom": "查个股新闻返回的是大盘要闻",
+        "attempts": [],
+        "resolution": "news_lookup 带上 symbol 重查",
+        "reusable_rule": "查个股新闻必须传 symbol",
+        "why_nontrivial": WHY,
+        "confidence": 0.8,
+    }])
+
+    assert len(normalized) == 1
+    assert normalized[0]["task_type"] == "news_lookup"
 
 
 def test_same_symptom_appears_once_per_session():
     raw = [
-        {"task_type": "回测", "symptom": "数据不足", "resolution": "换标的"},
-        {"task_type": "backtest", "symptom": "数据不足", "resolution": "换周期"},
+        {"task_type": "回测", "symptom": "数据不足", "resolution": "换标的",
+         "why_nontrivial": WHY},
+        {"task_type": "backtest", "symptom": "数据不足", "resolution": "换周期",
+         "why_nontrivial": WHY},
     ]
     normalized = lessons.normalize(raw)
 
@@ -82,14 +129,15 @@ def test_same_symptom_appears_once_per_session():
 def test_reusable_rule_alone_is_enough():
     normalized = lessons.normalize([{
         "task_type": "回测", "symptom": "数据不足", "reusable_rule": "先检查条数",
+        "why_nontrivial": WHY,
     }])
     assert len(normalized) == 1
     assert normalized[0]["reusable_rule"] == "先检查条数"
 
 
 def test_batch_is_capped():
-    raw = [{"task_type": "backtest", "symptom": f"症状{i}", "resolution": "做法"}
-           for i in range(20)]
+    raw = [{"task_type": "backtest", "symptom": f"症状{i}", "resolution": "做法",
+            "why_nontrivial": WHY} for i in range(20)]
     assert len(lessons.normalize(raw)) == lessons.MAX_LESSONS_PER_SESSION
 
 

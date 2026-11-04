@@ -440,6 +440,10 @@ public class MemoryLessonService {
         item.put("symptom", lesson.getSymptomText() != null && !lesson.getSymptomText().isBlank()
                 ? lesson.getSymptomText() : lesson.getSymptom());
         item.put("symptomRaw", lesson.getSymptomText());
+        // 规范化键（lessonKey 的 symptom 半边）：写入侧语义查重对齐既有键用
+        // （Python consolidate._align_duplicate_lessons：同义复发现象改挂这个键，
+        // 复发计数才数得起来），这里的 toMap 也是索引语料的来源
+        item.put("symptomKey", lesson.getSymptom());
         item.put("context", fromJson(lesson.getContext()));
         item.put("attempts", fromJson(lesson.getAttempts()));
         item.put("resolution", lesson.getResolution());
@@ -498,10 +502,19 @@ public class MemoryLessonService {
         int max = limit <= 0 ? 50 : Math.min(limit, 200);
         List<MemoryLesson> rows = lessonRepo.findByUserIdOrderByIdDesc(userId);
         Set<Long> supersededIds = supersededIdsOf(rows);
+        // 同键收敛到最新一行（2026-10-30）：同一个坑的第 N 次复发是键下的一行历史，
+        // 不是一张新卡片——否则每巩固一次记忆页就多一条雷同条目。复发次数由
+        // occurrences（"出现过 N 次"）呈现，全部历史行仍可经 history() 查。
+        // 被修订的旧行保留展示（带"已修订"标记）：修订链是白盒的一部分，
+        // 收敛针对的是复发堆积，不是修订历史。
+        Set<String> seenKeys = new HashSet<>();
         List<Map<String, Object>> out = new ArrayList<>();
         for (MemoryLesson lesson : rows) {
             if (out.size() >= max) {
                 break;
+            }
+            if (!seenKeys.add(lesson.lessonKey()) && !supersededIds.contains(lesson.getId())) {
+                continue;
             }
             out.add(toMap(lesson, supersededIds));
         }
