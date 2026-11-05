@@ -94,3 +94,95 @@ class TestPromptDiscipline:
         assert "不能取消止损" in prompt or "比你快" in prompt
         # 判断顺序：先仓库后市面再信号
         assert "先仓库" in prompt and "再市面" in prompt
+
+
+class TestChallenger:
+    """Tier 2 挑战者（2026-11-05）：合并语义宪法 = 只能更保守。"""
+
+    @staticmethod
+    def _verdicts():
+        return [
+            {"strategy_id": 1, "action": "approve", "size_fraction": 0.5,
+             "confidence": 0.7, "reason": "顺势", "thesis_check": None},
+            {"strategy_id": 2, "action": "sell", "size_fraction": 1.0,
+             "confidence": 0.6, "reason": "thesis 已破", "thesis_check": "趋势没了"},
+        ]
+
+    def test_downgrade_entry_allowed(self):
+        challenge = {"overturns": [{"strategy_id": 1, "action": "veto",
+                                    "size_fraction": 0.0, "reason": "胜率不支持"}],
+                     "sustains": []}
+        merged, notes = ag.merge_conservative(self._verdicts(), challenge)
+        by_id = {v["strategy_id"]: v for v in merged}
+        assert by_id[1]["action"] == "veto" and "challenge_note" in by_id[1]
+        assert any("1: approve → veto" in n for n in notes)
+
+    def test_upgrade_is_rejected(self):
+        # 挑战者想 veto→approve（更激进）：驳回——刹车片没有油门职能
+        verdicts = [{"strategy_id": 3, "action": "veto", "size_fraction": 0.0,
+                     "confidence": 0.9, "reason": "", "thesis_check": None}]
+        challenge = {"overturns": [{"strategy_id": 3, "action": "approve",
+                                    "size_fraction": 0.8, "reason": "看错了"}],
+                     "sustains": []}
+        merged, notes = ag.merge_conservative(verdicts, challenge)
+        assert merged[0]["action"] == "veto"
+        assert any("驳回" in n for n in notes)
+
+    def test_sell_can_only_soften(self):
+        # sell → partial_sell 合法（降风险方向的降级链）；sell → approve 越权驳回
+        challenge = {"overturns": [
+            {"strategy_id": 2, "action": "partial_sell", "size_fraction": 0.5, "reason": "分批"},
+            {"strategy_id": 2, "action": "approve", "size_fraction": 0.5, "reason": "抄底"}],
+            "sustains": []}
+        merged, _ = ag.merge_conservative(self._verdicts(), challenge)
+        by_id = {v["strategy_id"]: v for v in merged}
+        assert by_id[2]["action"] == "partial_sell"   # 第一次降级生效
+
+    def test_size_only_lowering(self):
+        challenge = {"overturns": [{"strategy_id": 1, "action": "approve",
+                                    "size_fraction": 0.2, "reason": "证据打折"}],
+                     "sustains": []}
+        merged, notes = ag.merge_conservative(self._verdicts(), challenge)
+        by_id = {v["strategy_id"]: v for v in merged}
+        assert by_id[1]["action"] == "approve" and by_id[1]["size_fraction"] == 0.2
+        assert any("压低" in n for n in notes)
+
+    def test_unknown_strategy_ignored(self):
+        challenge = {"overturns": [{"strategy_id": 99, "action": "veto",
+                                    "size_fraction": 0, "reason": "?"}], "sustains": []}
+        merged, notes = ag.merge_conservative(self._verdicts(), challenge)
+        assert len(merged) == 2 and any("99" in n for n in notes)
+
+    def test_parse_failure_sustains_all(self):
+        out = ag.parse_challenge("我觉得不对")
+        assert out["degraded"] is True and out["overturns"] == []
+
+    def test_challenge_decide_failure_maintains_original(self):
+        def boom(*a, **kw):
+            raise RuntimeError("llm down")
+        verdicts = self._verdicts()
+        out = ag.challenge_decide({"account": {}}, verdicts, completion=boom)
+        assert out["degraded"] is True
+        assert out["merged"] == verdicts   # 维持原裁决，决策安全不受挑战失败影响
+
+    def test_downgrade_carries_challenger_size(self):
+        # 动作降级时仓位必须跟着挑战者走（冒烟实测暴露的 bug：approve 0.5 →
+        # downsize 仓位却还是 0.5——降了档维持原仓位自相矛盾）
+        challenge = {"overturns": [{"strategy_id": 1, "action": "downsize",
+                                    "size_fraction": 0.2, "reason": "证据打折"}],
+                     "sustains": []}
+        merged, _ = ag.merge_conservative(self._verdicts(), challenge)
+        by_id = {v["strategy_id"]: v for v in merged}
+        assert by_id[1]["action"] == "downsize"
+        assert by_id[1]["size_fraction"] == 0.2
+
+    def test_downgrade_without_size_halves(self):
+        challenge = {"overturns": [{"strategy_id": 1, "action": "veto",
+                                    "size_fraction": 0.0, "reason": "否决"}],
+                     "sustains": []}
+        merged, _ = ag.merge_conservative(
+            [{"strategy_id": 5, "action": "approve", "size_fraction": 0.8,
+              "confidence": 0.9, "reason": "", "thesis_check": None}],
+            {"overturns": [{"strategy_id": 5, "action": "downsize",
+                            "size_fraction": 0.0, "reason": "没给仓位"}], "sustains": []})
+        assert merged[0]["size_fraction"] == 0.4   # 挑战者没给仓位 → 原值一半

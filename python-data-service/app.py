@@ -177,7 +177,26 @@ def health():
         "strategy_review": _strategy_review_health(),
         "trading_committee": _committee_health(),
         "execution_contract": _contract_health(),
+        "account_gate": _account_gate_health(),
     }
+
+
+def _account_gate_health():
+    """守门员自描述（2026-11-05）：动作集/预算口径 + 挑战者合并语义。
+
+    Java 侧的调用/降级/截断/token 计数在 AccountGateService.stats()（进程内聚合，
+    随 Java /paper 域暴露）；这里只报 Python 侧的静态口径，两边不重复计数。
+    """
+    try:
+        from agent import account_gate
+        info = account_gate.describe()
+        info["challenge"] = {
+            "semantics": "conservative_only",   # 挑战者只能更保守，越权升格一律驳回
+            "max_tokens": account_gate.CHALLENGE_MAX_TOKENS,
+        }
+        return info
+    except Exception as e:  # noqa:BLE001
+        return {"error": f"守门员健康探针失败：{type(e).__name__}"}
 
 
 def _mcp_health():
@@ -1503,6 +1522,35 @@ async def account_gate_endpoint(req: Request):
         return {"valid": False, "degraded": True, "verdicts": [], "escalate": None,
                 "next_review": None, "summary": f"守门员端点异常：{type(e).__name__}",
                 "warnings": ["endpoint_error"], "gate_tokens": 0}
+
+
+@app.post("/api/v1/agent/account-gate-challenge")
+async def account_gate_challenge_endpoint(req: Request):
+    """**守门员挑战者**（Tier 2，2026-11-05）：高注时刻的第二双眼睛。
+
+    请求体与 /agent/account-gate 同源面板 + first_verdicts（第一次裁决）。
+    合并语义宪法：挑战者只能让裁决**更保守**（approve→downsize→veto /
+    sell→partial_sell→hold / 压低仓位），越权升格一律驳回——见
+    account_gate.merge_conservative。挑战失败 = 维持原裁决（degraded 不影响决策安全）。
+    """
+    from agent import account_gate
+    try:
+        data = await req.json()
+        payload = data if isinstance(data, dict) else {}
+        first = payload.get("first_verdicts")
+        if not isinstance(first, list) or not first:
+            return {"valid": False, "error": "first_verdicts 不能为空"}
+        completion = _llm_callables(data, data.get("user_id"))[0]
+        result = await asyncio.to_thread(
+            account_gate.challenge_decide, payload, first, completion)
+        result["valid"] = True
+        return result
+    except Exception as e:
+        logger.error(f"account gate challenge error: {e}", exc_info=True)
+        return {"valid": False, "degraded": True, "overturns": [], "sustains": [],
+                "merged": data.get("first_verdicts") if isinstance(data, dict) else [],
+                "notes": [], "summary": f"挑战端点异常：{type(e).__name__}",
+                "warnings": ["endpoint_error"], "challenge_tokens": 0}
 
 
 # ==================== 周反思（P2 经验回流闭环，2026-10-12） ====================

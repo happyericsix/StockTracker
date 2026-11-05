@@ -19,6 +19,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.springframework.test.util.ReflectionTestUtils;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
@@ -58,6 +59,8 @@ class AccountGateServiceTest {
     private PortfolioService portfolioService;
     @Mock
     private StrategyClient strategyClient;
+    @Mock
+    private com.happyericsix.stocktracker.repository.PaperGateEventRepository gateEventRepository;
 
     private AccountGateService service;
     private final ObjectMapper mapper = new ObjectMapper();
@@ -73,7 +76,7 @@ class AccountGateServiceTest {
     void setUp() {
         service = new AccountGateService(strategyRepository, paperAccountRepository,
                 paperAuthorizationRepository, paperTradeRepository, lotRepository,
-                portfolioService, strategyClient);
+                portfolioService, strategyClient, gateEventRepository);
         ReflectionTestUtils.setField(service, "enabled", true);
         ReflectionTestUtils.setField(service, "shadow", true);
         ReflectionTestUtils.setField(service, "allowOpen", false);
@@ -81,6 +84,9 @@ class AccountGateServiceTest {
         ReflectionTestUtils.setField(service, "cooldownMs", 900000L);
         ReflectionTestUtils.setField(service, "nearStopPct", new BigDecimal("1.0"));
         ReflectionTestUtils.setField(service, "concentrationPct", new BigDecimal("30"));
+        ReflectionTestUtils.setField(service, "challengerEnabled", true);
+        ReflectionTestUtils.setField(service, "challengePositionPct", new BigDecimal("30"));
+        ReflectionTestUtils.setField(service, "challengeNearStopPct", new BigDecimal("0.5"));
     }
 
     private User user() {
@@ -223,5 +229,47 @@ class AccountGateServiceTest {
         AccountGateService.GateCall call = service.decide(
                 1L, mapper.createObjectNode(), mapper.createArrayNode(), "x");
         assertThat(call.status()).isEqualTo("unavailable");
+    }
+
+    @Test
+    void challengeTriggersFireNearHardLine() {
+        mockHoldingPortfolio();
+        // 现价 6.84：-4.60%，距 -5% 止损线 0.40pt ≤ 0.5 → Tier 2 触发
+        paperAccountRepository.findByStrategyId(10L).orElseThrow()
+                .setLastPrice(new BigDecimal("6.84"));
+        ObjectNode panel = service.buildAccountPanel(1L);
+        assertThat(service.challengeTriggers(panel))
+                .anyMatch(t -> t.startsWith("near_hard_line"));
+    }
+
+    @Test
+    void challengeTriggersFireForBigPositionShare() {
+        mockHoldingPortfolio();
+        // 仓位占比：2800×6.90=19320 / 99320 ≈ 19.5%——不到 30% 不触发；
+        // 把现金抽走一半让占比过 30% → position_share 触发
+        PaperAccount account = paperAccountRepository.findByStrategyId(10L).orElseThrow();
+        account.setCash(new BigDecimal("40000.00"));
+        account.setEquity(new BigDecimal("59320.00"));   // 19320/59320 ≈ 32.6%
+        ObjectNode panel = service.buildAccountPanel(1L);
+        assertThat(service.challengeTriggers(panel))
+                .anyMatch(t -> t.startsWith("position_share"));
+    }
+
+    @Test
+    void panelFeedsBackRecentGateDecisions() {
+        mockHoldingPortfolio();
+        when(gateEventRepository.findByUserIdAndCreatedAtAfterOrderByCreatedAtDesc(
+                eq(1L), any(java.time.LocalDateTime.class)))
+                .thenReturn(List.of(com.happyericsix.stocktracker.entity.PaperGateEvent.builder()
+                        .user(user()).strategy(holdingStrategy())
+                        .signature("signal:buy:price_cross_ma")
+                        .action("veto").reason("满仓下跌中噪音信号")
+                        .executed(false).wakeSource("signal")
+                        .build()));
+        ObjectNode panel = service.buildAccountPanel(1L);
+        JsonNode recent = panel.path("account").path("recent_gate_decisions");
+        assertThat(recent.isArray() && recent.size() >= 2).isTrue();   // note 行 + 事件行
+        assertThat(recent.get(1).path("action").asText()).isEqualTo("veto");
+        assertThat(recent.get(0).path("note").asText()).contains("自洽");
     }
 }

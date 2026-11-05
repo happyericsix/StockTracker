@@ -32,10 +32,20 @@ public class PaperController {
     private final PaperTradingService paperTradingService;
     private final com.happyericsix.stocktracker.service.PortfolioService portfolioService;
     private final com.happyericsix.stocktracker.repository.UserRepository userRepository;
+    private final com.happyericsix.stocktracker.service.AccountGateService accountGateService;
 
     @GetMapping("/overview")
     public Result<List<PaperOverviewResponse>> overview(Authentication authentication) {
         return Result.success(paperTradingService.getOverview(authentication.getName()));
+    }
+
+    /**
+     * 守门员度量快照（2026-11-05）：调用数/降级数/疑似截断/token 总量/挑战降级数。
+     * "多花的 token 值不值"要靠这组数据回答——影子期结束时对着它调档位。
+     */
+    @GetMapping("/gate-stats")
+    public Result<Map<String, Object>> gateStats() {
+        return Result.success(accountGateService.stats());
     }
 
     /**

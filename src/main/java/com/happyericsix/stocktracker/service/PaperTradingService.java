@@ -2066,10 +2066,55 @@ public class PaperTradingService {
                         ExecutionContract.SKIP_AGENT_LLM_UNAVAILABLE);
             }
             default -> {
+                // Tier 2 挑战者（2026-11-05）：高注时刻（仓位占比/距硬线/回撤过半）多花
+                // 一次调用专门反驳。合并语义"只能更保守"在 Python 侧；失败维持原裁决。
+                JsonNode gateResponse = call.response();
+                if (accountGateService.challengerEnabled()) {
+                    var triggers = accountGateService.challengeTriggers(payload);
+                    if (!triggers.isEmpty() && hasActionableVerdict(gateResponse)) {
+                        JsonNode challenge = accountGateService.challengeQuietly(
+                                userId, payload, gateResponse);
+                        if (challenge != null) {
+                            gateResponse = mergeChallengeIntoGate(gateResponse, challenge);
+                            log.info("gate challenge applied (triggers={}): {}",
+                                    triggers, challenge.path("summary").asText(""));
+                        }
+                    }
+                }
                 return gateApplyVerdicts(strategy, account, result, authorization, barTime,
-                        call.response(), call.signature(), "signal");
+                        gateResponse, call.signature(), "signal");
             }
         }
+    }
+
+    /** 有无可执行类 verdict（挑战只对"要动"的裁决有意义，全 hold/veto 不值得挑战）。 */
+    private static boolean hasActionableVerdict(JsonNode gateResponse) {
+        JsonNode verdicts = gateResponse.path("verdicts");
+        for (JsonNode v : verdicts.isArray() ? verdicts : List.<JsonNode>of()) {
+            if (List.of("approve", "downsize", "sell", "partial_sell")
+                    .contains(v.path("action").asText(""))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 把挑战结果并回守门员响应：merged verdicts 覆盖原 verdicts（Python 侧已按
+     * "只能更保守"合并），挑战审计（overturns/notes/summary）挂进 gate 块留痕。
+     */
+    private JsonNode mergeChallengeIntoGate(JsonNode gateResponse, JsonNode challenge) {
+        if (gateResponse instanceof ObjectNode mutable) {
+            mutable.set("verdicts", challenge.path("merged"));
+            ObjectNode audit = mutable.has("gate") && mutable.get("gate") instanceof ObjectNode gateNode
+                    ? gateNode : mutable.putObject("gate");
+            audit.set("challenge_overturns", challenge.path("overturns"));
+            audit.set("challenge_notes", challenge.path("notes"));
+            audit.put("challenge_quality", challenge.path("verdict_quality").asText(""));
+            audit.put("challenge_summary", challenge.path("summary").asText(""));
+            return mutable;
+        }
+        return gateResponse;
     }
 
     /**
@@ -2342,6 +2387,16 @@ public class PaperTradingService {
                 AccountGateService.GateCall call = accountGateService.decide(userId, panel, wake, signature);
                 if (!call.ok() || call.response() == null) {
                     continue;   // 冷却/预算/降级：扫描路径不留策略级痕迹（无具体策略可挂）
+                }
+                // Tier 2 挑战者：风险扫描的高注时刻（near_stop ≤0.5pt 正是触发线之一）
+                JsonNode gateResponse = call.response();
+                if (accountGateService.challengerEnabled()
+                        && !accountGateService.challengeTriggers(panel).isEmpty()
+                        && hasActionableVerdict(gateResponse)) {
+                    JsonNode challenge = accountGateService.challengeQuietly(userId, panel, gateResponse);
+                    if (challenge != null) {
+                        gateResponse = mergeChallengeIntoGate(gateResponse, challenge);
+                    }
                 }
                 // 风险唤醒的 verdicts：挂在**第一个被点名的策略**上执行（verdict 本身
                 // 可指向任意策略），无信号——裁决的是"该不该降风险"

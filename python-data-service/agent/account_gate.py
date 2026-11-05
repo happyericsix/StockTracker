@@ -24,9 +24,12 @@ from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-#: 守门员单次输出 max_tokens：verdicts（每条 action/size/confidence/理由/thesis_check）
-#: + escalate + next_review + summary，1200 给推理型模型留了头部余量。
-GATE_MAX_TOKENS = 1200
+#: 守门员单次输出 max_tokens（2026-11-05 从 1200 提到 2400）：
+#: 多仓位 verdicts（每条 action/size/confidence/理由/thesis_check）+ escalate +
+#: next_review + summary，1200 在 3~4 条 verdict 时已到水位线——被截断的后果是
+#: 解析失败静默降级成 hold（省 500 token，付"该减仓那次没减"）。
+#: 决策类调用的 token 成本比它管的钱低 3~4 个数量级（见花费梯度设计）。
+GATE_MAX_TOKENS = 2400
 
 # 动作封闭集（结算侧按它执行；未知动作一律按 hold 处理）。
 # 信号裁决类：approve=按信号执行 / veto=否决 / downsize=缩量执行 / flag=只标记给委员会
@@ -240,3 +243,202 @@ def describe() -> dict:
     """给 /health 与调试用。"""
     return {"actions": list(GATE_ACTIONS), "max_tokens_per_call": GATE_MAX_TOKENS,
             "llm_calls_per_decision": 1}
+
+
+# ==================== Tier 2：挑战者（高注时刻的第二双眼睛，2026-11-05） ====================
+#
+# 触发由 Java 侧按**风险规则**判定（仓位占比 ≥30% / 距硬线 ≤0.5pt / 账户回撤过半），
+# 本模块只做两件事：挑战一次 + 保守合并。
+#
+# 合并语义是本设计的宪法：**挑战者只能让裁决更保守，不能更激进**——
+# sustain（维持）或 downgrade（approve→downsize→veto，sell→partial_sell→hold）。
+# 理由与方向不对称同源：第二双眼睛的价值是拦错误，不是加仓位的胆气；挑战者想
+# 拥护更激进的动作，那不是它的职权（那是委员会开会的事）。
+
+#: 保守序：越靠左越激进。挑战者只能把 verdict 向右移。
+_CONSERVATISM_ORDER = {
+    ACTION_APPROVE: 0,
+    ACTION_DOWNSIZE: 1,
+    ACTION_SELL: 0,        # sell/partial_sell 是降风险动作，与 approve 同档起点
+    ACTION_PARTIAL_SELL: 1,
+    ACTION_HOLD: 2,
+    ACTION_VETO: 3,
+    ACTION_FLAG: 2,
+}
+#: 降风险方向的降级链（卖出类：清仓 → 减仓 → 不动）
+_RISK_DOWNGRADE = {ACTION_SELL: ACTION_PARTIAL_SELL, ACTION_PARTIAL_SELL: ACTION_HOLD}
+#: 入场方向的降级链（买入类：执行 → 缩量 → 否决）
+_ENTRY_DOWNGRADE = {ACTION_APPROVE: ACTION_DOWNSIZE, ACTION_DOWNSIZE: ACTION_VETO}
+
+CHALLENGE_MAX_TOKENS = 1600
+
+
+def challenge_system_prompt() -> str:
+    return (
+        "你是挑战者——账户守门员的第二次独立审视。第一次裁决已经给出（first_verdicts），"
+        "你的任务是**专门反驳它**：找它的证据漏洞、仓位计算错误、被忽略的账户事实、"
+        "与守门员自己近期裁决的矛盾、thesis_check 的敷衍。\n"
+        "只输出一个 json 对象（不要任何其它文字）：\n"
+        '{"overturns": [{"strategy_id": 1, "action": "approve|downsize|veto|hold|'
+        'partial_sell", "size_fraction": 0.0-1.0, "reason": "反驳依据(≤60字)"}],\n'
+        ' "sustains": [{"strategy_id": 2, "reason": "为什么第一次裁决站得住"}],\n'
+        ' "verdict_quality": "sound|flawed|shallow", "summary": "一句话"}\n'
+        "硬纪律：你**只能让裁决更保守**——把 approve 降为 downsize/veto、把 sell 降为 "
+        "partial_sell/hold、或压低 size_fraction。你无权把 veto 升成 approve、无权调高"
+        "仓位（那是委员会的职权，不是刹车片的）。证据不足推翻时选 sustain 并说清"
+        "为什么第一次是对的。克制是美德：大部分挑战的结果应该是 sustain。"
+    )
+
+
+def parse_challenge(text: str) -> dict:
+    """解析挑战输出（保守优先）：读不懂 = 全部 sustain（挑战失败不改变原裁决）。"""
+    body = str(text or "")
+    start, end = body.find("{"), body.rfind("}")
+    payload = None
+    if 0 <= start < end:
+        try:
+            payload = json.loads(body[start:end + 1])
+        except ValueError:
+            payload = None
+    if not isinstance(payload, dict):
+        return {"overturns": [], "sustains": [], "verdict_quality": "unknown",
+                "summary": "输出无法解析", "warnings": ["挑战者输出不是 JSON"],
+                "degraded": True}
+    warnings: list[str] = []
+    overturns = []
+    for item in payload.get("overturns") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            strategy_id = int(item.get("strategy_id"))
+        except (TypeError, ValueError):
+            continue
+        action = str(item.get("action") or "").strip().lower()
+        if action not in GATE_ACTIONS:
+            warnings.append(f"挑战者未知动作 {action!r}，忽略")
+            continue
+        overturns.append({"strategy_id": strategy_id, "action": action,
+                          "size_fraction": _f(item.get("size_fraction")) or 0.0,
+                          "reason": str(item.get("reason") or "").strip()[:120]})
+    sustains = [str(s.get("reason") or "").strip()[:120]
+                for s in payload.get("sustains") or [] if isinstance(s, dict)]
+    return {"overturns": overturns, "sustains": sustains,
+            "verdict_quality": str(payload.get("verdict_quality") or "unknown")[:16],
+            "summary": str(payload.get("summary") or "").strip()[:200],
+            "warnings": warnings, "degraded": False}
+
+
+def merge_conservative(verdicts: list[dict], challenge: dict) -> tuple[list[dict], list[str]]:
+    """保守合并：挑战者的 overturn 只能沿降级链向下移或压低仓位。
+
+    返回 (合并后的 verdicts, 合并说明)。原裁决结构不变（新列表），
+    被降级的 verdict 带 challenge_note（理由进痕迹）。
+    """
+    notes: list[str] = []
+    by_id = {v["strategy_id"]: dict(v) for v in verdicts}
+    for overturn in challenge.get("overturns") or []:
+        target = by_id.get(overturn["strategy_id"])
+        if target is None:
+            notes.append(f"挑战者指向不存在的 strategy {overturn['strategy_id']}，忽略")
+            continue
+        original = target["action"]
+        requested = overturn["action"]
+        # ① 只允许同方向或跨到更保守的"降风险"动作（veto/hold 任何方向都合法）
+        if requested in (ACTION_VETO, ACTION_HOLD):
+            downgrade_chain = (_ENTRY_DOWNGRADE if original in (ACTION_APPROVE, ACTION_DOWNSIZE)
+                               else _RISK_DOWNGRADE)
+        elif original in (ACTION_APPROVE, ACTION_DOWNSIZE):
+            downgrade_chain = _ENTRY_DOWNGRADE
+        else:
+            downgrade_chain = _RISK_DOWNGRADE
+        # ② 合法性：requested 必须在原动作的降级链可达集合里，或与原动作相同
+        reachable = set(downgrade_chain.values()) | {original}
+        if requested not in reachable:
+            notes.append(f"挑战者想把 strategy {overturn['strategy_id']} 从 {original} "
+                         f"改成 {requested}（更激进/越权），驳回——挑战者只能更保守")
+            continue
+        if requested != original:
+            target["action"] = requested
+            target["challenge_note"] = overturn["reason"]
+            target["confidence"] = None   # 被挑战降级后置信度不再可信
+            # 动作降级时带上挑战者给的仓位（它是新动作的目标仓位）；
+            # 没给或越界则保守取原值的一半——降了档还维持原仓位是自相矛盾
+            new_size = overturn.get("size_fraction") or 0.0
+            if 0 < new_size <= 1:
+                target["size_fraction"] = round(new_size, 4)
+            else:
+                target["size_fraction"] = round((target.get("size_fraction") or 0.0) / 2, 4)
+            notes.append(f"strategy {overturn['strategy_id']}: {original} → {requested}"
+                         f"（{overturn['reason']}）")
+        else:
+            # ③ 动作相同但压低仓位：只取更低值
+            new_size = overturn.get("size_fraction") or 0.0
+            if 0 < new_size < (target.get("size_fraction") or 0.0):
+                target["size_fraction"] = round(new_size, 4)
+                target["challenge_note"] = overturn["reason"]
+                notes.append(f"strategy {overturn['strategy_id']}: 仓位压低至 {new_size}"
+                             f"（{overturn['reason']}）")
+    return list(by_id.values()), notes
+
+
+def challenge_decide(payload: dict, first_verdicts: list[dict],
+                     completion: Optional[Callable] = None) -> dict:
+    """永不抛异常：挑战失败 = 维持原裁决（degraded=True 只影响度量，不影响决策安全）。"""
+    import llm_service
+
+    if not first_verdicts:
+        return {**_gate_result(first_verdicts, None, None, "无裁决可挑战",
+                               ["挑战者收到空裁决"], degraded=True), "challenge_tokens": 0}
+    challenge_payload = dict(payload if isinstance(payload, dict) else {})
+    challenge_payload["first_verdicts"] = first_verdicts
+
+    checker = getattr(llm_service, "completion_available", None) \
+        or getattr(llm_service, "_is_available", None)
+    if callable(checker):
+        try:
+            if not checker(completion):
+                return {"overturns": [], "sustains": [], "merged": first_verdicts,
+                        "notes": [], "summary": "模型服务不可用，维持原裁决",
+                        "warnings": ["挑战者前探测：LLM 不可用"], "degraded": True,
+                        "challenge_tokens": 0}
+        except Exception:  # noqa: BLE001
+            pass
+
+    call = completion or llm_service.chat_completion
+    messages = [{"role": "system", "content": challenge_system_prompt()},
+                {"role": "user", "content": json.dumps(challenge_payload,
+                                                       ensure_ascii=False, default=str)}]
+    try:
+        if completion is None:
+            choice = call(messages, temperature=0.1, max_tokens=CHALLENGE_MAX_TOKENS,
+                          response_format={"type": "json_object"})
+        else:
+            choice = call(messages, temperature=0.1, max_tokens=CHALLENGE_MAX_TOKENS)
+    except Exception as exc:  # noqa: BLE001 —— 挑战失败 = 维持原裁决
+        logger.warning("挑战者调用失败：%s", exc)
+        return {"overturns": [], "sustains": [], "merged": first_verdicts, "notes": [],
+                "summary": "挑战调用失败，维持原裁决",
+                "warnings": [f"挑战者调用异常（{type(exc).__name__}）"],
+                "degraded": True, "challenge_tokens": 0}
+
+    content = ""
+    try:
+        content = str((((choice or {}).get("message") or {}).get("content")) or "")
+    except Exception:  # noqa: BLE001
+        content = ""
+    if not content.strip():
+        return {"overturns": [], "sustains": [], "merged": first_verdicts, "notes": [],
+                "summary": "挑战者返回空，维持原裁决", "warnings": ["挑战者返回空"],
+                "degraded": True, "challenge_tokens": 0}
+
+    tokens = 0
+    try:
+        from agent import metering
+        tokens = int(metering.parse_usage(choice if isinstance(choice, dict) else None)
+                     .get("total_tokens", 0))
+    except Exception:  # noqa: BLE001
+        tokens = 0
+    parsed = parse_challenge(content)
+    merged, notes = merge_conservative(first_verdicts, parsed)
+    return {**parsed, "merged": merged, "notes": notes, "degraded": parsed["degraded"],
+            "challenge_tokens": tokens}

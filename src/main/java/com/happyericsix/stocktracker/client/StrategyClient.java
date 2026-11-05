@@ -345,6 +345,29 @@ public class StrategyClient {
     }
 
     /**
+     * **守门员挑战者**（Tier 2，2026-11-05）：高注时刻的第二双眼睛。
+     *
+     * <p>payload 在守门员面板基础上多带 first_verdicts（第一次裁决）；Python 侧
+     * 合并语义为"只能更保守"（越权升格一律驳回），此处 20s 与守门员同档。
+     */
+    public JsonNode accountGateChallenge(tools.jackson.databind.JsonNode payload,
+                                         java.util.List<java.util.Map<String, Object>> firstVerdicts,
+                                         Long userId) {
+        var body = new HashMap<String, Object>();
+        body.put("wake", payload.path("wake"));
+        body.put("account", payload.path("account"));
+        if (payload.hasNonNull("signals")) body.put("signals", payload.get("signals"));
+        if (payload.hasNonNull("today_context")) body.put("today_context", payload.get("today_context"));
+        if (payload.hasNonNull("experience")) body.put("experience", payload.get("experience"));
+        if (payload.hasNonNull("market_context")) body.put("market_context", payload.get("market_context"));
+        body.put("first_verdicts", firstVerdicts);
+        if (userId != null) body.put("user_id", userId);
+        body.put("llm_providers", userId != null
+                ? userLlmConfigService.providersFor(userId) : List.of());
+        return post("/api/v1/agent/account-gate-challenge", body, Duration.ofSeconds(20));
+    }
+
+    /**
      * 周反思（P2，经验回流的定性半环，参考 TradingAgents 的 memory log 循环）：
      * 把本周战绩/成交/委员会过程整体发给 Python 做一次 LLM 反思，产出 ≤3 条结构化教训。
      * 60s 超时（1 次调用）；失败/空教训由调用方按无操作处理（反思是旁路，不影响复盘主链路）。
