@@ -13,7 +13,7 @@
 import { ref, computed, nextTick, watch, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Bot, X } from 'lucide-vue-next'
-import { sendChat } from '../api/messages.js'
+import { sendChat, getFocusHistory } from '../api/messages.js'
 import { getLlmConfig } from '../api/user.js'
 import { renderMarkdown } from '../utils/markdown.js'
 import { messageBus } from '../composables/messageBus.js'
@@ -45,11 +45,6 @@ const llmMissing = ref(false)
 let llmChecked = false
 let unsubscribe = null
 let seenIds = new Set()
-// 聚焦会话隔离（2026-11-07）：每次开启生成新 id——抽屉内多轮共用（可追问），
-// 关掉即弃（下次开启全新对话）；后端按它把历史与主聊天助手双向隔离。
-const conversationId = ref('')
-const newConversationId = () =>
-  'focus-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8)
 
 const activeFocus = computed(() => props.focus
   ?? (props.focusEvent ? { type: 'news_event', eventId: props.focusEvent.id } : null))
@@ -145,16 +140,41 @@ const onBusMessage = (msg) => {
   scrollToBottom()
 }
 
-watch(() => props.open, (open) => {
+watch(() => props.open, async (open) => {
   if (open) {
     messages.value = []
     seenIds = new Set()
-    conversationId.value = newConversationId()
     streamingId.value = null
     error.value = ''
     typing.value = false
     unsubscribe = messageBus.subscribe(onBusMessage)
     messageBus.connect()
+    // 聚焦会话续篇（2026-11-07 三轮）：同一条新闻/教训重开时回显之前的往来
+    // （后端按 news-{id} 确定性会话键 + TTL 缓存窗口，过期即空）
+    const focusObj = activeFocus.value
+    if (focusObj?.type === 'news_event' && focusObj.eventId) {
+      try {
+        const res = await getFocusHistory('news_event', focusObj.eventId)
+        for (const m of (res.data || [])) {
+          if (m.id && !seenIds.has(m.id)) {
+            seenIds.add(m.id)
+            messages.value.push(m)
+          }
+        }
+        scrollToBottom()
+      } catch { /* 历史加载失败按全新对话开始，不挡提问 */ }
+    } else if (focusObj?.type === 'memory_lesson' && focusObj.lessonId) {
+      try {
+        const res = await getFocusHistory('memory_lesson', focusObj.lessonId)
+        for (const m of (res.data || [])) {
+          if (m.id && !seenIds.has(m.id)) {
+            seenIds.add(m.id)
+            messages.value.push(m)
+          }
+        }
+        scrollToBottom()
+      } catch { /* 同上 */ }
+    }
     // 首开查一次 Key 状态（失败不显示横幅，避免旧后端误报）
     if (!llmChecked) {
       llmChecked = true
@@ -184,7 +204,7 @@ const send = async (preset) => {
   sending.value = true
   scrollToBottom()
   try {
-    await sendChat(text, activeFocus.value, conversationId.value || null)
+    await sendChat(text, activeFocus.value)
   } catch {
     typing.value = false
     error.value = '发送失败，请稍后重试'

@@ -137,6 +137,29 @@ public class MessageService {
         messageRepo.markAllReadByUserId(user.getId());
     }
 
+    /**
+     * 聚焦会话历史（2026-11-07 三轮）：同一条新闻/教训的问 AI 往来，
+     * **只在缓存窗口内**（TTL 过滤）——过期即彻底没有，抽屉重新开始。
+     */
+    public List<MessageResponse> getFocusHistory(String username, ChatSendRequest.Focus focus) {
+        String conversationId = ChatService.conversationIdForFocus(focus);
+        if (conversationId == null) {
+            return List.of();
+        }
+        User user = getUser(username);
+        List<Message> recent = messageRepo.findTop20ByUserIdAndTypeInOrderByIdDesc(user.getId(), CHAT_TYPES);
+        if (recent == null || recent.isEmpty()) {
+            return List.of();
+        }
+        List<Message> ordered = new java.util.ArrayList<>(recent);
+        java.util.Collections.reverse(ordered);
+        return ordered.stream()
+                .filter(m -> conversationId.equals(ChatService.conversationIdOf(m.getMetadata())))
+                .filter(m -> chatService.focusConversationActive(m.getCreatedAt()))
+                .map(this::withSymbolName)
+                .collect(Collectors.toList());
+    }
+
     public List<MessageResponse> getChatHistory(String username) {
         User user = getUser(username);
         // 聚焦会话隔离（2026-11-07）：带 conversationId 的消息（新闻"问 AI"抽屉等）
@@ -157,9 +180,10 @@ public class MessageService {
     @Transactional
     public void handleChatSend(String username, ChatSendRequest request) {
         User user = getUser(username);
-        // 聚焦会话标记（2026-11-07）：带 conversationId 的消息（新闻"问 AI"/教训"反问"）
-        // 与主聊天双向隔离——写入 metadata，读取侧按它过滤
-        String conversationId = ChatService.sanitizeConversationId(request.getConversationId());
+        // 聚焦会话标记（2026-11-07）：会话键**服务端从 focus 确定性推导**（news-{id}），
+        // 同一条新闻重开问 AI 自动续同一会话；缓存过期由 TTL 兜住。客户端传的
+        // conversationId 不再采信（三轮改版：随机键会破坏"同新闻续篇"）。
+        String conversationId = ChatService.conversationIdForFocus(request.getFocus());
         Message userMsg = Message.builder()
                 .user(user)
                 .type("CHAT_USER")

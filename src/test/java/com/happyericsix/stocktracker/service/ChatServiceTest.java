@@ -172,6 +172,14 @@ class ChatServiceTest {
         return Message.builder().type(type).content(content).metadata(metadata).build();
     }
 
+    /** 带会话键与时间（TTL 过滤需要 createdAt）的消息。 */
+    private Message msg(String type, String content, String conversationId,
+                        java.time.LocalDateTime createdAt) {
+        return Message.builder().type(type).content(content)
+                .metadata(ChatService.conversationMetadata(conversationId))
+                .createdAt(createdAt).build();
+    }
+
     // ==================== 聚焦会话隔离（2026-11-07） ====================
 
     /** 聚焦会话（问 AI 抽屉）：历史只含同会话往来——主聊天一条都不带。 */
@@ -180,14 +188,14 @@ class ChatServiceTest {
         ChatService chatService = newChatService();
         when(messageRepo.findTop20ByUserIdAndTypeInOrderByIdDesc(1L, List.of("CHAT_USER", "CHAT_BOT")))
                 .thenReturn(List.of(
-                        // 当前这条（问 AI 抽屉内）
-                        message("CHAT_USER", "那后续呢", "{\"conversationId\":\"focus-abc\"}"),
-                        message("CHAT_BOT", "这条新闻的关键在…", "{\"conversationId\":\"focus-abc\"}"),
-                        message("CHAT_USER", "这条新闻什么影响", "{\"conversationId\":\"focus-abc\"}"),
+                        // 当前这条（问 AI 抽屉内）—— createdAt 补上（TTL 过滤需要）
+                        msg("CHAT_USER", "那后续呢", "focus-abc", java.time.LocalDateTime.now()),
+                        msg("CHAT_BOT", "这条新闻的关键在…", "focus-abc", java.time.LocalDateTime.now()),
+                        msg("CHAT_USER", "这条新闻什么影响", "focus-abc", java.time.LocalDateTime.now()),
                         // 主聊天与**别的**聚焦会话的往来：一律不可见
                         message("CHAT_USER", "帮我生成茅台策略"),
                         message("CHAT_BOT", "已生成策略"),
-                        message("CHAT_USER", "另一个抽屉的问题", "{\"conversationId\":\"focus-xyz\"}")));
+                        msg("CHAT_USER", "另一个抽屉的问题", "focus-xyz", java.time.LocalDateTime.now())));
 
         List<Map<String, String>> history = chatService.buildHistory(1L, "那后续呢", "focus-abc");
 
@@ -214,6 +222,39 @@ class ChatServiceTest {
         assertEquals(List.of(
                 Map.of("role", "user", "content", "主聊天的老问题"),
                 Map.of("role", "assistant", "content", "主聊天的老回答")), history);
+    }
+
+    // ==================== 聚焦会话缓存（2026-11-07 三轮：同新闻续篇 + TTL） ====================
+
+    /** 会话键按聚焦对象确定性生成：同一条新闻重开 = 同一会话（续篇的基础）。 */
+    @Test
+    void conversationKeyIsDeterministicPerFocus() {
+        assertEquals("news-321", ChatService.conversationIdForFocus(
+                new ChatSendRequest.Focus("news_event", 321L)));
+        assertEquals("lesson-41", ChatService.conversationIdForFocus(
+                new ChatSendRequest.Focus("memory_lesson", null, 41L)));
+        assertNull(ChatService.conversationIdForFocus(null));
+        assertNull(ChatService.conversationIdForFocus(
+                new ChatSendRequest.Focus("unknown", 1L)));
+    }
+
+    /** TTL：过期的同会话消息不再喂给模型（缓存过期 = 彻底没有）。 */
+    @Test
+    void expiredFocusMessagesAreNotFedToTheModel() {
+        ChatService chatService = newChatService();
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                chatService, "focusMemoryTtlHours", 24L);
+        java.time.LocalDateTime fresh = java.time.LocalDateTime.now().minusHours(1);
+        java.time.LocalDateTime stale = java.time.LocalDateTime.now().minusHours(25);
+        when(messageRepo.findTop20ByUserIdAndTypeInOrderByIdDesc(1L, List.of("CHAT_USER", "CHAT_BOT")))
+                .thenReturn(List.of(
+                        msg("CHAT_USER", "新问题", "news-321", fresh),
+                        msg("CHAT_BOT", "25 小时前的回答", "news-321", stale),
+                        msg("CHAT_USER", "25 小时前的问题", "news-321", stale)));
+
+        List<Map<String, String>> history = chatService.buildHistory(1L, "新问题", "news-321");
+
+        assertTrue(history.isEmpty(), "TTL 外的同会话消息一概不带（过期=彻底没有）");
     }
 
     /** conversationId 的净化与 metadata 往返：不合法 id 按普通聊天；合法 id 能取回。 */

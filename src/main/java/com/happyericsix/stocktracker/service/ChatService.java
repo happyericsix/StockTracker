@@ -15,6 +15,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 
@@ -222,6 +223,38 @@ public class ChatService {
     }
 
     // ===== 聚焦会话标记（2026-11-07）：metadata JSON 里的 conversationId =====
+
+    /**
+     * 聚焦会话的缓存窗口（小时，可配）：同一条新闻/教训的问 AI 记录在这个窗口内
+     * **续篇**（重开抽屉能看到之前的往来、模型也带着它们答），过期即彻底作废
+     * ——短期记忆的"缓存一段时间"由这一条定义。默认 24 小时（新闻是易腐品）。
+     */
+    @Value("${chat.focus-memory-ttl-hours:24}")
+    private long focusMemoryTtlHours;
+
+    /**
+     * 会话键按聚焦对象**确定性生成**（2026-11-07 三轮）：同一条新闻重开问 AI
+     * 自动续同一会话（用户要的"还是在这条新闻上问就出来之前的记录"）；
+     * 缓存过期由 TTL 过滤兜住，不靠换键。
+     */
+    public static String conversationIdForFocus(ChatSendRequest.Focus focus) {
+        if (isNewsFocus(focus)) {
+            return "news-" + focus.eventId();
+        }
+        if (isLessonFocus(focus)) {
+            return "lesson-" + focus.lessonId();
+        }
+        return null;
+    }
+
+    /** 聚焦会话是否仍在缓存窗口内（过期 = 彻底没有：加载与喂模型都不带）。 */
+    boolean focusConversationActive(java.time.LocalDateTime createdAt) {
+        if (createdAt == null) {
+            return false;
+        }
+        return createdAt.isAfter(java.time.LocalDateTime.now()
+                .minusHours(Math.max(1, focusMemoryTtlHours)));
+    }
 
     /** 合法会话 id：字母/数字/-/_，1~64 位；不合法的一律视为无会话（普通聊天）。 */
     static String sanitizeConversationId(String raw) {
@@ -459,10 +492,11 @@ public class ChatService {
         if (recent == null || recent.isEmpty()) {
             return List.of();
         }
-        // 聚焦会话：内存里过滤出同会话的行（20 条窗口足够覆盖一次抽屉会话）
+        // 聚焦会话：同会话的行 + **仍在缓存窗口内**（过期即彻底没有——喂模型同样不带）
         if (conversationId != null) {
             recent = recent.stream()
                     .filter(m -> conversationId.equals(conversationIdOf(m.getMetadata())))
+                    .filter(m -> focusConversationActive(m.getCreatedAt()))
                     .collect(java.util.stream.Collectors.toList());
             if (recent.isEmpty()) {
                 return List.of();

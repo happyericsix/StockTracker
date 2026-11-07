@@ -43,3 +43,7 @@ export const sendChat = (message, focus = null, conversationId = null) => {
 
 /** 获取聊天历史 */
 export const getChatHistory = () => request.get('/chat/history')
+
+/** 聚焦会话历史（同一条新闻/教训的问 AI 往来，缓存窗口内；过期返回空） */
+export const getFocusHistory = (type, id) =>
+  request.get('/chat/focus-history', { params: { type, id } })
