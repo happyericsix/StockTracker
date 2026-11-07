@@ -574,15 +574,23 @@ def run_agent(user_id, message, history=None, session_id=None, memory_user_id=No
         context_block = recall.render(memory_context)
     except Exception as exc:  # noqa: BLE001
         logger.warning("记忆上下文构造失败，本次按无记忆处理: %s", exc)
-    if not context_block:
+    # 聚焦对话（2026-11-07 二轮）：不加载用户级长期记忆（前情提要/相关事实）。
+    # 实测事故：无标的的微软新闻问答里，模型从用户记忆里权重最高的股票
+    # （金新农）硬搭了座桥——"这条新闻和金新农没有关系"说对了，但整段回答
+    # 被拽到用户根本没问的股票上。聚焦对话是独立短期会话：它的世界就是
+    # 聚焦对象本身 + 时间锚点，长期记忆（写给主聊天助手的）一概不进。
+    focus_block = render_focus(focus, memory_user_id)
+    if focus_block:
+        try:
+            context_block = focus_block + "\n\n" + recall.render({})
+        except Exception:  # noqa: BLE001
+            context_block = focus_block
+    elif not context_block:
         try:
             context_block = recall.render({})
         except Exception:  # noqa: BLE001
             context_block = ""
-    # 聚焦块在最前：它定义"这一轮对话围绕什么"，地位高于前情提要
-    focus_block = render_focus(focus, memory_user_id)
-    if focus_block:
-        context_block = f"{focus_block}\n\n{context_block}" if context_block else focus_block
+
 
     messages = memory.build_messages(SYSTEM_PROMPT, history, message, context_block=context_block)
     stats = memory.history_stats(history)

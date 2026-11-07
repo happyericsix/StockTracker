@@ -140,3 +140,31 @@ def test_news_focus_facts_missing_degrades_to_fetch_instruction(monkeypatch):
     assert "777" in block
     assert "read_news_detail" in block
     assert "不要当作普通闲聊" in block
+
+
+def test_focus_conversation_skips_user_memory(monkeypatch):
+    """聚焦对话不加载用户级长期记忆（2026-11-07 二轮）。
+
+    实测事故：无标的的微软新闻问答，模型从用户前情提要里权重最高的股票
+    （金新农）硬搭桥。聚焦对话的世界 = 聚焦块 + 时间锚点，recall.load_context
+    必须不被调用（读了就会有"金新农"们混进来）。
+    """
+    from agent import memory as memory_mod
+
+    def boom(*a, **kw):
+        raise AssertionError("聚焦对话不应加载用户长期记忆（recall.load_context）")
+    monkeypatch.setattr(memory_mod.recall if hasattr(memory_mod, "recall") else __import__("agent.recall", fromlist=["recall"]), "load_context", boom)
+
+    import agent.react_agent as ra
+    monkeypatch.setattr(ra.recall, "load_context", boom)
+    # render 留着（时间锚点要用），只禁 load_context；聚焦块由 news_knowledge 提供
+    from agent import news_knowledge
+    monkeypatch.setattr(news_knowledge, "event_facts", lambda event_id: {
+        "title": "荷兰微软AI数据中心工地遭抗议", "source_name": "新浪财经",
+    })  # 注意：不带 symbol —— 正是事故场景
+    out = ra.run_agent("u1", "这件事对哪些行业有影响？",
+                       focus={"type": "news_event", "event_id": 321},
+                       completion=lambda messages, **kw: {
+                           "message": {"content": "ok"},
+                           "usage": {"total_tokens": 1}})
+    assert out is not None

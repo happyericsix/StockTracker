@@ -540,8 +540,12 @@ public class ChatService {
                 .build();
         message = messageRepo.save(message);
         sseService.push(userId, MessageResponse.from(message));
-        // 记忆账本：助手回复也入账，否则前情提要只有一半（用户问了什么、但没有回答过什么）
-        appendToLedger(userId, sessionKey, "chat_bot", "assistant", content, relatedSymbol, metadata);
+        // 记忆账本：助手回复也入账，否则前情提要只有一半（用户问了什么、但没有回答过什么）。
+        // 聚焦会话（2026-11-07 二轮）除外：metadata 带 conversationId 的回复是
+        // 独立短期会话（问 AI/反问），不进主聊天助手的长期记忆
+        if (conversationIdOf(metadata) == null) {
+            appendToLedger(userId, sessionKey, "chat_bot", "assistant", content, relatedSymbol, metadata);
+        }
         log.info("Bot replied to user {}: {}", userId, content);
         return true;
     }

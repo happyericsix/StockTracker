@@ -170,7 +170,11 @@ public class MessageService {
         userMsg = messageRepo.save(userMsg);
         sseService.push(user.getId(), withSymbolName(userMsg));
 
-        appendUserEventToLedger(user.getId(), request.getMessage());
+        // 聚焦会话（2026-11-07 二轮）：不写记忆账本——问 AI/反问是独立短期会话，
+        // 往来不该进主聊天助手的前情提要（读取侧 Python 已同步跳过用户记忆）
+        if (conversationId == null) {
+            appendUserEventToLedger(user.getId(), request.getMessage());
+        }
 
         // 异步线程的 buildHistory 依赖"这条 CHAT_USER 已提交可见"来剔除当前消息；
         // 事务提交前触发会把同一条消息重复喂给模型。注册 afterCommit 兜住这一点。

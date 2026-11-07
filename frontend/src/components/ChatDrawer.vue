@@ -56,12 +56,19 @@ const activeFocus = computed(() => props.focus
 
 const suggestions = (event) => {
   if (props.presets?.length) return props.presets
-  const base = [
-    '这条新闻对该股意味着什么？',
-    '这条消息可信吗？有什么风险点？',
-    '这件事的后续进展如何？',
-  ]
-  if (event?.symbol) base.splice(1, 0, `结合行情看看${event.name || event.symbol}现在什么状态？`)
+  // 引导问题按"这条新闻有没有标的"自适应（2026-11-07）：无标的的宏观/国际新闻
+  // 问"对该股意味着什么"会逼模型硬凑一只股票（实测：把用户记忆里的股票拽进来）
+  const base = event?.symbol
+    ? [
+        '这条新闻对该股意味着什么？',
+        '这条消息可信吗？有什么风险点？',
+        `结合行情看看${event.name || event.symbol}现在什么状态？`,
+      ]
+    : [
+        '这件事对哪些行业或公司有影响？',
+        '这条消息可信吗？有什么风险点？',
+        '这件事的后续进展如何？',
+      ]
   return base.slice(0, 3)
 }
 
