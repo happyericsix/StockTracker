@@ -22,6 +22,15 @@ public class TokenService {
     }
 
     public String generateToken(Authentication authentication) {
+        return generateToken(authentication, false);
+    }
+
+    /**
+     * @param rememberMe 30 天自动登录（2026-11-07）：true = 30 天，false/null = 24 小时。
+     *                   长短期分档而不是一刀切 30 天：丢失 30 天 token 的代价
+     *                   （别人拿到能操作一个月）不该强加给没勾选的用户。
+     */
+    public String generateToken(Authentication authentication, boolean rememberMe) {
         Instant now = Instant.now();
         String scope = authentication.getAuthorities().stream()
                 .map(GrantedAuthority::getAuthority)
@@ -30,7 +39,7 @@ public class TokenService {
         JwtClaimsSet claims = JwtClaimsSet.builder()
                 .issuer("stock-tracker")
                 .issuedAt(now)
-                .expiresAt(now.plus(1, ChronoUnit.DAYS))
+                .expiresAt(now.plus(rememberMe ? 30 : 1, ChronoUnit.DAYS))
                 .subject(authentication.getName())
                 .claim("scope", scope)
                 .build();

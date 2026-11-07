@@ -12,6 +12,8 @@ const isLogin = ref(true)
 const form = ref({ username: '', password: '', email: '', phone: '' })
 const error = ref('')
 const submitting = ref(false)
+// 30 天自动登录（2026-11-07）：随登录请求带上 rememberMe，后端据此签 30 天 token
+const rememberMe = ref(false)
 
 // 同花顺扫码入口默认收起 —— 账号密码仍是主入口，
 // 扫码作为"更快捷的选择"放在下面。
@@ -28,7 +30,8 @@ const submit = async () => {
     submitting.value = true
     error.value = ''
     const payload = isLogin.value
-      ? { username: form.value.username, password: form.value.password }
+      ? { username: form.value.username, password: form.value.password,
+          rememberMe: rememberMe.value }
       : {
           username: form.value.username,
           email: form.value.email,
@@ -120,7 +123,17 @@ const onQrSuccess = ({ token }) => {
               required
               class="h-[38px] w-full rounded-lg border border-border bg-surface px-3 text-[13px] text-ink transition-colors placeholder:text-ink-3 focus:border-accent focus:outline-none focus:ring-2 focus:ring-[color:var(--ring)]"
             />
-            <div v-if="isLogin" class="flex justify-end">
+            <div v-if="isLogin" class="flex items-center justify-between">
+              <!-- 30 天自动登录（2026-11-07）：勾选后 token 有效期 30 天（否则 24 小时）。
+                   此前系统里并不存在记住登录——所有 token 一律 24h，每天过期一次。 -->
+              <label class="flex cursor-pointer items-center gap-1.5 py-1 text-[12.5px] text-ink-2 select-none">
+                <input
+                  v-model="rememberMe"
+                  type="checkbox"
+                  class="h-3.5 w-3.5 cursor-pointer rounded border-border accent-[color:var(--accent)]"
+                >
+                30 天内自动登录
+              </label>
               <button
                 type="button"
                 class="rounded px-0.5 py-1 text-[12.5px] text-accent transition-colors hover:text-accent-hover"

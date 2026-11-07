@@ -60,7 +60,9 @@ public class AuthService {
         Authentication authentication = authenticationManager.authenticate(
                 new UsernamePasswordAuthenticationToken(request.getUsername(), request.getPassword()));
 
-        String token = tokenService.generateToken(authentication);
+        // 30 天自动登录（2026-11-07）：勾选 rememberMe 签 30 天，否则 24 小时
+        String token = tokenService.generateToken(authentication,
+                Boolean.TRUE.equals(request.getRememberMe()));
 
         User user = userRepository.findByUsername(request.getUsername())
                 .orElseThrow(() -> new IllegalArgumentException("用户不存在"));
