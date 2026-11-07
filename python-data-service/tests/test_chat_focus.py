@@ -58,9 +58,13 @@ def test_render_focus_invalid_shapes_are_empty(monkeypatch, focus):
     assert react_agent.render_focus(focus) == ""
 
 
-def test_render_focus_unreachable_facts_fail_open(monkeypatch):
+def test_render_focus_unreachable_facts_degrades_with_instruction(monkeypatch):
+    """2026-11-07 行为变更：事实取不到**不再返回空串**（静默降级为普通聊天是事故），
+    改为注入"先现场取数"的降级聚焦块——语义详见
+    test_news_focus_facts_missing_degrades_to_fetch_instruction。"""
     monkeypatch.setattr(news_knowledge, "event_facts", lambda event_id: None)
-    assert react_agent.render_focus({"type": "news_event", "event_id": 999}) == ""
+    block = react_agent.render_focus({"type": "news_event", "event_id": 999})
+    assert block != "" and "999" in block
 
 
 def test_run_agent_prepends_focus_block(monkeypatch):
@@ -120,3 +124,19 @@ def test_chat_endpoint_ignores_non_dict_focus(monkeypatch):
     TestClient(main.app).post("/api/v1/agent/chat", json={
         "user_id": "u1", "message": "普通聊天", "focus": "junk"}, headers=HEADERS)
     assert seen["focus"] is None
+
+
+def test_news_focus_facts_missing_degrades_to_fetch_instruction(monkeypatch):
+    """事实取不到时的降级块（2026-11-07）：不再静默当普通聊天。
+
+    实测事故：知识端点抖动 → 聚焦块为空 → 模型以为在闲聊，
+    用户问"这条新闻靠谱吗"得到风马牛不相及的回答（"AI 看不到我问的是哪条新闻"）。
+    降级块必须给出 event_id 并指示现场调用 read_news_detail。
+    """
+    from agent import news_knowledge
+    monkeypatch.setattr(news_knowledge, "event_facts", lambda event_id: None)
+    block = react_agent.render_focus({"type": "news_event", "event_id": 777})
+    assert block, "降级也要有聚焦块——静默降级正是事故本身"
+    assert "777" in block
+    assert "read_news_detail" in block
+    assert "不要当作普通闲聊" in block

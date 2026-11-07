@@ -30,8 +30,16 @@ export const markAllRead = () => request.put('/messages/read-all')
  * 从资讯雷达"问 AI"进入的聚焦对话，后端把这条新闻的事实注入 agent 上下文。
  * 后端无状态：聚焦期间每条消息都带 focus，退出聚焦即不再带。
  */
-export const sendChat = (message, focus = null) =>
-  request.post('/chat/send', focus ? { message, focus } : { message })
+/**
+ * conversationId（2026-11-07 聚焦会话隔离）：聚焦抽屉每次开启生成一个，
+ * 抽屉内多轮共用——与主聊天助手双向隔离（后端按它过滤历史）。
+ */
+export const sendChat = (message, focus = null, conversationId = null) => {
+  const body = { message }
+  if (focus) body.focus = focus
+  if (conversationId) body.conversationId = conversationId
+  return request.post('/chat/send', body)
+}
 
 /** 获取聊天历史 */
 export const getChatHistory = () => request.get('/chat/history')

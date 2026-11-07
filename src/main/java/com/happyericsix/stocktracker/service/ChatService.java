@@ -112,12 +112,21 @@ public class ChatService {
      *    并发竞速时，靠门拦住。
      */
     public void submitChat(Long userId, String username, String text) {
-        submitChat(userId, username, text, null);
+        submitChat(userId, username, text, null, null);
     }
 
-    /** 带聚焦对象的聊天入口（agent 互通 P2）：focus 是"用户正围绕哪条新闻追问"。 */
     public void submitChat(Long userId, String username, String text,
                            ChatSendRequest.Focus focus) {
+        submitChat(userId, username, text, focus, null);
+    }
+
+    /**
+     * 带聚焦对象与会话 id 的聊天入口（2026-11-07 隔离）：conversationId 非空 =
+     * 聚焦抽屉的一次独立短期会话（每次开启生成），历史只取同会话内的往来，
+     * 与主聊天助手双向隔离——不再被主聊天上下文带偏，也不污染主助手前情提要。
+     */
+    public void submitChat(Long userId, String username, String text,
+                           ChatSendRequest.Focus focus, String conversationId) {
         // 先递增轮次（= 作废所有更早轮次）再取消旧任务：顺序反了的话，
         // 旧任务可能在"尚未被标记作废"的窗口里继续落库。
         long round = currentRounds.computeIfAbsent(userId, k -> new AtomicLong())
@@ -127,7 +136,8 @@ public class ChatService {
             stale.cancel(true);
         }
         Future<?> task = taskExecutor.submit(
-                () -> runRound(userId, username, text, focus, round));
+                () -> runRound(userId, username, text, focus, round,
+                        sanitizeConversationId(conversationId)));
         inFlightRounds.put(userId, task);
     }
 
@@ -137,6 +147,11 @@ public class ChatService {
      */
     void runRound(Long userId, String username, String text,
                   ChatSendRequest.Focus focus, long round) {
+        runRound(userId, username, text, focus, round, null);
+    }
+
+    void runRound(Long userId, String username, String text,
+                  ChatSendRequest.Focus focus, long round, String conversationId) {
         // 本轮的会话键在入口处定死，全程复用：LLM 一来一回可能跨过午夜，
         // 逐次重算 currentSessionKey 会把用户消息记在昨天、回复记在今天，
         // 那段对话在巩固时就被从中间劈开（两边各缺一半）。
@@ -150,17 +165,20 @@ public class ChatService {
 
             // 流式通道：delta 边到边推给前端，result 形状与非流式一致（含 epoch 中断契约：
             // 仍在跑的旧轮次在 Python 侧的下一个步骤边界发现轮次落后即自行退出）。
-            JsonNode resp = callLlmStream(username, userId, sessionKey, text, focus, round);
+            JsonNode resp = callLlmStream(username, userId, sessionKey, text, focus, round,
+                    conversationId);
 
             JsonNode replies = resp != null ? resp.get("replies") : null;
             if (replies == null || !replies.isArray() || replies.isEmpty()) {
-                saveBotReply(userId, sessionKey, round, "抱歉，我暂时没有理解你的问题，换个问法试试？");
+                saveBotReply(userId, sessionKey, round, "抱歉，我暂时没有理解你的问题，换个问法试试？",
+                        null, conversationMetadata(conversationId));
                 return;
             }
             for (JsonNode reply : replies) {
                 String content = reply.asText();
                 if (content != null && !content.isBlank()) {
-                    if (!saveBotReply(userId, sessionKey, round, content)) {
+                    if (!saveBotReply(userId, sessionKey, round, content, null,
+                            conversationMetadata(conversationId))) {
                         pushStreamAbort(userId, round); // 已被新一轮取代：撤掉流式气泡，剩余回复全部丢弃
                         return;
                     }
@@ -169,7 +187,8 @@ public class ChatService {
 
             JsonNode strategyJson = resp != null ? resp.get("strategy_json") : null;
             if (strategyJson != null && strategyJson.isObject()) {
-                createAndBacktestFromAgent(userId, sessionKey, username, strategyJson, round);
+                createAndBacktestFromAgent(userId, sessionKey, username, strategyJson, round,
+                        conversationId);
             }
         } catch (Exception e) {
             if (isSuperseded(userId, round)) {
@@ -181,7 +200,8 @@ public class ChatService {
                 return;
             }
             log.error("LLM 调用失败 userId={}: {}", userId, e.getMessage());
-            saveBotReply(userId, sessionKey, round, "智能助手暂时不可用，请稍后再试。");
+            saveBotReply(userId, sessionKey, round, "智能助手暂时不可用，请稍后再试。",
+                    null, conversationMetadata(conversationId));
         }
     }
 
@@ -201,6 +221,50 @@ public class ChatService {
         return focus != null && "memory_lesson".equals(focus.type()) && focus.lessonId() != null;
     }
 
+    // ===== 聚焦会话标记（2026-11-07）：metadata JSON 里的 conversationId =====
+
+    /** 合法会话 id：字母/数字/-/_，1~64 位；不合法的一律视为无会话（普通聊天）。 */
+    static String sanitizeConversationId(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String text = raw.trim();
+        return text.matches("[A-Za-z0-9_-]{1,64}") ? text : null;
+    }
+
+    /** 会话 id → metadata JSON（null 会话返回 null，与无 metadata 的历史行兼容）。 */
+    static String conversationMetadata(String conversationId) {
+        return conversationId == null ? null
+                : "{\"conversationId\":\"" + conversationId + "\"}";
+    }
+
+    /** metadata JSON → 会话 id（解析失败/无字段返回 null = 主聊天消息）。 */
+    static String conversationIdOf(String metadata) {
+        if (metadata == null || metadata.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode node = objectMapperForMetadata().readTree(metadata);
+            String value = node.path("conversationId").asText(null);
+            return value == null || value.isBlank() ? null : value;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** "conversationId":"x" 的 JSON 片段（无会话返回空串，拼进既有 metadata 对象）。 */
+    static String conversationMetadataJsonFragment(String conversationId) {
+        return conversationId == null ? ""
+                : "\"conversationId\":\"" + conversationId + "\"";
+    }
+
+    /** 静态场景用的独立 mapper（无状态线程安全；主 objectMapper 是实例字段）。 */
+    private static final ObjectMapper METADATA_MAPPER = new ObjectMapper();
+
+    private static ObjectMapper objectMapperForMetadata() {
+        return METADATA_MAPPER;
+    }
+
     /** 调用 agent 聊天接口（非流式）；独立成包可见方法，方便单测替换远程依赖。 */
     JsonNode callLlm(String username, Long userId, String sessionKey, String text, Long epoch) {
         return callLlm(username, userId, sessionKey, text, null, epoch);
@@ -208,7 +272,13 @@ public class ChatService {
 
     JsonNode callLlm(String username, Long userId, String sessionKey, String text,
                      ChatSendRequest.Focus focus, Long epoch) {
-        Map<String, Object> body = buildChatBody(username, userId, sessionKey, text, focus, epoch);
+        return callLlm(username, userId, sessionKey, text, focus, epoch, null);
+    }
+
+    JsonNode callLlm(String username, Long userId, String sessionKey, String text,
+                     ChatSendRequest.Focus focus, Long epoch, String conversationId) {
+        Map<String, Object> body = buildChatBody(username, userId, sessionKey, text, focus,
+                epoch, conversationId);
         return llmWebClient.post()
                 .uri("/api/v1/agent/chat")
                 .bodyValue(body)
@@ -230,7 +300,13 @@ public class ChatService {
      */
     JsonNode callLlmStream(String username, Long userId, String sessionKey, String text,
                            ChatSendRequest.Focus focus, long round) {
-        Map<String, Object> body = buildChatBody(username, userId, sessionKey, text, focus, round);
+        return callLlmStream(username, userId, sessionKey, text, focus, round, null);
+    }
+
+    JsonNode callLlmStream(String username, Long userId, String sessionKey, String text,
+                           ChatSendRequest.Focus focus, long round, String conversationId) {
+        Map<String, Object> body = buildChatBody(username, userId, sessionKey, text, focus,
+                round, conversationId);
         String streamId = "stream-" + round;
         AtomicReference<JsonNode> result = new AtomicReference<>();
         AtomicBoolean anyDelta = new AtomicBoolean(false);
@@ -248,7 +324,7 @@ public class ChatService {
         } catch (Exception e) {
             if (!anyDelta.get() && !isSuperseded(userId, round)) {
                 log.warn("流式调用失败且尚未输出任何增量，退回非流式: {}", e.getMessage());
-                return callLlm(username, userId, sessionKey, text, focus, round);
+                return callLlm(username, userId, sessionKey, text, focus, round, conversationId);
             }
             throw e;
         }
@@ -297,6 +373,17 @@ public class ChatService {
     /** 组装发给 agent 的请求体（非流式 / 流式共用）。 */
     private Map<String, Object> buildChatBody(String username, Long userId, String sessionKey,
                                               String text, ChatSendRequest.Focus focus, Long epoch) {
+        return buildChatBody(username, userId, sessionKey, text, focus, epoch, null);
+    }
+
+    /**
+     * @param conversationId 聚焦会话 id（2026-11-07）：非空时 history 只取该会话内的
+     *                       往来（抽屉内多轮仍可追问），主聊天历史一概不带——
+     *                       聚焦对话从此不被聊天助手的上下文带偏。
+     */
+    private Map<String, Object> buildChatBody(String username, Long userId, String sessionKey,
+                                              String text, ChatSendRequest.Focus focus, Long epoch,
+                                              String conversationId) {
         Map<String, Object> body = new HashMap<>();
         // 字段名必须是 user_id：Python 侧 app.py 的 agent_chat 读的是 data["user_id"]，
         // 取不到就直接 return {"replies": []}（连 LLM 都不会调用），
@@ -310,7 +397,7 @@ public class ChatService {
         body.put("memory_user_id", userId);
         // 会话历史：不带它的话，Python 侧每条消息都是一次全新、失忆的 agent，
         // "它呢？""把止损改成 5%" 这类追问必然失效（run_agent 一度根本不接 history）。
-        body.put("history", buildHistory(userId, text));
+        body.put("history", buildHistory(userId, text, conversationId));
         // 聚焦对象（news_event / memory_lesson）：有效才带，普通聊天不带这个键（Python 侧同判）
         if (isNewsFocus(focus)) {
             // 打点（2026-10-10 事故排查）："问 AI 没收到新闻"要么停在这一行之前
@@ -356,12 +443,37 @@ public class ChatService {
      *    每条消息都全量读一遍既慢又没必要。
      */
     List<Map<String, String>> buildHistory(Long userId, String currentText) {
+        return buildHistory(userId, currentText, null);
+    }
+
+    /**
+     * 聚焦会话隔离（2026-11-07）：conversationId 非空 → 历史只含**同一会话**内的
+     * CHAT 往来（每次开启抽屉都是全新开始，抽屉内多轮可追问）；
+     * 为空 → 主聊天助手：剔除带会话标记的消息（聚焦对话不泄漏进主上下文）。
+     */
+    List<Map<String, String>> buildHistory(Long userId, String currentText, String conversationId) {
         if (userId == null) {
             return List.of();
         }
         List<Message> recent = messageRepo.findTop20ByUserIdAndTypeInOrderByIdDesc(userId, CHAT_TYPES);
         if (recent == null || recent.isEmpty()) {
             return List.of();
+        }
+        // 聚焦会话：内存里过滤出同会话的行（20 条窗口足够覆盖一次抽屉会话）
+        if (conversationId != null) {
+            recent = recent.stream()
+                    .filter(m -> conversationId.equals(conversationIdOf(m.getMetadata())))
+                    .collect(java.util.stream.Collectors.toList());
+            if (recent.isEmpty()) {
+                return List.of();
+            }
+        } else {
+            recent = recent.stream()
+                    .filter(m -> conversationIdOf(m.getMetadata()) == null)
+                    .collect(java.util.stream.Collectors.toList());
+            if (recent.isEmpty()) {
+                return List.of();
+            }
         }
 
         // 倒序取回 → 反转成时间升序，并剔除刚落库的当前消息
@@ -460,13 +572,21 @@ public class ChatService {
 
     private void createAndBacktestFromAgent(Long userId, String sessionKey, String username,
                                             JsonNode strategyJson, long round) {
+        createAndBacktestFromAgent(userId, sessionKey, username, strategyJson, round, null);
+    }
+
+    /** conversationId 非空 = 聚焦会话内生成：策略回复也留在该会话（不漏进主聊天）。 */
+    private void createAndBacktestFromAgent(Long userId, String sessionKey, String username,
+                                            JsonNode strategyJson, long round, String conversationId) {
         try {
             // 轮次门：别替已被取代的轮次创建策略（创建是外部可见的副作用）
             if (isSuperseded(userId, round)) {
                 return;
             }
             StrategyResponse strategy = strategyService.createFromAgent(username, strategyJson);
-            String metadata = "{\"strategyId\":" + strategy.getId() + "}";
+            // metadata 同时带 strategyId（既有语义）与 conversationId（会话隔离）
+            String metadata = "{\"strategyId\":" + strategy.getId() + ","
+                    + conversationMetadataJsonFragment(conversationId) + "}";
             // 策略生成是"agent 做过的事"，必须进账本：
             // 否则下次用户说"把上次那个策略的止损改一下"，前情提要里根本没有这段。
             appendToLedger(userId, sessionKey, "strategy", "assistant",
@@ -494,7 +614,8 @@ public class ChatService {
                     ? createException.getMessage() : null;
             saveBotReply(userId, sessionKey, round, reason != null
                     ? "策略未保存：" + reason + "。可以让助手修正后重试。"
-                    : "策略已生成，但保存失败，请稍后再试。");
+                    : "策略已生成，但保存失败，请稍后再试。",
+                    null, conversationMetadata(conversationId));
         }
     }
 

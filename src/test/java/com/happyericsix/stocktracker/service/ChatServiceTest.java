@@ -26,6 +26,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -92,7 +93,7 @@ class ChatServiceTest {
 
         when(memoryService.currentSessionKey(1L)).thenReturn(SESSION_KEY);
         ChatService chatService = spy(newChatService());
-        doReturn(response).when(chatService).callLlmStream("alice", 1L, SESSION_KEY, "hi", null, 0L);
+        doReturn(response).when(chatService).callLlmStream("alice", 1L, SESSION_KEY, "hi", null, 0L, null);
 
         User user = User.builder()
                 .id(1L)
@@ -167,6 +168,73 @@ class ChatServiceTest {
         return Message.builder().type(type).content(content).build();
     }
 
+    private Message message(String type, String content, String metadata) {
+        return Message.builder().type(type).content(content).metadata(metadata).build();
+    }
+
+    // ==================== 聚焦会话隔离（2026-11-07） ====================
+
+    /** 聚焦会话（问 AI 抽屉）：历史只含同会话往来——主聊天一条都不带。 */
+    @Test
+    void focusConversationSeesOnlyItsOwnHistory() {
+        ChatService chatService = newChatService();
+        when(messageRepo.findTop20ByUserIdAndTypeInOrderByIdDesc(1L, List.of("CHAT_USER", "CHAT_BOT")))
+                .thenReturn(List.of(
+                        // 当前这条（问 AI 抽屉内）
+                        message("CHAT_USER", "那后续呢", "{\"conversationId\":\"focus-abc\"}"),
+                        message("CHAT_BOT", "这条新闻的关键在…", "{\"conversationId\":\"focus-abc\"}"),
+                        message("CHAT_USER", "这条新闻什么影响", "{\"conversationId\":\"focus-abc\"}"),
+                        // 主聊天与**别的**聚焦会话的往来：一律不可见
+                        message("CHAT_USER", "帮我生成茅台策略"),
+                        message("CHAT_BOT", "已生成策略"),
+                        message("CHAT_USER", "另一个抽屉的问题", "{\"conversationId\":\"focus-xyz\"}")));
+
+        List<Map<String, String>> history = chatService.buildHistory(1L, "那后续呢", "focus-abc");
+
+        assertEquals(List.of(
+                Map.of("role", "user", "content", "这条新闻什么影响"),
+                Map.of("role", "assistant", "content", "这条新闻的关键在…")), history);
+    }
+
+    /** 主聊天助手：聚焦会话的消息不泄漏进主上下文（双向隔离的另一半）。 */
+    @Test
+    void mainChatHistoryExcludesFocusConversations() {
+        ChatService chatService = newChatService();
+        when(messageRepo.findTop20ByUserIdAndTypeInOrderByIdDesc(1L, List.of("CHAT_USER", "CHAT_BOT")))
+                .thenReturn(List.of(
+                        // 倒序（新→旧）：当前问题、抽屉往来（应被过滤）、主聊天的老往来
+                        message("CHAT_USER", "新问题"),
+                        message("CHAT_BOT", "问 AI 抽屉里的回复", "{\"conversationId\":\"focus-abc\"}"),
+                        message("CHAT_USER", "问 AI 抽屉里的问题", "{\"conversationId\":\"focus-abc\"}"),
+                        message("CHAT_BOT", "主聊天的老回答"),
+                        message("CHAT_USER", "主聊天的老问题")));
+
+        List<Map<String, String>> history = chatService.buildHistory(1L, "新问题");
+
+        assertEquals(List.of(
+                Map.of("role", "user", "content", "主聊天的老问题"),
+                Map.of("role", "assistant", "content", "主聊天的老回答")), history);
+    }
+
+    /** conversationId 的净化与 metadata 往返：不合法 id 按普通聊天；合法 id 能取回。 */
+    @Test
+    void conversationIdSanitizeAndRoundTrip() {
+        assertNull(ChatService.sanitizeConversationId(null));
+        assertNull(ChatService.sanitizeConversationId("bad id!"));
+        assertNull(ChatService.sanitizeConversationId("x".repeat(65)));
+        assertEquals("focus-abc_1", ChatService.sanitizeConversationId(" focus-abc_1 "));
+
+        assertNull(ChatService.conversationMetadata(null));
+        assertEquals("focus-abc", ChatService.conversationIdOf(
+                ChatService.conversationMetadata("focus-abc")));
+        // 既有 metadata 形状（strategyId 等）：无 conversationId 字段 = 主聊天
+        assertNull(ChatService.conversationIdOf("{\"strategyId\":7}"));
+        assertNull(ChatService.conversationIdOf("不是json"));
+        // 策略 metadata 里嵌会话片段：两个字段共存可解析
+        assertEquals("focus-abc", ChatService.conversationIdOf(
+                "{\"strategyId\":7,\"conversationId\":\"focus-abc\"}"));
+    }
+
     /**
      * 聚焦过滤（agent 互通 P2）：只有 type=news_event 且 eventId 齐备才透传 ——
      * null / 未知 type / 缺 id 都按普通聊天处理（Python 侧对收到的 focus 同判）。
@@ -210,7 +278,7 @@ class ChatServiceTest {
         JsonNode response = mapper.readTree("{\"replies\":[\"旧回复\"],\"strategy_json\":null}");
         when(memoryService.currentSessionKey(1L)).thenReturn(SESSION_KEY);
         ChatService chatService = spy(newChatService());
-        doReturn(response).when(chatService).callLlmStream("alice", 1L, SESSION_KEY, "hi", null, 1L);
+        doReturn(response).when(chatService).callLlmStream("alice", 1L, SESSION_KEY, "hi", null, 1L, null);
         // 用户已发出更新的消息（轮次 2）—— 轮次 1 已作废
         chatService.currentRounds.computeIfAbsent(1L, k -> new AtomicLong()).set(2L);
 
@@ -233,7 +301,7 @@ class ChatServiceTest {
         when(memoryService.currentSessionKey(1L)).thenReturn(SESSION_KEY);
         ChatService chatService = spy(newChatService());
         doThrow(new RuntimeException("Interrupted")).when(chatService)
-                .callLlmStream("alice", 1L, SESSION_KEY, "hi", null, 1L);
+                .callLlmStream("alice", 1L, SESSION_KEY, "hi", null, 1L, null);
         chatService.currentRounds.computeIfAbsent(1L, k -> new AtomicLong()).set(2L);
 
         chatService.runRound(1L, "alice", "hi", null, 1L);
@@ -248,7 +316,7 @@ class ChatServiceTest {
         when(memoryService.currentSessionKey(1L)).thenReturn(SESSION_KEY);
         ChatService chatService = spy(newChatService());
         doThrow(new RuntimeException("timeout")).when(chatService)
-                .callLlmStream("alice", 1L, SESSION_KEY, "hi", null, 1L);
+                .callLlmStream("alice", 1L, SESSION_KEY, "hi", null, 1L, null);
         chatService.currentRounds.computeIfAbsent(1L, k -> new AtomicLong()).set(1L);
         User user = User.builder().id(1L).username("alice").password("secret").email("a@b.c").build();
         when(userRepository.findById(1L)).thenReturn(Optional.of(user));
@@ -288,7 +356,7 @@ class ChatServiceTest {
                 Thread.sleep(30_000); // 模拟长 LLM 往返，只有 interrupt 能提前结束
             }
             return mapper.readTree("{\"replies\":[\"round2 ok\"],\"strategy_json\":null}");
-        }).when(chatService).callLlmStream(eq("alice"), eq(1L), eq(SESSION_KEY), anyString(), any(), anyLong());
+        }).when(chatService).callLlmStream(eq("alice"), eq(1L), eq(SESSION_KEY), anyString(), any(), anyLong(), org.mockito.ArgumentMatchers.isNull());
 
         chatService.submitChat(1L, "alice", "hi");
         assertTrue(round1InLlm.await(5, TimeUnit.SECONDS), "第一轮应已进入 LLM 调用");

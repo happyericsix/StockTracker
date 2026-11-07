@@ -45,6 +45,11 @@ const llmMissing = ref(false)
 let llmChecked = false
 let unsubscribe = null
 let seenIds = new Set()
+// 聚焦会话隔离（2026-11-07）：每次开启生成新 id——抽屉内多轮共用（可追问），
+// 关掉即弃（下次开启全新对话）；后端按它把历史与主聊天助手双向隔离。
+const conversationId = ref('')
+const newConversationId = () =>
+  'focus-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8)
 
 const activeFocus = computed(() => props.focus
   ?? (props.focusEvent ? { type: 'news_event', eventId: props.focusEvent.id } : null))
@@ -137,6 +142,7 @@ watch(() => props.open, (open) => {
   if (open) {
     messages.value = []
     seenIds = new Set()
+    conversationId.value = newConversationId()
     streamingId.value = null
     error.value = ''
     typing.value = false
@@ -171,7 +177,7 @@ const send = async (preset) => {
   sending.value = true
   scrollToBottom()
   try {
-    await sendChat(text, activeFocus.value)
+    await sendChat(text, activeFocus.value, conversationId.value || null)
   } catch {
     typing.value = false
     error.value = '发送失败，请稍后重试'

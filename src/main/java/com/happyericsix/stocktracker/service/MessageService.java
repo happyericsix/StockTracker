@@ -139,7 +139,10 @@ public class MessageService {
 
     public List<MessageResponse> getChatHistory(String username) {
         User user = getUser(username);
+        // 聚焦会话隔离（2026-11-07）：带 conversationId 的消息（新闻"问 AI"抽屉等）
+        // 不进主聊天历史——它们是独立短期会话，混进来既泄漏上下文又刷屏
         return messageRepo.findByUserIdAndTypeInOrderByCreatedAtAsc(user.getId(), CHAT_TYPES).stream()
+                .filter(m -> ChatService.conversationIdOf(m.getMetadata()) == null)
                 .map(this::withSymbolName)
                 .collect(Collectors.toList());
     }
@@ -154,10 +157,14 @@ public class MessageService {
     @Transactional
     public void handleChatSend(String username, ChatSendRequest request) {
         User user = getUser(username);
+        // 聚焦会话标记（2026-11-07）：带 conversationId 的消息（新闻"问 AI"/教训"反问"）
+        // 与主聊天双向隔离——写入 metadata，读取侧按它过滤
+        String conversationId = ChatService.sanitizeConversationId(request.getConversationId());
         Message userMsg = Message.builder()
                 .user(user)
                 .type("CHAT_USER")
                 .content(request.getMessage())
+                .metadata(ChatService.conversationMetadata(conversationId))
                 .read(true)
                 .build();
         userMsg = messageRepo.save(userMsg);
@@ -175,12 +182,13 @@ public class MessageService {
                                 @Override
                                 public void afterCommit() {
                                     chatService.submitChat(user.getId(), username, request.getMessage(),
-                                            request.getFocus());
+                                            request.getFocus(), conversationId);
                                 }
                             });
         } else {
             // 无事务上下文（单测直调）时保持原行为
-            chatService.submitChat(user.getId(), username, request.getMessage(), request.getFocus());
+            chatService.submitChat(user.getId(), username, request.getMessage(), request.getFocus(),
+                    conversationId);
         }
     }
 
