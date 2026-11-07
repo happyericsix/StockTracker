@@ -51,3 +51,18 @@ def test_injection_discipline_in_prompt():
     user = llm.calls[0][1]["content"]
     assert "单笔复盘官" in system and "宁缺毋滥" in system
     assert "601988" in user and "-4.5" in user          # 往返口径必须进材料
+
+
+def test_prompt_bans_field_names_in_user_facing_text():
+    """人话纪律（2026-11-07）：提示词不得教模型用字段名说话。
+
+    真实事故：示例曾写「浮盈 mfePct 远大于落袋」，模型照抄进教训文本，
+    "maePct -3.49%/deepAdverse"原样展示给用户。断言三层：
+    ①旧示例短语不复存在；②有人话纪律条款；③示例本身是人话。
+    """
+    import app as app_module
+    prompt = app_module._TRADE_REFLECTION_SYSTEM
+    assert "浮盈 mfePct 远大于落袋" not in prompt, "旧的字段名示例必须删除"
+    assert "入场即遭 deepAdverse" not in prompt
+    assert "严禁出现证据包的字段名" in prompt, "必须有人话纪律条款"
+    assert "最大浮亏" in prompt and "最大浮盈" in prompt, "示例与映射用人话"

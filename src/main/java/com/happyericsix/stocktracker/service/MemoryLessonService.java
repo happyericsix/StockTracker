@@ -59,6 +59,61 @@ public class MemoryLessonService {
             "news_lookup", "新闻公告",
             "general", "通用");
 
+    // ===== 话术净化（2026-11-07）：证据字段名不进用户界面 =====
+    //
+    // 真实事故：单笔反思的提示词示例曾用字段名举例（"浮盈 mfePct 远大于落袋"），
+    // 模型照抄进教训文本，"maePct -3.49% / deepAdverse"这类内部口径原样展示给用户。
+    // 修复两层：①提示词示例改人话 + 人话纪律（见 Python _TRADE_REFLECTION_SYSTEM）；
+    // ②本净化器做安全网——写入时净化新教训、toMap 读取时净化**存量库里的旧教训**
+    // （读写双向，旧数据不用迁移）。映射表只收**证据包字段**（内部口径），
+    // MACD/RSI/T+1 这类用户认识的交易术语刻意不动。
+    private static final Map<String, String> JARGON_TO_HUMAN = Map.ofEntries(
+            Map.entry("maePct", "最大浮亏"),
+            Map.entry("mfePct", "最大浮盈"),
+            Map.entry("deepAdverse", "入场即深度浮亏"),
+            Map.entry("exitEarly", "浮盈落袋不足"),
+            Map.entry("roundTripPct", "往返收益"),
+            Map.entry("winRatePct", "胜率"),
+            Map.entry("evaluated", "已评判笔数"),
+            Map.entry("committee", "委员会"));
+
+    /** 词边界替换 camelCase 字段名 → 人话（大小写敏感：MAE 之类全大写缩写不动）。 */
+    static String humanizeJargon(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return raw;
+        }
+        String out = raw;
+        for (var entry : JARGON_TO_HUMAN.entrySet()) {
+            out = out.replaceAll("(?<![A-Za-z])" + Pattern.quote(entry.getKey())
+                            + "(?![A-Za-z])",
+                    entry.getValue());
+        }
+        // "根 bar / bar 内" 的 K 线口语化（词边界防误伤 bargain 等）
+        out = out.replaceAll("(?<![A-Za-z])bars?(?![A-Za-z])", "K线");
+        return out;
+    }
+
+    /** List<String> 逐条净化（attempts 用）。 */
+    private static List<String> humanizeJargonList(List<String> raw) {
+        if (raw == null) {
+            return null;
+        }
+        return raw.stream().map(MemoryLessonService::humanizeJargon).toList();
+    }
+
+    /** fromJson 之后的净化（context/attempts 的 JSON 反序列化产物：字符串/列表原样过，其他类型不动）。 */
+    private static Object humanizeJargonJson(Object parsed) {
+        if (parsed instanceof String text) {
+            return humanizeJargon(text);
+        }
+        if (parsed instanceof List<?> list) {
+            return list.stream()
+                    .map(e -> e instanceof String s ? humanizeJargon(s) : e)
+                    .toList();
+        }
+        return parsed;
+    }
+
     private final MemoryLessonRepository lessonRepo;
     private final ObjectMapper mapper;
 
@@ -104,12 +159,14 @@ public class MemoryLessonService {
                     .symptom(symptom)
                     // 原文与键分离（记忆白盒）：symptom 是去标点小写的规范化键（计数/匹配用），
                     // symptomText 保留 LLM 原句给用户读。历史行为 null 时前端回退 symptom。
-                    .symptomText(clip(item.getSymptom(), 200))
+                    // 展示字段一律过话术净化（2026-11-07）：字段名黑话不进用户界面。
+                    .symptomText(humanizeJargon(clip(item.getSymptom(), 200)))
                     .scope(scopeOf(request.getSessionKey()))
-                    .context(toJson(item.getContext()))
-                    .attempts(toJson(item.getAttempts()))
-                    .resolution(clip(item.getResolution(), 1000))
-                    .reusableRule(clip(item.getReusableRule(), 500))
+                    .context(toJson(item.getContext() instanceof String contextText
+                            ? humanizeJargon(contextText) : item.getContext()))
+                    .attempts(toJson(humanizeJargonList(item.getAttempts())))
+                    .resolution(humanizeJargon(clip(item.getResolution(), 1000)))
+                    .reusableRule(humanizeJargon(clip(item.getReusableRule(), 500)))
                     // 句级证据优先（LLM 引用的行号已在 Python 侧映射成具体事件 id），
                     // 没有就退回请求级的整段会话 id —— 来源宁可粗，不能断
                     .evidenceEventIds(toJsonIds(!isEmpty(item.getEvidenceEventIds())
@@ -227,8 +284,9 @@ public class MemoryLessonService {
         boolean byAgent = "agent".equals(provenance);
         String symptom = isBlank(patch.getSymptom())
                 ? target.getSymptom() : normalizeSymptomForStorage(patch.getSymptom());
-        String symptomText = isBlank(patch.getSymptom())
-                ? target.getSymptomText() : clip(patch.getSymptom().trim(), MAX_SYMPTOM_CHARS);
+        // 修订同样过话术净化（2026-11-07）：新版本进入展示链路，字段名黑话不进用户界面
+        String symptomText = humanizeJargon(isBlank(patch.getSymptom())
+                ? target.getSymptomText() : clip(patch.getSymptom().trim(), MAX_SYMPTOM_CHARS));
         MemoryLesson saved = lessonRepo.save(MemoryLesson.builder()
                 .userId(target.getUserId())
                 .sessionKey(target.getSessionKey())
@@ -236,12 +294,16 @@ public class MemoryLessonService {
                 .symptom(symptom)
                 .symptomText(symptomText)
                 .scope(target.getScope())
-                .context(patch.getContext() != null ? toJson(patch.getContext()) : target.getContext())
-                .attempts(patch.getAttempts() != null ? toJson(patch.getAttempts()) : target.getAttempts())
+                .context(patch.getContext() != null
+                        ? toJson(patch.getContext() instanceof String contextText
+                                ? humanizeJargon(contextText) : patch.getContext())
+                        : target.getContext())
+                .attempts(patch.getAttempts() != null
+                        ? toJson(humanizeJargonList(patch.getAttempts())) : target.getAttempts())
                 .resolution(isBlank(patch.getResolution())
-                        ? target.getResolution() : clip(patch.getResolution(), 1000))
+                        ? target.getResolution() : humanizeJargon(clip(patch.getResolution(), 1000)))
                 .reusableRule(isBlank(patch.getReusableRule())
-                        ? target.getReusableRule() : clip(patch.getReusableRule(), 500))
+                        ? target.getReusableRule() : humanizeJargon(clip(patch.getReusableRule(), 500)))
                 .evidenceEventIds(target.getEvidenceEventIds())
                 .supersedesId(target.getId())
                 .confidence(patch.getConfidence() == null
@@ -436,18 +498,20 @@ public class MemoryLessonService {
         // 中文任务类型（"回测""查行情"）：给前端做分类展示，没有它用户看到的是英文键
         item.put("taskTypeLabel",
                 TASK_TYPE_LABELS.getOrDefault(lesson.getTaskType(), lesson.getTaskType()));
-        // 症状原文优先（记忆白盒）：symptom 是规范化键，不是给人读的句子
+        // 症状原文优先（记忆白盒）：symptom 是规范化键，不是给人读的句子。
+        // 展示字段一律过话术净化（2026-11-07）：**存量库里的旧教训**在这里被同样
+        // 净化——读写双向，旧数据不用迁移。
         item.put("symptom", lesson.getSymptomText() != null && !lesson.getSymptomText().isBlank()
-                ? lesson.getSymptomText() : lesson.getSymptom());
-        item.put("symptomRaw", lesson.getSymptomText());
+                ? humanizeJargon(lesson.getSymptomText()) : lesson.getSymptom());
+        item.put("symptomRaw", humanizeJargon(lesson.getSymptomText()));
         // 规范化键（lessonKey 的 symptom 半边）：写入侧语义查重对齐既有键用
         // （Python consolidate._align_duplicate_lessons：同义复发现象改挂这个键，
         // 复发计数才数得起来），这里的 toMap 也是索引语料的来源
         item.put("symptomKey", lesson.getSymptom());
-        item.put("context", fromJson(lesson.getContext()));
-        item.put("attempts", fromJson(lesson.getAttempts()));
-        item.put("resolution", lesson.getResolution());
-        item.put("reusableRule", lesson.getReusableRule());
+        item.put("context", humanizeJargonJson(fromJson(lesson.getContext())));
+        item.put("attempts", humanizeJargonJson(fromJson(lesson.getAttempts())));
+        item.put("resolution", humanizeJargon(lesson.getResolution()));
+        item.put("reusableRule", humanizeJargon(lesson.getReusableRule()));
         item.put("status", lesson.getStatus());
         item.put("scope", lessonScope(lesson));
         // 情境绑定（2026-10-16）：教训带出处下发——跨域检索（聊天）时模型能区分

@@ -609,4 +609,35 @@ class MemoryLessonServiceTest {
         List<Map<String, Object>> neutral = scoped.searchLessons(1L, null, null, 5);
         assertEquals(21L, neutral.get(0).get("id"));
     }
+
+    // ==================== 话术净化（2026-11-07）：字段名黑话不进用户界面 ====================
+
+    @Test
+    void humanizeJargonRewritesEvidenceFieldNames() {
+        // 用户实测看到的那类话术：字段名原样漏出
+        String raw = "入场后 4 根 bar 内即出现 deepAdverse（maePct -3.49%），"
+                + "全程 mfePct 仅 -0.14%，winRatePct 持续偏低";
+        String human = MemoryLessonService.humanizeJargon(raw);
+        assertFalse(human.contains("maePct"));
+        assertFalse(human.contains("mfePct"));
+        assertFalse(human.contains("deepAdverse"));
+        assertFalse(human.contains("bar"));
+        assertTrue(human.contains("最大浮亏"));
+        assertTrue(human.contains("最大浮盈"));
+        assertTrue(human.contains("入场即深度浮亏"));
+        assertTrue(human.contains("K线"));
+    }
+
+    @Test
+    void humanizeJargonKeepsUserFacingTermsIntact() {
+        // MACD/RSI/T+1 是用户认识的交易术语，净化器刻意不动
+        String raw = "MACD 金叉且 RSI 低于 30，T+1 限制当日卖出";
+        assertEquals(raw, MemoryLessonService.humanizeJargon(raw));
+    }
+
+    @Test
+    void humanizeJargonWordBoundaryNoFalseHits() {
+        // 词边界：不含全大写缩写的误伤、不把词中片段替换掉
+        assertEquals("MAE 与 MFE 口径", MemoryLessonService.humanizeJargon("MAE 与 MFE 口径"));
+    }
 }
