@@ -32,8 +32,12 @@ export const messageBus = reactive({
     const token = localStorage.getItem('token')
     if (!token) return
     if (this.es) {
-      // 同一 token 的已有连接直接复用；换账号/换 token 时先关旧流再重建
-      if (this.es._token === token) return
+      // 同一 token 且连接**确实活着**才复用；换账号/换 token 时先关旧流再重建。
+      // 2026-11-07 修复：此前只看 token 就复用——服务器重启/断线后浏览器放弃
+      // 重连的 EventSource（readyState=CLOSED，比如遭遇过 401）会一直"假活"，
+      // 之后每次 connect 都复用这条死连接，推送全部丢失（实测：问 AI 永远在转，
+      // 后端其实早已回复）。CLOSED 的连接浏览器不会再自愈，必须重建。
+      if (this.es._token === token && this.es.readyState === 1 /* OPEN */) return
       this.es.close()
       this.es = null
     }

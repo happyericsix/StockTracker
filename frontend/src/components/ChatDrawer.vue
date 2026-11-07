@@ -44,6 +44,7 @@ const listEl = ref(null)
 const llmMissing = ref(false)
 let llmChecked = false
 let unsubscribe = null
+let resyncUnsubscribe = null
 let seenIds = new Set()
 
 const activeFocus = computed(() => props.focus
@@ -149,6 +150,23 @@ watch(() => props.open, async (open) => {
     typing.value = false
     unsubscribe = messageBus.subscribe(onBusMessage)
     messageBus.connect()
+    // 断线重连后补拉（2026-11-07）：SSE 只推新消息，断线窗口里的回复
+    // （后端其实已生成）从聚焦会话缓存里找回来——这正是"缓存一段时间"的用途之一
+    if (resyncUnsubscribe) { resyncUnsubscribe() }
+    resyncUnsubscribe = messageBus.subscribeReconnect(async () => {
+      const focusObj = activeFocus.value
+      if (focusObj?.type !== 'news_event' || !focusObj.eventId) return
+      try {
+        const res = await getFocusHistory('news_event', focusObj.eventId)
+        for (const m of (res.data || [])) {
+          if (m.id && !seenIds.has(m.id)) {
+            seenIds.add(m.id)
+            messages.value.push(m)
+          }
+        }
+        scrollToBottom()
+      } catch { /* 补拉失败不影响当前对话 */ }
+    })
     // 聚焦会话续篇（2026-11-07 三轮）：同一条新闻/教训重开时回显之前的往来
     // （后端按 news-{id} 确定性会话键 + TTL 缓存窗口，过期即空）
     const focusObj = activeFocus.value
@@ -182,14 +200,17 @@ watch(() => props.open, async (open) => {
         llmMissing.value = res.data?.enabled === true && !res.data?.configured
       }).catch(() => {})
     }
-  } else if (unsubscribe) {
-    unsubscribe()
-    unsubscribe = null
+  } else {
+    if (unsubscribe) { unsubscribe(); unsubscribe = null }
+    if (resyncUnsubscribe) { resyncUnsubscribe(); resyncUnsubscribe = null }
     typing.value = false
   }
 })
 
-onUnmounted(() => { if (unsubscribe) unsubscribe() })
+onUnmounted(() => {
+  if (unsubscribe) unsubscribe()
+  if (resyncUnsubscribe) resyncUnsubscribe()
+})
 
 const send = async (preset) => {
   const text = String(preset || input.value || '').trim()
