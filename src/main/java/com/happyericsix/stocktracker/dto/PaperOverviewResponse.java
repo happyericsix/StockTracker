@@ -70,6 +70,26 @@ public class PaperOverviewResponse {
             String observerNote) {
     }
 
+    /**
+     * 前日预案状态（前日预案制，agent 模式才有）：当前生效/最近一份预案的摘要。
+     * "active"=今天在生效窗口内；用户在页面上要能一眼看到"明天什么条件下动手"。
+     */
+    public record PlanStatus(
+            /** 今天是否处于预案生效窗口内（盘中据此接管）。 */
+            boolean active,
+            /** 预案生效首日（= 签发结算日的下一交易日）。 */
+            LocalDate planDate,
+            /** 预案最后一个有效日。 */
+            LocalDate validUntil,
+            /** 委员会写的人话摘要（≤200字）；空串 = 没写。 */
+            String summary,
+            /** 入场条目数 / 出场条目数。 */
+            int entries,
+            int exits,
+            /** 签发时间（哪次会写的）。 */
+            LocalDateTime issuedAt) {
+    }
+
     private Long strategyId;
     private String name;
     private String symbol;
@@ -100,6 +120,8 @@ public class PaperOverviewResponse {
     private String nextEvaluationNote;
     /** 委员会活性（agent 模式才有；rule 模式为 null）。 */
     private CommitteeStatus committeeStatus;
+    /** 前日预案状态（agent 模式才有；没签过预案为 null）。 */
+    private PlanStatus planStatus;
 
     public Long getStrategyId() { return strategyId; }
     public void setStrategyId(Long strategyId) { this.strategyId = strategyId; }
@@ -151,4 +173,6 @@ public class PaperOverviewResponse {
     public void setNextEvaluationNote(String nextEvaluationNote) { this.nextEvaluationNote = nextEvaluationNote; }
     public CommitteeStatus getCommitteeStatus() { return committeeStatus; }
     public void setCommitteeStatus(CommitteeStatus committeeStatus) { this.committeeStatus = committeeStatus; }
+    public PlanStatus getPlanStatus() { return planStatus; }
+    public void setPlanStatus(PlanStatus planStatus) { this.planStatus = planStatus; }
 }

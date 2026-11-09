@@ -493,6 +493,14 @@ onBeforeUnmount(() => {
               v-if="item.decisionMode === 'agent' && item.committeeStatus"
               class="mt-1.5 border-t border-dashed border-border pt-2 text-[11.5px] leading-relaxed text-ink-3"
             >委员会：{{ committeeLine(item.committeeStatus) }}</p>
+            <!-- 前日预案（前日预案制）：委员会预注册的"明天什么条件下动手"，
+                 生效中标注出来——盘中它就是这套策略的执行者 -->
+            <p
+              v-if="item.decisionMode === 'agent' && item.planStatus"
+              class="mt-1 text-[11.5px] leading-relaxed"
+              :class="item.planStatus.active ? 'text-accent' : 'text-ink-3'"
+            >{{ item.planStatus.active ? '◉ 预案执行中' : '预案' }}（{{ item.planStatus.planDate }}
+              ~ {{ item.planStatus.validUntil }}）：{{ item.planStatus.summary || `入场 ${item.planStatus.entries} 条 / 出场 ${item.planStatus.exits} 条` }}</p>
             <p v-if="configUpdatedNote(item)" class="mt-1.5 text-[11.5px] text-warn">{{ configUpdatedNote(item) }}</p>
           </button>
 

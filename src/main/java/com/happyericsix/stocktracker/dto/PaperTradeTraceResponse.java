@@ -168,6 +168,10 @@ public class PaperTradeTraceResponse {
                 "账户守门员看过整个账户后决定不动（含只标记给委员会的 flag）—— 这是它的判断，不是没看");
         map.put(ExecutionContract.SKIP_GATE_BUDGET_EXCEEDED,
                 "账户守门员的当日调用预算用完 —— 预算是成本止损线，不是模型的结论");
+        map.put(ExecutionContract.SKIP_PLAN_INVALIDATED,
+                "前日预案被失效条款打死（价格跳空出区间/高影响新闻/数据损坏），当日不再按预案执行 —— 临场判断（守门员/盯盘）接管");
+        map.put(ExecutionContract.SKIP_PLAN_TRIGGER_NOT_MET,
+                "前日预案生效了一整天，但触发条件始终没有满足 —— 委员会预注册了判断，市场没走到（预案质量复盘的核心样本）");
         return map;
     }
 

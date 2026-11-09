@@ -16,6 +16,7 @@ import com.happyericsix.stocktracker.entity.PaperAuthorization;
 import com.happyericsix.stocktracker.entity.PaperEquitySnapshot;
 import com.happyericsix.stocktracker.entity.PaperTrade;
 import com.happyericsix.stocktracker.entity.PaperPositionLot;
+import com.happyericsix.stocktracker.entity.PaperTradePlan;
 import com.happyericsix.stocktracker.entity.PaperTradeTrace;
 import com.happyericsix.stocktracker.entity.Strategy;
 import com.happyericsix.stocktracker.entity.User;
@@ -140,6 +141,11 @@ public class PaperTradingService {
      * 策略修订提案（ACCOUNT-GATE 阶段3）：升级后的自动提案入口。可空（单测）。
      */
     private final StrategyRevisionService strategyRevisionService;
+    /**
+     * 前日预案（paper_trade_plans，只追加）。可空（单测）：null 时预案分支整体
+     * 短路（runPlanFlow 判 miss），盘中回到守门员/盯盘的现行行为，一行不变。
+     */
+    private final com.happyericsix.stocktracker.repository.PaperTradePlanRepository paperTradePlanRepository;
     private final ObjectMapper mapper = new ObjectMapper();
     private final TransactionTemplate transactionTemplate;
 
@@ -167,6 +173,24 @@ public class PaperTradingService {
      */
     @Value("${paper.shadow-committee.enabled:false}")
     private boolean shadowCommitteeEnabled;
+    /**
+     * 前日预案制总开关：关掉后 agent 模式盘中回到"守门员/盯盘 + 授权边界"的现行
+     * 行为，15:30 结算也不再落新预案（已落预案行保留在库里，只是盘中不再消费）。
+     */
+    @Value("${paper.plan.enabled:true}")
+    private boolean planEnabled;
+    /**
+     * 预案当日已消费（成交/失效/被边界挡下）：strategyId → 消费日。内存态足够——
+     * 重启丢失的代价只是多判一次，成交守卫（existsByStrategyIdAndTradeDate）与
+     * 痕迹 dedupe 键兜住真正的重复风险（与 watchEventLastFired 同一纪律）。
+     */
+    private final Map<Long, LocalDate> planConsumedDay = new ConcurrentHashMap<>();
+    /**
+     * 预案被失效条款打死（价格出区间/高影响新闻/JSON 坏）：strategyId → 失效日。
+     * 当日在本服务内恢复守门员/盯盘接管——临场判断通道重新上岗
+     * （"预案死了就不能开枪，但也别瞎站着"）。
+     */
+    private final Map<Long, LocalDate> planInvalidatedDay = new ConcurrentHashMap<>();
     /**
      * 盘中授权 TTL（P3，2026-10-28）：授权"直到下一次会议更新"的最长静默生效期。
      * 持仓 3 天（敞口真实，盯紧）/空仓 5 天（错过的代价更小）——超期后旧边界
@@ -234,7 +258,8 @@ public class PaperTradingService {
                                StockDataGateway stockDataGateway,
                                AccountGateService accountGateService,
                                com.happyericsix.stocktracker.repository.PaperGateEventRepository gateEventRepository,
-                               StrategyRevisionService strategyRevisionService) {
+                               StrategyRevisionService strategyRevisionService,
+                               com.happyericsix.stocktracker.repository.PaperTradePlanRepository paperTradePlanRepository) {
         this.strategyRepository = strategyRepository;
         this.paperAccountRepository = paperAccountRepository;
         this.paperTradeRepository = paperTradeRepository;
@@ -260,6 +285,7 @@ public class PaperTradingService {
         this.accountGateService = accountGateService;
         this.gateEventRepository = gateEventRepository;
         this.strategyRevisionService = strategyRevisionService;
+        this.paperTradePlanRepository = paperTradePlanRepository;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         // REQUIRED（非 REQUIRES_NEW）：无环境事务时自己开一个（与此前行为一致）；
         // 有环境事务时**合并** —— evaluateStrategy 尾部把"成交落库 + 净值快照"包在
@@ -1160,6 +1186,12 @@ public class PaperTradingService {
                 log.info("委员会活性组装失败 strategyId={}（不影响总览）：{}",
                         strategy.getId(), e.toString());
             }
+            try {
+                item.setPlanStatus(planStatusOf(strategy));
+            } catch (Exception e) {
+                log.info("预案状态组装失败 strategyId={}（不影响总览）：{}",
+                        strategy.getId(), e.toString());
+            }
         }
 
         if (expectationService != null && strategy.getUser() != null) {
@@ -1410,6 +1442,12 @@ public class PaperTradingService {
             recordEquitySnapshot(strategy, settled, txResult, today);
             return settled;
         });
+        // 前日预案（前日预案制）：委员会真开了会且输出了 plan 才落库（shadow 不落，
+        // 与授权同一条纪律）。fail-open：写不进去只是次日沿用现状，绝不影响结算。
+        savePlanQuietly(strategy, result, today);
+        // 今日预案对账：生效中且整天没触发的预案，15:30 落一行 plan_trigger_not_met
+        // ——"预注册了但市场没走到"是预案质量复盘的核心样本，不能静默消失。
+        planOutcomeQuietly(strategy, today);
         recordPaperFacts(strategy, account, today);
         // 到期就回填预期（复用同一批净值快照，不额外查库）。
         // 旁路：写不进去只是少一次回填，绝不影响结算（与 recordPaperFacts 同一条纪律）。
@@ -1717,6 +1755,22 @@ public class PaperTradingService {
                     CnTime.today(), barTime, result, reason);
         }
 
+        // ===== 前日预案分支（前日预案制）：预案生效日，盘中只按预案确定性执行 =====
+        // 委员会 T 日 15:30 预注册的条件单由零 LLM 的 plan-check 判定（每根新分钟 bar
+        // 一次，lastBarTime 去重已在上面完成）。预案接管日守门员信号路径与盯盘 LLM
+        // 全部静音——预注册纪律：盘中不临场改主意。三个例外：
+        //   ① 止损硬通道（hardStopSell）不进本分支（条件里已排除）——生存不排队；
+        //   ② 预案被失效条款打死（价格出区间/高影响新闻）→ 痕迹留 plan_invalidated；
+        //      新闻失效当日恢复守门员/盯盘接管（临场判断重新上岗）；
+        //   ③ 无预案/判定端点暂不可用 → 静默等待下一根 bar，本分支不改变既有路径。
+        if (planEnabled && paperTradePlanRepository != null
+                && isAgentMode(strategy) && intradayAuthorized && !hardStopSell) {
+            PlanFlow planned = runPlanFlow(strategy, account, result, barTime, trigger);
+            if (planned.handled()) {
+                return planned.account();
+            }
+        }
+
         // ===== 账户守门员（ACCOUNT-GATE 阶段1/2，2026-11-04）：agent 模式盘中的主裁决路径 =====
         // 信号（含规则信号）降级为**唤醒源**：DSL 不再直接执行，先过看着整个账户的
         // 守门员（1 次 LLM：全持仓面板 + 大盘语境 + 方向不对称裁决纪律）。
@@ -1806,6 +1860,433 @@ public class PaperTradingService {
         return applyBarResult(strategy, account, result, CnTime.today(), barTime,
                 ExecutionContract.SETTLEMENT_REALTIME, trigger, false,
                 authorization == null ? null : authorization.getMaxPositionPct());
+    }
+
+    // ==================== 前日预案制（T+1 条件化交易预案） ====================
+
+    /** 预案分支回合结果：handled=false = 无生效预案或预案已死，调用方回落既有路径。 */
+    private record PlanFlow(PaperAccount account, boolean handled) {}
+
+    /**
+     * 预案分支的一次完整回合。**确定性、零 LLM**（plan-check 端点纯规则判定）。
+     *
+     * <p>返回语义：
+     * <ul>
+     *   <li>{@code handled=false}：无生效预案 / 预案今天已被失效条款打死——
+     *       调用方走守门员/盯盘的既有路径（失效后临场通道恢复接管）；</li>
+     *   <li>{@code handled=true}：本节已由预案处置完毕（成交 / 失效留痕 /
+     *       静默重估 / 判定暂不可用等下一根 bar），调用方直接返回。</li>
+     * </ul>
+     */
+    private PlanFlow runPlanFlow(Strategy strategy, PaperAccount account,
+                                 JsonNode result, String barTime, String trigger) {
+        LocalDate today = CnTime.today();
+        if (today.equals(planInvalidatedDay.get(strategy.getId()))) {
+            // 预案已死于今天（价格出区间/高影响新闻）：临场通道恢复接管——
+            // 失效痕迹与消息只在打死那一刻落一次，之后每根 bar 都走既有路径。
+            return new PlanFlow(account, false);
+        }
+        var active = paperTradePlanRepository
+                .findActiveForStrategy(strategy.getId(), today).orElse(null);
+        if (active == null) {
+            return new PlanFlow(account, false);
+        }
+        // 当日已消费（预案已成交/被边界挡下）或今天已有任何成交：只重估，不再判定
+        //（一预案一单；其它路径动过手时预案也不该再抢着执行）。
+        if (today.equals(planConsumedDay.get(strategy.getId()))
+                || paperTradeRepository.existsByStrategyIdAndTradeDate(strategy.getId(), today)) {
+            markToMarket(strategy, account, result);
+            markFingerprintDecisionMode(result);
+            return new PlanFlow(account, true);
+        }
+        JsonNode planNode = parseTreeQuietly(active.getPlanJson());
+        if (planNode == null) {
+            // 落库 JSON 坏了：按失效处理（fail-closed——半截预案不能执行），
+            // 但不点亮"临场恢复"（数据坏了不是市场的错，等 15:30 重签）。
+            planInvalidatedDay.put(strategy.getId(), today);
+            log.warn("预案 JSON 解析失败 strategy id={} planId={}，按失效处理",
+                    strategy.getId(), active.getId());
+            return new PlanFlow(traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                    trigger, today, barTime, result, ExecutionContract.SKIP_PLAN_INVALIDATED), true);
+        }
+        JsonNode verdict;
+        try {
+            verdict = strategyClient.planCheck(strategy.getSymbol(), planNode,
+                    buildPosition(account), newsHighImpactQuietly(strategy), today.toString());
+        } catch (Exception e) {
+            // 判定失败 ≠ 失效：预案继续有效，下一根 bar 再判（45s 级轮询）。
+            log.info("plan-check 调用失败 strategy id={}（本轮不动，等下一根 bar）：{}",
+                    strategy.getId(), e.toString());
+            return new PlanFlow(account, true);
+        }
+        if (verdict == null || !verdict.path("valid").asBoolean(false)) {
+            return new PlanFlow(account, true);
+        }
+        String action = textOr(verdict.get("action"), "hold").toLowerCase(Locale.ROOT);
+        String invalidated = textOr(verdict.get("invalidated"), null);
+        if (invalidated != null) {
+            planInvalidatedDay.put(strategy.getId(), today);
+            attachPlanAudit(result, active, action, verdict);
+            markToMarket(strategy, account, result);
+            markFingerprintDecisionMode(result);
+            traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME, trigger,
+                    today, barTime, result, ExecutionContract.SKIP_PLAN_INVALIDATED);
+            planInvalidatedMessageQuietly(strategy, active, invalidated);
+            // 失效即恢复临场通道（守门员/盯盘）接管当日——预案死了就不能开枪，但别瞎站着。
+            return new PlanFlow(account, false);
+        }
+        if ("buy".equals(action) || "sell".equals(action)) {
+            planConsumedDay.put(strategy.getId(), today);   // 一预案一单：首个命中即消费
+            // 组合熔断（只挡 buy；预案的卖出是降风险方向，不挡）。
+            if ("buy".equals(action) && portfolioService != null && strategy.getUser() != null
+                    && portfolioService.haltsNewOpens(strategy.getUser().getId())) {
+                return new PlanFlow(traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                        trigger, today, barTime, result, ExecutionContract.SKIP_PORTFOLIO_HALTED), true);
+            }
+            // 授权方向边界：预案不越过授权（授权是边界，预案是边界内的执行时机）。
+            if (authorizationBlocksPlan(strategy, action)) {
+                markToMarket(strategy, account, result);
+                markFingerprintDecisionMode(result);
+                return new PlanFlow(traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                        trigger, today, barTime, result,
+                        ExecutionContract.SKIP_OUTSIDE_AUTHORIZATION), true);
+            }
+            // 当日往返护栏（buy）：与既有盘中授权通道同一条纪律。
+            if (roundtripGuardEnabled && "buy".equals(action)
+                    && paperTradeRepository.existsByStrategyIdAndTradeDate(strategy.getId(), today)) {
+                markToMarket(strategy, account, result);
+                markFingerprintDecisionMode(result);
+                return new PlanFlow(traceOnly(strategy, account, ExecutionContract.SETTLEMENT_REALTIME,
+                        trigger, today, barTime, result,
+                        ExecutionContract.SKIP_ALREADY_TRADED_TODAY), true);
+            }
+            ObjectNode synth = planSynthResult(result, action, verdict, active);
+            markAuthorizedExecution(synth, "plan_execution");
+            PaperAccount executed = applyBarResult(strategy, account, synth, today, barTime,
+                    ExecutionContract.SETTLEMENT_REALTIME, ExecutionContract.TRIGGER_PLAN, false,
+                    latestPlanSizeCap(strategy));
+            planExecutedMessageQuietly(strategy, active, action, verdict, today);
+            return new PlanFlow(executed, true);
+        }
+        // hold：预案生效中未触发（或叠加条件未满足）——重估账户、静默等下一根 bar。
+        markToMarket(strategy, account, result);
+        markFingerprintDecisionMode(result);
+        return new PlanFlow(account, true);
+    }
+
+    /** 预案执行时的授权夹取：当日最新授权的 max_position_pct（预案不越过授权）。 */
+    private BigDecimal latestPlanSizeCap(Strategy strategy) {
+        return paperAuthorizationRepository.findLatest(strategy.getId())
+                .map(PaperAuthorization::getMaxPositionPct).orElse(null);
+    }
+
+    private boolean authorizationBlocksPlan(Strategy strategy, String action) {
+        PaperAuthorization authorization = paperAuthorizationRepository
+                .findLatest(strategy.getId()).orElse(null);
+        if (authorization == null) {
+            return false;   // 无授权行=无边界（不会走到这：盘中授权门控在前面已挡）
+        }
+        if ("buy".equals(action) && !Boolean.TRUE.equals(authorization.getAllowOpen())) {
+            return true;
+        }
+        return "sell".equals(action) && !Boolean.TRUE.equals(authorization.getAllowClose());
+    }
+
+    /** 预案执行结果节点：沿用触发 bar 的指纹/快照，成交价用判定那一刻的实时价。 */
+    private ObjectNode planSynthResult(JsonNode baseResult, String action, JsonNode verdict,
+                                       PaperTradePlan plan) {
+        ObjectNode synth = mapper.createObjectNode();
+        synth.put("signal", action);
+        double price = verdict.path("price").asDouble(0);
+        if (price > 0) {
+            synth.put("price", price);
+        } else if (baseResult != null && baseResult.hasNonNull("price")) {
+            synth.set("price", baseResult.get("price"));
+        }
+        synth.put("size_fraction", verdict.path("size_fraction").asDouble(0));
+        ArrayNode conditions = synth.putArray("matched_conditions");
+        conditions.add("plan_trigger");
+        String detail = textOr(verdict.get("detail"), "");
+        if (!detail.isBlank()) {
+            conditions.add(detail);
+        }
+        if (baseResult != null && baseResult.has("fingerprint")) {
+            synth.set("fingerprint", baseResult.get("fingerprint"));
+        }
+        if (baseResult != null && baseResult.has("snapshot")) {
+            synth.set("snapshot", baseResult.get("snapshot"));
+        }
+        ObjectNode audit = synth.putObject("plan");
+        audit.put("plan_id", plan.getId());
+        audit.put("plan_date", plan.getPlanDate().toString());
+        if (verdict.hasNonNull("matched")) {
+            audit.set("matched", verdict.get("matched"));
+        }
+        return synth;
+    }
+
+    /** 把预案判定写进响应快照的 extra：失效痕迹因此能回答"哪份预案、为什么死"。 */
+    private void attachPlanAudit(JsonNode result,
+                                 PaperTradePlan plan,
+                                 String action, JsonNode verdict) {
+        try {
+            JsonNode snapshot = result.get("snapshot");
+            JsonNode extra = snapshot == null ? null : snapshot.get("extra");
+            if (extra instanceof ObjectNode ex) {
+                ObjectNode audit = ex.putObject("plan");
+                audit.put("plan_id", plan.getId());
+                audit.put("plan_date", plan.getPlanDate().toString());
+                audit.put("action", action);
+                if (verdict.hasNonNull("invalidated")) {
+                    audit.put("invalidated", verdict.get("invalidated").asText());
+                }
+                if (verdict.hasNonNull("invalidated_type")) {
+                    audit.put("invalidated_type", verdict.get("invalidated_type").asText());
+                }
+                if (verdict.hasNonNull("detail")) {
+                    audit.put("detail", verdict.get("detail").asText());
+                }
+            }
+        } catch (Exception e) {
+            log.debug("Failed to attach plan audit: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 15:30 结算落预案（前日预案制）。条件与授权同一条纪律：agent 模式 + 真开会
+     * （shadow 不落）。生效窗口用 Python 算好的交易日（effective_from/until），
+     * 缺失时工作日近似并告警。当日同生效日已有预案（结算重跑）不重复落。
+     */
+    private void savePlanQuietly(Strategy strategy, JsonNode result, LocalDate today) {
+        if (paperTradePlanRepository == null) {
+            return;
+        }
+        try {
+            JsonNode plan = result == null ? null : result.get("plan");
+            if (plan == null || !plan.isObject() || plan.isEmpty()) {
+                return;
+            }
+            if (result.path("shadow").asBoolean(false)) {
+                return;
+            }
+            LocalDate from = parseIsoDate(textOr(plan.get("effective_from"), null));
+            LocalDate until = parseIsoDate(textOr(plan.get("effective_until"), null));
+            int validDays = Math.min(3, Math.max(1, plan.path("valid_days").asInt(1)));
+            if (from == null) {
+                from = nextWeekday(today);
+                log.warn("预案缺 effective_from，按工作日近似 {} strategy id={}", from, strategy.getId());
+            }
+            if (until == null || until.isBefore(from)) {
+                until = plusWeekdays(from, validDays - 1);
+                log.warn("预案缺/坏 effective_until，按工作日近似 {} strategy id={}", until, strategy.getId());
+            }
+            var latest = paperTradePlanRepository
+                    .findFirstByStrategyIdOrderByIdDesc(strategy.getId()).orElse(null);
+            if (latest != null && latest.getIssuedAt() != null
+                    && latest.getIssuedAt().toLocalDate().equals(CnTime.today())
+                    && from.equals(latest.getPlanDate())) {
+                return;   // 结算重跑：当天同一生效日的预案不重复落（最新一行语义不变）
+            }
+            PaperTradePlan saved = paperTradePlanRepository.save(
+                    PaperTradePlan.builder()
+                            .user(strategy.getUser())
+                            .strategy(strategy)
+                            .planDate(from)
+                            .validUntilDate(until)
+                            .planJson(plan.toString())
+                            .issuedAt(java.time.LocalDateTime.now(CnTime.ZONE))
+                            .build());
+            log.info("Saved plan for strategy id={}: {} ~ {} (planId={})",
+                    strategy.getId(), from, until, saved.getId());
+            planIssuedMessageQuietly(strategy, saved);
+        } catch (Exception e) {
+            log.info("预案落库失败 strategy id={}（次日沿用现状，不影响结算）：{}",
+                    strategy.getId(), e.toString());
+        }
+    }
+
+    /**
+     * 今日预案对账（15:30 结算尾部）：当日生效的预案整天没触发、也没被失效条款
+     * 打死 → 落一行 plan_trigger_not_met（trigger=plan）。预注册了但市场没走到，
+     * 是预案质量复盘的核心样本，不能静默消失。
+     */
+    private void planOutcomeQuietly(Strategy strategy, LocalDate today) {
+        if (paperTradePlanRepository == null) {
+            return;
+        }
+        try {
+            var active = paperTradePlanRepository
+                    .findActiveForStrategy(strategy.getId(), today).orElse(null);
+            if (active == null) {
+                return;
+            }
+            if (paperTradeRepository.existsByStrategyIdAndTradeDate(strategy.getId(), today)) {
+                return;   // 已成交（预案触发或其它路径动手）：成交行即结论
+            }
+            boolean invalidatedToday = paperTraceService.listForDay(strategy.getId(), today)
+                    .stream().anyMatch(t -> ExecutionContract.SKIP_PLAN_INVALIDATED
+                            .equals(t.getSkipReason()));
+            if (invalidatedToday) {
+                return;   // 已失效：realtime 痕迹即结论
+            }
+            PaperAccount account = paperAccountRepository.findByStrategyId(strategy.getId())
+                    .orElse(null);
+            ObjectNode audit = mapper.createObjectNode();
+            audit.put("plan_id", active.getId());
+            audit.put("plan_date", active.getPlanDate().toString());
+            audit.put("outcome", "not_triggered");
+            ObjectNode snapshot = mapper.createObjectNode();
+            snapshot.put("schema_version", 1);
+            snapshot.set("extra", audit);
+            ObjectNode synth = mapper.createObjectNode();
+            synth.set("snapshot", snapshot);
+            PaperTradeTrace trace = newTrace(strategy, account, ExecutionContract.SETTLEMENT_DAILY,
+                    ExecutionContract.TRIGGER_PLAN, today, null, synth);
+            trace.setDecision(ExecutionContract.DECISION_SKIP);
+            trace.setSkipReason(ExecutionContract.SKIP_PLAN_TRIGGER_NOT_MET);
+            if (account != null) {
+                fillAccountAfter(trace, account);
+            }
+            paperTraceService.recordOnceWithKey(trace,
+                    "plan-outcome:" + strategy.getId() + ":" + today + ":not_triggered");
+        } catch (Exception e) {
+            log.info("预案对账失败 strategy id={}（旁路，不影响结算）：{}",
+                    strategy.getId(), e.toString());
+        }
+    }
+
+    /** 该标的高影响新闻（近 24h）：预案 news_high_impact 失效条款的输入。 */
+    private boolean newsHighImpactQuietly(Strategy strategy) {
+        if (newsBriefingService == null) {
+            return false;
+        }
+        try {
+            return newsBriefingService.latestShock(strategy.getSymbol(), 24) != null;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 预案发布通知（幂等键 = 策略×生效日）：用户最早抱怨"开会结果没人通知"的落点。 */
+    private void planIssuedMessageQuietly(Strategy strategy,
+                                          PaperTradePlan plan) {
+        if (messageService == null || strategy.getUser() == null) {
+            return;
+        }
+        try {
+            JsonNode planNode = parseTreeQuietly(plan.getPlanJson());
+            String summary = planNode == null ? "" : textOr(planNode.get("summary"), "");
+            int entries = planNode == null ? 0 : planNode.path("entries").size();
+            int exits = planNode == null ? 0 : planNode.path("exits").size();
+            boolean intradayArmed = paperAuthorizationRepository
+                    .findLatest(strategy.getId())
+                    .map(a -> Boolean.TRUE.equals(a.getIntradayExecution()))
+                    .orElse(false);
+            StringBuilder content = new StringBuilder(String.format(
+                    "【明日预案】%s · %s（生效 %s ~ %s）\n",
+                    strategy.getName(), strategy.getSymbol(),
+                    plan.getPlanDate(), plan.getValidUntilDate()));
+            if (!summary.isBlank()) {
+                content.append(summary.strip()).append('\n');
+            } else {
+                content.append(String.format("入场条件 %d 条，出场条件 %d 条。%n",
+                        entries, exits));
+            }
+            if (entries > 0 && !intradayArmed) {
+                content.append("⚠️ 预案有入场条目，但盘中执行授权未开（intraday_execution=false），"
+                        + "触发条件满足也不会自动成交——需要委员会下次开会放行。");
+            }
+            messageService.saveReport(strategy.getUser(),
+                    StrategyHealthWatchService.TYPE_STRATEGY_SENTINEL,
+                    "plan-issued:" + strategy.getId() + ":" + plan.getPlanDate(),
+                    strategy.getSymbol(), clipText(content.toString(), 2000));
+        } catch (Exception e) {
+            log.info("预案发布通知失败 strategy id={}（旁路）：{}", strategy.getId(), e.toString());
+        }
+    }
+
+    /** 预案失效通知（幂等键 = 策略×失效日）。 */
+    private void planInvalidatedMessageQuietly(Strategy strategy,
+                                               PaperTradePlan plan,
+                                               String reason) {
+        if (messageService == null || strategy.getUser() == null) {
+            return;
+        }
+        try {
+            String content = String.format(
+                    "【预案失效】%s · %s · %s\n%s\n当日盘中恢复临场判断（守门员/盯盘）接管，"
+                            + "下一交易日 15:30 委员会重签预案。",
+                    strategy.getName(), strategy.getSymbol(), CnTime.today(), reason);
+            messageService.saveReport(strategy.getUser(),
+                    StrategyHealthWatchService.TYPE_STRATEGY_SENTINEL,
+                    "plan-invalidated:" + strategy.getId() + ":" + CnTime.today(),
+                    strategy.getSymbol(), clipText(content, 2000));
+        } catch (Exception e) {
+            log.info("预案失效通知失败 strategy id={}（旁路）：{}", strategy.getId(), e.toString());
+        }
+    }
+
+    /** 预案触发成交通知（幂等键 = 策略×成交日×方向）。 */
+    private void planExecutedMessageQuietly(Strategy strategy,
+                                            PaperTradePlan plan,
+                                            String action, JsonNode verdict, LocalDate today) {
+        if (messageService == null || strategy.getUser() == null) {
+            return;
+        }
+        try {
+            var trades = paperTradeRepository
+                    .findByStrategyIdAndTradeDateOrderByIdAsc(strategy.getId(), today);
+            String fill = trades.isEmpty() ? ""
+                    : String.format(" 成交 %s %s 股 @ %s。", trades.get(trades.size() - 1).getSide(),
+                            Money.price(trades.get(trades.size() - 1).getShares()).toPlainString(),
+                            Money.price(trades.get(trades.size() - 1).getPrice()).toPlainString());
+            String content = String.format(
+                    "【预案触发】%s · %s · %s\n预注册条件命中，按预案执行%s\n判定：%s",
+                    strategy.getName(), strategy.getSymbol(), today, fill,
+                    textOr(verdict.get("detail"), ""));
+            messageService.saveReport(strategy.getUser(),
+                    StrategyHealthWatchService.TYPE_STRATEGY_SENTINEL,
+                    "plan-executed:" + strategy.getId() + ":" + today + ":" + action,
+                    strategy.getSymbol(), clipText(content, 2000));
+        } catch (Exception e) {
+            log.info("预案成交通知失败 strategy id={}（旁路）：{}", strategy.getId(), e.toString());
+        }
+    }
+
+    private JsonNode parseTreeQuietly(String json) {
+        try {
+            return json == null ? null : mapper.readTree(json);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static LocalDate parseIsoDate(String text) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        try {
+            return LocalDate.parse(text.trim());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 严格在 day 之后的下一个工作日（预案生效窗口的工作日近似，仅在交易日历缺失时兜底）。 */
+    private static LocalDate nextWeekday(LocalDate day) {
+        LocalDate d = day.plusDays(1);
+        while (d.getDayOfWeek().getValue() >= 6) {
+            d = d.plusDays(1);
+        }
+        return d;
+    }
+
+    private static LocalDate plusWeekdays(LocalDate day, int days) {
+        LocalDate d = day;
+        for (int i = 0; i < days; i++) {
+            d = nextWeekday(d);
+        }
+        return d;
     }
 
     /**
@@ -2511,6 +2992,30 @@ public class PaperTradingService {
      * 策略 config 的 gate 段可覆盖 max_days_*——覆盖了就按覆盖值算）。观察员结论
      * 与门控触发理由取最近一条痕迹的 snapshot（extra.gate）。
      */
+    /** 前日预案状态（总览展示）：最近一份预案 + 今天是否在生效窗口内。 */
+    private PaperOverviewResponse.PlanStatus planStatusOf(Strategy strategy) {
+        if (paperTradePlanRepository == null) {
+            return null;
+        }
+        LocalDate today = CnTime.today();
+        PaperTradePlan plan = paperTradePlanRepository
+                .findFirstByStrategyIdOrderByIdDesc(strategy.getId()).orElse(null);
+        if (plan == null) {
+            return null;
+        }
+        boolean active = !plan.getPlanDate().isAfter(today)
+                && !today.isAfter(plan.getValidUntilDate());
+        JsonNode planNode = parseTreeQuietly(plan.getPlanJson());
+        return new PaperOverviewResponse.PlanStatus(
+                active,
+                plan.getPlanDate(),
+                plan.getValidUntilDate(),
+                planNode == null ? "" : textOr(planNode.get("summary"), ""),
+                planNode == null ? 0 : planNode.path("entries").size(),
+                planNode == null ? 0 : planNode.path("exits").size(),
+                plan.getIssuedAt());
+    }
+
     private PaperOverviewResponse.CommitteeStatus committeeStatusOf(Strategy strategy, boolean holding) {
         String lastMeeting = paperTraceService.lastBriefingDate(strategy.getId());
         LocalDate lastCommitteeAt = lastMeeting == null ? null : LocalDate.parse(lastMeeting);

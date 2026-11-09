@@ -85,14 +85,17 @@ class DecisionQualityServiceTest {
     @SuppressWarnings("unchecked")
     void strategyExperienceReportsWinRateAndPerTradeVerdicts() {
         // 与 quality 同一套数学：买在涨前 win、卖在涨前 loss；经验包必须口径一致，
-        // 否则委员会看到的"自己的病历"和对账页对不上，可信度归零
-        historyFrom("2026-09-01", 100, 101, 102, 103, 104, 105);
+        // 否则委员会看到的"自己的病历"和对账页对不上，可信度归零。
+        // 日期相对 now（经验包按 LocalDate.now()-60 天过滤：写死日历日期的版本
+        // 在 2026-11-01 过窗后爆掉——时间炸弹测试，改相对日期除根）。
+        LocalDate d0 = LocalDate.now().minusDays(20);
+        historyFrom(d0.toString(), 100, 101, 102, 103, 104, 105);
         Strategy strategy = Strategy.builder().id(10L).name("测试").symbol("600519")
                 .user(User.builder().id(1L).username("alice").build()).build();
         when(paperTradeRepository.findByStrategyIdOrderByTradeDateDescCreatedAtDesc(10L))
                 .thenReturn(List.of(
-                        trade("SELL", 100, LocalDate.of(2026, 9, 1)),
-                        trade("BUY", 100, LocalDate.of(2026, 9, 1))));
+                        trade("SELL", 100, d0),
+                        trade("BUY", 100, d0)));
 
         Map<String, Object> out = service.strategyExperience(strategy, 6);
 
@@ -111,11 +114,12 @@ class DecisionQualityServiceTest {
     @Test
     void strategyExperienceWithoutEvaluatedTradesGivesMinimalPendingPacket() {
         // 只有 3 根 bar：都还没走满 5 日 → 不许算胜率，但要告诉委员会"交易过、还没法对账"
-        historyFrom("2026-09-01", 100, 101, 102);
+        LocalDate d0 = LocalDate.now().minusDays(20);
+        historyFrom(d0.toString(), 100, 101, 102);
         Strategy strategy = Strategy.builder().id(10L).name("测试").symbol("600519")
                 .user(User.builder().id(1L).username("alice").build()).build();
         when(paperTradeRepository.findByStrategyIdOrderByTradeDateDescCreatedAtDesc(10L))
-                .thenReturn(List.of(trade("BUY", 100, LocalDate.of(2026, 9, 1))));
+                .thenReturn(List.of(trade("BUY", 100, d0)));
 
         Map<String, Object> out = service.strategyExperience(strategy, 6);
 
@@ -261,16 +265,19 @@ class DecisionQualityServiceTest {
     void strategyExperienceCarriesRoundTripAggregateAndSellRowPath() {
         // 经验包是路径口径的主出口：聚合块 + 明细行都要带上，且 note 必须解释字段
         // ——LLM 读不到口径说明就会自由发挥，数字反而变成噪声。
-        // 卖出在 09-05：之后至少还要 5 根 bar 才能走满 5 日对账窗口进 recent（09-10 收盘在列）
-        historyFrom("2026-09-01", 10.0, 10.5, 11.0, 9.6, 10.2, 10.3, 10.4, 10.5, 10.6, 10.7, 10.8);
+        // 卖出在 D0+4：之后至少还要 5 根 bar 才能走满 5 日对账窗口进 recent。
+        // 日期相对 now（60 天回看窗，见上：时间炸弹测试已除根）。
+        LocalDate d0 = LocalDate.now().minusDays(20);
+        historyFrom(d0.toString(), 10.0, 10.5, 11.0, 9.6, 10.2, 10.3, 10.4, 10.5, 10.6, 10.7, 10.8);
         Strategy strategy = Strategy.builder().id(10L).name("测试").symbol("600519")
                 .user(User.builder().id(1L).username("alice").build()).build();
         when(paperTradeRepository.findByStrategyIdOrderByTradeDateDescCreatedAtDesc(10L))
                 .thenReturn(List.of(
                         sellWithLots(
-                                "[{\"lotId\":1,\"openedDate\":\"2026-09-01\",\"cost\":\"10.0\",\"shares\":\"200\"}]",
-                                10.2, LocalDate.of(2026, 9, 5)),
-                        trade("BUY", 10.0, LocalDate.of(2026, 9, 1))));
+                                String.format("[{\"lotId\":1,\"openedDate\":\"%s\","
+                                        + "\"cost\":\"10.0\",\"shares\":\"200\"}]", d0),
+                                10.2, d0.plusDays(4)),
+                        trade("BUY", 10.0, d0)));
 
         Map<String, Object> out = service.strategyExperience(strategy, 6);
 

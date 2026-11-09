@@ -187,6 +187,19 @@ public final class ExecutionContract {
     public static final String SKIP_GATE_VETO = "gate_veto";
     public static final String SKIP_GATE_HOLD = "gate_hold";
     public static final String SKIP_GATE_BUDGET_EXCEEDED = "gate_budget_exceeded";
+    /**
+     * 前日预案制（T+1 条件化交易预案）：预案的"不动"必须有名有姓。
+     *
+     * <p>{@link #SKIP_PLAN_INVALIDATED}：预案失效条款命中（价格出区间/高影响新闻），
+     * 当日预案作废。必须与"预案没触发"分开——失效当天可能要恢复盯盘接管，
+     * 没触发则预案仍然有效。由结算侧在盘中预案判定处落痕迹。
+     *
+     * <p>{@link #SKIP_PLAN_TRIGGER_NOT_MET}：预案当日生效、收盘时一条都没触发
+     * （15:30 结算聚合行用）。必须与 {@link #SKIP_RULE_NOT_MET} 分开——预案是委员会
+     * **前一日预注册**的判断，"预注册了但市场没走到"是预案质量复盘的核心样本。
+     */
+    public static final String SKIP_PLAN_INVALIDATED = "plan_invalidated";
+    public static final String SKIP_PLAN_TRIGGER_NOT_MET = "plan_trigger_not_met";
 
     // ---------- 归一与版本 ----------
     public static final String UNKNOWN_PREFIX = "unknown_";
@@ -218,6 +231,12 @@ public final class ExecutionContract {
     /** 公司行动（分红除权调整）：不是一次"决策"，但同样改变账户数字，必须留痕。 */
     public static final String TRIGGER_CORPORATE_ACTION = "corporate_action";
     /**
+     * 前日预案触发（T+1 条件化交易预案）：委员会前一交易日 15:30 预注册的条件单
+     * 在盘中被确定性规则引擎判定命中（零 LLM，见 {@code trade_plan.py}）。
+     * 决策时间严格先于成交时间——这是预案制根治"同 bar 决策与成交"偏差的落点。
+     */
+    public static final String TRIGGER_PLAN = "plan";
+    /**
      * 会前注入的召集触发（P3，2026-10-28）：不是结算的触发来源，是**委员会召集门控**
      * 的注入触发（Python 侧 INJECTABLE_TRIGGERS 的 Java 侧镜像值）。
      * auth_review = 盘中授权已过 TTL，开会第一议程是重划边界。
@@ -234,7 +253,7 @@ public final class ExecutionContract {
 
     public static final List<String> TRACE_TRIGGERS =
             List.of(TRIGGER_CRON, TRIGGER_EVENT, TRIGGER_MANUAL, TRIGGER_WATCH,
-                    TRIGGER_CORPORATE_ACTION, TRIGGER_ACCOUNT_GATE);
+                    TRIGGER_CORPORATE_ACTION, TRIGGER_ACCOUNT_GATE, TRIGGER_PLAN);
 
     /** 请求体里声明结算类型的字段名（Python 侧 `app.py` 读同名键）。 */
     public static final String SETTLEMENT_KIND_FIELD = "settlement_kind";
@@ -266,7 +285,8 @@ public final class ExecutionContract {
             SKIP_INTRADAY_WATCH_BUDGET_EXCEEDED, SKIP_PORTFOLIO_HALTED,
             SKIP_VOLUME_CAPPED, SKIP_AUTH_EXPIRED, SKIP_SHADOW_RECORDED,
             SKIP_STALE_DATA, SKIP_DATA_GAP,
-            SKIP_GATE_VETO, SKIP_GATE_HOLD, SKIP_GATE_BUDGET_EXCEEDED);
+            SKIP_GATE_VETO, SKIP_GATE_HOLD, SKIP_GATE_BUDGET_EXCEEDED,
+            SKIP_PLAN_INVALIDATED, SKIP_PLAN_TRIGGER_NOT_MET);
 
     /** 结算类型 → 成交价口径。**唯一的映射处**（Python 侧同名映射）。 */
     public static final Map<String, String> FILL_BASIS_BY_SETTLEMENT = Map.of(

@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from agent import execution_contract as ec
+from agent import trade_plan
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,12 @@ class TradeDecision:
     `authorization` 是**给下一交易日的盘中授权**（authorization 模式）：
     委员会划定的边界，规则引擎（DSL）在边界内自动执行。它与会话级决策独立 ——
     今天 HOLD 不代表明天盘中不许按规则动。None = 模型没给，调用方按"未授权"处理（保守）。
+
+    `plan` 是**给下一交易日的条件化交易预案**（前日预案制）：if-then 触发条件单，
+    T+1 盘中由 trade_plan.evaluate_plan 确定性判定执行（零 LLM）。与 authorization
+    的分工——授权是边界（允许多大仓位），预案是边界内的执行时机（什么条件动手）。
+    **HOLD 的决策也必须带预案**：今天的"不动"要变成明天的"什么情况下动"。
+    None = 模型没写（fail-open，调用方按"无预案"处理，系统沿用现状）。
     """
 
     decision: str                      # buy | sell | skip（封闭集）
@@ -75,6 +82,7 @@ class TradeDecision:
     skip_reason: Optional[str] = None  # 仅 decision=skip 时有值（封闭集）
     raw_text: str = ""                 # 原始输出（调用方通常只存哈希/长度）
     authorization: Optional[dict] = None
+    plan: Optional[dict] = None
 
     def as_dict(self) -> dict:
         return {
@@ -86,12 +94,14 @@ class TradeDecision:
             "warnings": list(self.warnings),
             "skip_reason": self.skip_reason,
             "authorization": self.authorization,
+            "plan": self.plan,
         }
 
 
 def _skip(reason: str, warnings: list[str], *, raw_text: str = "",
           rationale: str = "", signal: Optional[str] = None,
-          authorization: Optional[dict] = None) -> TradeDecision:
+          authorization: Optional[dict] = None,
+          plan: Optional[dict] = None) -> TradeDecision:
     return TradeDecision(
         decision=ec.DECISION_SKIP,
         signal=signal,
@@ -102,6 +112,7 @@ def _skip(reason: str, warnings: list[str], *, raw_text: str = "",
         skip_reason=ec.normalize_skip_reason(reason),
         raw_text=raw_text,
         authorization=authorization,
+        plan=plan,
     )
 
 
@@ -282,8 +293,9 @@ def parse_trade_decision(text: str) -> TradeDecision:
             f"规范行（{canonical.group(1).upper()}）与 JSON 的 signal（{json_signal.upper()}）不一致，"
             "以规范行为准")
     # 盘中授权与会话级决策独立提取：解析不出方向时授权也不该被采纳
-    # （一个连结论都写不清楚的输出，不该拥有写授权的权力）。
+    # （一个连结论都写不清楚的输出，不该拥有写授权的权力）。预案同理。
     authorization = _clean_authorization((payload or {}).get("authorization"), warnings)
+    plan = trade_plan.clean_plan((payload or {}).get("plan"), warnings)
     if signal is None:
         return _skip(ec.SKIP_AGENT_UNPARSABLE,
                      warnings + ["输出里既没有规范行也没有可用的 signal"],
@@ -308,6 +320,7 @@ def parse_trade_decision(text: str) -> TradeDecision:
             skip_reason=ec.SKIP_RULE_NOT_MET,
             raw_text=body,
             authorization=authorization,
+            plan=plan,
         )
 
     if size <= 0.0:
@@ -324,6 +337,7 @@ def parse_trade_decision(text: str) -> TradeDecision:
             skip_reason=ec.SKIP_RULE_NOT_MET,
             raw_text=body,
             authorization=authorization,
+            plan=plan,
         )
 
     return TradeDecision(
@@ -336,6 +350,7 @@ def parse_trade_decision(text: str) -> TradeDecision:
         skip_reason=None,
         raw_text=body,
         authorization=authorization,
+        plan=plan,
     )
 
 
@@ -348,6 +363,11 @@ def decision_prompt_contract() -> str:
     authorization（盘中授权）：委员会的产出不只是"今天动不动"，还有
     "下一次开会之前，规则引擎可以在什么边界内自动执行"。这是 agent 模式
     盘中执行的唯一来源——没有它，盘中就回到"只在日线结算时决策"。
+
+    plan（前日预案）：**每次真实开会都必须写**——今天的结论是给今天的，
+    预案是给**下一交易日**的：什么条件下买/卖。HOLD 也要写预案（"明天什么情况
+    下可以动"），纯观望就写空 entries 并说明理由。这是"预注册纪律"的落点：
+    盘中只照预案执行，不再临场改主意。
     """
     return (
         "输出必须以一行规范结论结束，格式**严格**如下：\n"
@@ -357,7 +377,15 @@ def decision_prompt_contract() -> str:
         '"confidence": 0.0-1.0, "rationale": "一句话理由", "warnings": ["..."],\n'
         '   "authorization": {"intraday_execution": true|false, '
         '"allow_open": true|false, "allow_close": true|false, '
-        '"max_position_pct": 0.0-1.0, "notes": "一句话理由"}}\n'
+        '"max_position_pct": 0.0-1.0, "notes": "一句话理由"},\n'
+        '   "plan": {"valid_days": 1-3, "summary": "≤200字人话", '
+        '"entries": [{"side": "buy", '
+        '"trigger": {"type": "price_above|price_below|ma_cross_above|ma_cross_below", '
+        '"value": 3.97, "window": 60, "require_volume_ratio": 1.5}, '
+        '"size_fraction": 0.0-1.0, "valid_price_range": [3.30, 4.50]}], '
+        '"exits": [{"side": "sell", "trigger": {...}, "size_fraction": 1.0}], '
+        '"invalidation": [{"type": "price_below", "value": 3.30}, '
+        '{"type": "news_high_impact"}]}}\n'
         "约束：HOLD 的 size_fraction 必须为 0；读不懂或不一致时**宁可 HOLD**。\n"
         "校准纪律：confidence 是这次方向判断的**校准概率**，不是气势分——"
         "experience 的 winRatePct 是你的历史基准线：战绩低于 50% 时，同级别证据的"
@@ -367,7 +395,20 @@ def decision_prompt_contract() -> str:
         "authorization 是**下一次开会之前**的盘中授权：规则引擎（策略 DSL）将在边界内"
         "自动执行买卖信号；intraday_execution=false 表示盘中不自动执行（只等日线开会）。"
         "给边界时依据今天的证据：趋势与波动支持规则执行就放行并给出仓位上限，"
-        "证据含糊或风险高就收紧或关闭；allow_close 通常应保持 true（允许退出风控）。"
+        "证据含糊或风险高就收紧或关闭；allow_close 通常应保持 true（允许退出风控）。\n"
+        "plan 是**下一交易日**的条件化预案（预注册纪律：盘中照预案执行，不临场改主意）：\n"
+        "· 触发类型封闭集：price_above/price_below（绝对价触发）、"
+        "ma_cross_above/ma_cross_below（盘中穿越日线均线，**动态**——用 window 指明均线周期，"
+        "不许把当前均线值抄成固定价冒充动态条件）；\n"
+        "· require_volume_ratio 是可选叠加（日线量比：今日累计量/近5日均量）；\n"
+        "· invalidation 任一命中即整个预案作废：price_above/price_below（跳空出区间）或"
+        " news_high_impact（高影响新闻→冻结预案恢复盯盘）；\n"
+        "· 引用均线时 summary 里必须写明当前值并注明随均线每日移动（如"
+        "\"上穿MA60（当前3.97，随均线移动）\"）；\n"
+        "· entries 有可执行条目时，配套 authorization 必须 intraday_execution=true——"
+        "否则预案形同虚设；纯观望预案 entries 留空并写明理由；\n"
+        "· 空仓写 entries（buy），持仓写 exits（sell）；size_fraction 是相对授权"
+        " max_position_pct 的分数。"
     )
 
 

@@ -76,7 +76,10 @@ public class PaperTraceService {
             // 它的"否决/看过不动/预算尽"正是用户要找的答案——必须可见。
             ExecutionContract.SKIP_GATE_VETO,
             ExecutionContract.SKIP_GATE_HOLD,
-            ExecutionContract.SKIP_GATE_BUDGET_EXCEEDED);
+            ExecutionContract.SKIP_GATE_BUDGET_EXCEEDED,
+            // 前日预案失效（前日预案制）：预案被失效条款打死是状态变化——它终结了
+            // 当日的预案执行通道（可能还要恢复盯盘接管），必须可见。
+            ExecutionContract.SKIP_PLAN_INVALIDATED);
 
     private final PaperTradeTraceRepository repository;
     private final AtomicLong writeFailures = new AtomicLong();

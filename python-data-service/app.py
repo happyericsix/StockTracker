@@ -1485,6 +1485,95 @@ async def intraday_decide_endpoint(req: Request):
                 "reason": f"盯盘端点异常：{type(e).__name__}", "watch_tokens": 0}
 
 
+@app.post("/api/v1/agent/plan-check")
+async def plan_check_endpoint(req: Request):
+    """**前日预案判定**（T+1 条件化交易预案）：确定性、零 LLM 的条件单触发检查。
+
+    与盯盘（/agent/intraday-decide）的分工：盯盘是**临场**问模型（事件驱动的
+    一次性判断）；本端点判定的是委员会**前一交易日预注册**的预案——盘中每次
+    价格刷新轮询调用，命中触发条件即在授权边界内执行（结算侧 trigger=plan）。
+    预注册纪律的落点：决策（T 日 15:30）严格先于成交（本端点判定的那一刻）。
+
+    请求体：
+        {"symbol": "002548", "plan": {...},            # 委员会输出的预案（Java 从
+                                                      # paper_trade_plans 取出透传）
+         "position": {"shares", ...},                  # 可空（空仓=评估 entries）
+         "news_high_impact": false,                    # Java 从新闻库判定的高影响标记
+         "date": "2026-11-10"}                         # 判定日（缺省取 Asia/Shanghai 今天）
+
+    响应：{"valid": true, "action": "buy|sell|hold", "matched": {...}|None,
+           "invalidated": str|None, "size_fraction": 0.0-1.0, "price": float,
+           "fill_basis": "realtime_last", "detail": str}
+    失效优先于触发；取不到有效现价 → action=hold（等下一次轮询，绝不瞎判）。
+    """
+    from agent import execution_contract as ec
+    from agent import trade_plan
+    from akshare_client import get_history, get_quote
+    try:
+        data = await req.json()
+        symbol = str(data.get("symbol") or "").strip()
+        if not symbol:
+            return {"valid": False, "error": "symbol 不能为空"}
+        plan = data.get("plan")
+        if not isinstance(plan, dict) or not plan:
+            return {"valid": False, "error": "plan 不能为空"}
+        # AGENT_PLAN=0 的总开关（fail-open：判定不可用 = 不触发，结算侧持仓不动）
+        if os.getenv("AGENT_PLAN", "1").strip().lower() in ("0", "off", "false"):
+            return {"valid": True, "action": "hold", "matched": None, "invalidated": None,
+                    "size_fraction": 0.0, "price": None, "detail": "AGENT_PLAN 关闭",
+                    "fill_basis": ec.FILL_REALTIME_LAST}
+        # 再过一遍归一（Java 透传的 plan 来自落库 JSON，防御性校验：坏预案不执行）
+        warnings: list[str] = []
+        plan = trade_plan.clean_plan(plan, warnings) or plan
+
+        position = data.get("position")
+        if isinstance(position, dict) and "quantity" in position and "shares" not in position:
+            position = dict(position)
+            position["shares"] = position["quantity"]
+        date = str(data.get("date") or "").strip()[:10]
+        if not date:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+
+        # 现价优先取实时快照（realtime_last 口径）；取不到退回今日日线 bar 的运行 close
+        price = None
+        quote = await asyncio.to_thread(get_quote, symbol)
+        if isinstance(quote, dict):
+            try:
+                live = float(quote.get("最新价"))
+                if live and live > 0:
+                    price = live
+            except (TypeError, ValueError):
+                price = None
+        day_records = await asyncio.to_thread(get_history, symbol, "", date, "day") or []
+        if price is None:
+            for record in day_records:
+                if str(record.get("date", ""))[:10] == date:
+                    try:
+                        value = float(record.get("close"))
+                        if value and value > 0:
+                            price = value
+                    except (TypeError, ValueError):
+                        pass
+                    break
+        news_flag = bool(data.get("news_high_impact"))
+        result = trade_plan.evaluate_plan(plan, price=price, day_records=day_records,
+                                          position=position, today=date,
+                                          news_high_impact=news_flag)
+        result["valid"] = True
+        result["fill_basis"] = ec.FILL_REALTIME_LAST
+        if warnings:
+            result["warnings"] = warnings
+        return result
+    except Exception as e:
+        logger.error(f"plan check error: {e}", exc_info=True)
+        # 判定失败按"本次不触发"处理：结算侧下一个轮询再来（45s 级），无需降级路径
+        return {"valid": False, "action": "hold", "matched": None, "invalidated": None,
+                "size_fraction": 0.0, "price": None, "detail": f"预案端点异常：{type(e).__name__}",
+                "fill_basis": ec.FILL_REALTIME_LAST}
+
+
 @app.post("/api/v1/agent/account-gate")
 async def account_gate_endpoint(req: Request):
     """**账户守门员**（ACCOUNT-GATE 阶段1，2026-11-04）：盘中 agent 模式的唯一裁决者。

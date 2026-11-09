@@ -165,6 +165,16 @@ SKIP_GATE_BUDGET_EXCEEDED = "gate_budget_exceeded"
 # 但**不执行、不落授权、不计入"真开会"统计**（agent_llm_calls 记 0，
 # 让 stale 门控不被影子会议喂饱）。由 Java 结算侧判定与落痕迹。
 SKIP_SHADOW_RECORDED = "shadow_recorded"
+# ===== 前日预案制（T+1 条件化交易预案）：预案的"不动"必须有名有姓 =====
+# plan_invalidated：预案失效条款命中（价格出区间/高影响新闻），当日预案作废。
+# 为什么必须独立：它是"预案死了"，不是"预案没触发"（trigger_not_met）也不是
+# "委员会没写预案"——前者当天可能要恢复盯盘接管，后两者预案仍然有效。
+# plan_trigger_not_met：预案当日生效、收盘时一条都没触发（15:30 结算聚合行用）。
+# 为什么必须独立：与 rule_not_met（规则自己的结论）分开——预案是委员会**前一日
+# 预注册**的判断，"预注册了但市场没走到"是预案质量复盘的核心样本，混进
+# rule_not_met 就永远统计不出来。由 Java 结算侧判定与落痕迹。
+SKIP_PLAN_INVALIDATED = "plan_invalidated"
+SKIP_PLAN_TRIGGER_NOT_MET = "plan_trigger_not_met"
 
 SKIP_REASONS = (
     SKIP_MARKET_CLOSED,
@@ -199,6 +209,8 @@ SKIP_REASONS = (
     SKIP_GATE_HOLD,
     SKIP_GATE_BUDGET_EXCEEDED,
     SKIP_SHADOW_RECORDED,
+    SKIP_PLAN_INVALIDATED,
+    SKIP_PLAN_TRIGGER_NOT_MET,
 )
 
 UNKNOWN_PREFIX = "unknown_"

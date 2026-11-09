@@ -699,6 +699,8 @@ const SKIP_REASON_LABELS = {
   state_mismatch: '信号矛盾',
   auth_expired: '授权过期待复核',
   shadow_recorded: '影子会议（只记录）',
+  plan_invalidated: '预案失效',
+  plan_trigger_not_met: '预案未触发',
 }
 
 /** 分布条配色：同族蓝灰渐进，不与红绿涨跌语义打架（分布不是方向） */
@@ -1528,6 +1530,34 @@ onUnmounted(() => {
           </div>
         </template>
         <Empty v-else title="暂无模拟盘账户" />
+      </section>
+
+      <!-- 前日预案（前日预案制）：委员会预注册的条件单——决策在昨天，执行在今天 -->
+      <section
+        v-if="isAgentMode && overviewItem?.planStatus"
+        class="mb-4 rounded-xl border p-5"
+        :class="overviewItem.planStatus.active
+          ? 'border-accent/40 bg-accent/[0.04]'
+          : 'border-border bg-surface'"
+      >
+        <div class="mb-2 flex flex-wrap items-center gap-2">
+          <h3 class="text-[15px] font-semibold text-ink">前日预案</h3>
+          <Badge :tone="overviewItem.planStatus.active ? 'accent' : 'neutral'">
+            {{ overviewItem.planStatus.active ? '生效中' : '待生效/已过期' }}
+          </Badge>
+          <span class="text-[12px] text-ink-3">
+            {{ overviewItem.planStatus.planDate }} ~ {{ overviewItem.planStatus.validUntil }}
+            · 签发 {{ formatTime(overviewItem.planStatus.issuedAt) }}
+          </span>
+        </div>
+        <p class="text-[13px] leading-relaxed text-ink-2">
+          {{ overviewItem.planStatus.summary
+            || `入场条件 ${overviewItem.planStatus.entries} 条，出场条件 ${overviewItem.planStatus.exits} 条` }}
+        </p>
+        <p class="mt-1.5 text-[11.5px] leading-relaxed text-ink-3">
+          预案由委员会前一日 15:30 预注册，盘中由确定性规则判定执行（零 LLM）；
+          失效条款命中（跳空出区间/高影响新闻）当日作废并恢复盯盘接管。引用的均线值随均线每日移动。
+        </p>
       </section>
 
       <!-- 模拟盘交易记录 -->

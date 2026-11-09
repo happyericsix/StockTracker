@@ -322,6 +322,29 @@ public class StrategyClient {
     }
 
     /**
+     * **前日预案判定**（前日预案制）：委员会 T 日 15:30 预注册的条件单，
+     * T+1 盘中每次价格刷新轮询调用——确定性、零 LLM，判定触发/失效/未满足。
+     *
+     * <p>超时 10s：纯规则判定没有模型调用，比盯盘（15s）更紧；超时按"本次不触发"
+     * 处理，结算侧等下一个轮询（45s 级）再来，盘中不因判定慢而瘫痪。
+     *
+     * @param plan            预案 JSON（paper_trade_plans.plan_json 原样透传）
+     * @param position        当前持仓（可空：空仓=评估 entries，持仓=评估 exits）
+     * @param newsHighImpact  Java 从新闻库判定的"该标的高影响新闻"标记
+     * @param date            判定日（yyyy-MM-dd）
+     */
+    public JsonNode planCheck(String symbol, JsonNode plan, JsonNode position,
+                              boolean newsHighImpact, String date) {
+        var body = new HashMap<String, Object>();
+        body.put("symbol", symbol);
+        body.put("plan", plan);
+        if (position != null) body.put("position", position);
+        body.put("news_high_impact", newsHighImpact);
+        body.put("date", date);
+        return post("/api/v1/agent/plan-check", body, Duration.ofSeconds(10));
+    }
+
+    /**
      * **账户守门员**（ACCOUNT-GATE 阶段1，2026-11-04）：账户级裁决（1 次 LLM）。
      *
      * <p>与 {@link #intradayWatch} 的分工：盯盘只看单策略切片；守门员看整个账户

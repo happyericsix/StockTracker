@@ -1,14 +1,17 @@
 package com.happyericsix.stocktracker.service;
 
 import com.happyericsix.stocktracker.entity.PaperAccount;
+import com.happyericsix.stocktracker.entity.PaperTradePlan;
 import com.happyericsix.stocktracker.entity.Strategy;
 import com.happyericsix.stocktracker.entity.StrategyHealthEvent;
 import com.happyericsix.stocktracker.repository.PaperAccountRepository;
+import com.happyericsix.stocktracker.repository.PaperTradePlanRepository;
 import com.happyericsix.stocktracker.repository.StrategyHealthEventRepository;
 import com.happyericsix.stocktracker.repository.StrategyRepository;
 import com.happyericsix.stocktracker.util.CnTime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
@@ -48,15 +51,19 @@ public class PaperReportService {
     private final PaperAccountRepository paperAccountRepository;
     private final StrategyHealthEventRepository healthEventRepository;
     private final PaperReviewReportService reviewReportService;
+    /** 前日预案（前日预案制）：报告里的"明日预案"段读最近一份预案。 */
+    private final PaperTradePlanRepository planRepository;
 
     public PaperReportService(StrategyRepository strategyRepository,
                               PaperAccountRepository paperAccountRepository,
                               StrategyHealthEventRepository healthEventRepository,
-                              PaperReviewReportService reviewReportService) {
+                              PaperReviewReportService reviewReportService,
+                              PaperTradePlanRepository planRepository) {
         this.strategyRepository = strategyRepository;
         this.paperAccountRepository = paperAccountRepository;
         this.healthEventRepository = healthEventRepository;
         this.reviewReportService = reviewReportService;
+        this.planRepository = planRepository;
     }
 
     /** 某用户所有模拟盘策略的页面报告（顺序：策略更新时间倒序，与页面卡片一致）。 */
@@ -117,7 +124,48 @@ public class PaperReportService {
         result.put("reportKind", reportKind);       // daily / briefing / null（还没结算过）
         result.put("report", report);               // 有事才说的日报（成交/阻塞跳过）
         result.put("briefing", briefing);           // 安静日子的"为什么没动"
+        result.put("plan", planRowQuietly(strategy));   // 前日预案（最近一份 + 生效状态）
         result.put("sentinels", sentinels);
         return result;
+    }
+
+    /** "明日预案"行（前日预案制）：委员会预注册的条件单摘要。没签过预案 = null。 */
+    private Map<String, Object> planRowQuietly(Strategy strategy) {
+        if (planRepository == null) {
+            return null;
+        }
+        try {
+            PaperTradePlan plan = planRepository
+                    .findFirstByStrategyIdOrderByIdDesc(strategy.getId()).orElse(null);
+            if (plan == null) {
+                return null;
+            }
+            LocalDate today = CnTime.today();
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("planDate", plan.getPlanDate().toString());
+            row.put("validUntil", plan.getValidUntilDate().toString());
+            row.put("active", !plan.getPlanDate().isAfter(today)
+                    && !today.isAfter(plan.getValidUntilDate()));
+            row.put("issuedAt", plan.getIssuedAt() == null ? null : plan.getIssuedAt().toString());
+            row.put("summary", planSummary(plan));
+            return row;
+        } catch (Exception e) {
+            log.warn("预案段组装失败 strategyId={}: {}", strategy.getId(), e.getMessage());
+            return null;
+        }
+    }
+
+    private String planSummary(PaperTradePlan plan) {
+        try {
+            var node = new tools.jackson.databind.ObjectMapper()
+                    .readTree(plan.getPlanJson());
+            String summary = node.path("summary").asText("");
+            return summary.isBlank()
+                    ? String.format("入场条件 %d 条 / 出场条件 %d 条",
+                            node.path("entries").size(), node.path("exits").size())
+                    : summary;
+        } catch (Exception e) {
+            return "";
+        }
     }
 }
