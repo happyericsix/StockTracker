@@ -273,6 +273,9 @@ class PaperTradingServiceWatchTest {
         Strategy strategy = agentStrategy();
         PaperAccount account = flatAccount(strategy);
         stubCommon(strategy, account);
+        // 降级告警走 ownerOf（按 id 重载属主，防懒代理）：桩上重载结果
+        when(userRepository.findById(strategy.getUser().getId()))
+                .thenReturn(Optional.of(strategy.getUser()));
         when(strategyClient.evaluateBarRealtime(eq(CONFIG), eq("601988"), isNull()))
                 .thenReturn(ruleResultWithBuyEvent("2026-10-09 10:03:00"));
         when(strategyClient.intradayWatch(eq(CONFIG), eq("601988"), any(), isNull(), any(), isNull(), isNull(), any(), any()))

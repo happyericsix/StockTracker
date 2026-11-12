@@ -798,6 +798,8 @@ class PaperTradingServiceTest {
         when(strategyRepository.findByPaperEnabledTrue()).thenReturn(List.of(strategy));
         when(strategyRepository.findById(10L)).thenReturn(Optional.of(strategy));
         when(paperAccountRepository.findByStrategyId(10L)).thenReturn(Optional.of(holdingAccount(strategy)));
+        // 结算告警走 ownerOf（按 id 重载属主，防懒代理）：桩上重载结果
+        when(userRepository.findById(user.getId())).thenReturn(Optional.of(user));
         // 当天日线痕迹停在 no_bar（中间态）
         when(paperTraceService.listForDay(eq(10L), any(LocalDate.class))).thenReturn(List.of(
                 PaperTradeTrace.builder()

@@ -494,7 +494,8 @@ public class PaperTradingService {
         }
         for (Strategy strategy : strategies) {
             try {
-                if (strategy.getUser() == null) {
+                User owner = ownerOf(strategy);
+                if (owner == null) {
                     continue;
                 }
                 int attempts = paperTraceService.listForDay(strategy.getId(), today).stream()
@@ -509,7 +510,7 @@ public class PaperTradingService {
                                 + "下一交易日 15:30 会自动重试；这通常是数据源当晚发布延迟或限时服务，"
                                 + "持续多天出现才需要排查。",
                         strategy.getName(), strategy.getSymbol(), today, attempts);
-                messageService.saveReport(strategy.getUser(), StrategyHealthWatchService.TYPE_STRATEGY_SENTINEL,
+                messageService.saveReport(owner, StrategyHealthWatchService.TYPE_STRATEGY_SENTINEL,
                         "paper_settle_failed:" + strategy.getId() + ":" + today,
                         strategy.getSymbol(), content);
             } catch (Exception e) {
@@ -1366,7 +1367,7 @@ public class PaperTradingService {
             if (patternBrief != null && strategyRevisionService != null
                     && strategy.getUser() != null) {
                 try {
-                    strategyRevisionService.generate(strategy.getUser().getUsername(),
+                    strategyRevisionService.generate(ownerOf(strategy).getUsername(),
                             strategy.getId());
                     log.info("pattern_escalation → revision proposal generated for strategy {}",
                             strategy.getId());
@@ -2180,7 +2181,8 @@ public class PaperTradingService {
      * 幂等键 = 策略×日期：结算重跑/手动触发不重发（saveReport 按 dedupeKey 去重）。
      */
     private void settleDigestQuietly(Strategy strategy, JsonNode result, LocalDate today) {
-        if (messageService == null || strategy.getUser() == null || result == null) {
+        User owner = ownerOf(strategy);
+        if (messageService == null || owner == null || result == null) {
             return;
         }
         try {
@@ -2218,7 +2220,7 @@ public class PaperTradingService {
                             latest.getPlanDate(), latest.getValidUntilDate()));
                 }
             }
-            messageService.saveReport(strategy.getUser(), MessageService.TYPE_PAPER_SETTLE,
+            messageService.saveReport(owner, MessageService.TYPE_PAPER_SETTLE,
                     "paper-settle:" + strategy.getId() + ":" + today,
                     strategy.getSymbol(), clipText(content.toString(), 2000));
         } catch (Exception e) {
@@ -2230,7 +2232,8 @@ public class PaperTradingService {
     /** 预案发布通知（幂等键 = 策略×生效日）：用户最早抱怨"开会结果没人通知"的落点。 */
     private void planIssuedMessageQuietly(Strategy strategy,
                                           PaperTradePlan plan) {
-        if (messageService == null || strategy.getUser() == null) {
+        User owner = ownerOf(strategy);
+        if (messageService == null || owner == null) {
             return;
         }
         try {
@@ -2256,7 +2259,7 @@ public class PaperTradingService {
                 content.append("⚠️ 预案有入场条目，但盘中执行授权未开（intraday_execution=false），"
                         + "触发条件满足也不会自动成交——需要委员会下次开会放行。");
             }
-            messageService.saveReport(strategy.getUser(),
+            messageService.saveReport(owner,
                     StrategyHealthWatchService.TYPE_STRATEGY_SENTINEL,
                     "plan-issued:" + strategy.getId() + ":" + plan.getPlanDate(),
                     strategy.getSymbol(), clipText(content.toString(), 2000));
@@ -2269,7 +2272,8 @@ public class PaperTradingService {
     private void planInvalidatedMessageQuietly(Strategy strategy,
                                                PaperTradePlan plan,
                                                String reason) {
-        if (messageService == null || strategy.getUser() == null) {
+        User owner = ownerOf(strategy);
+        if (messageService == null || owner == null) {
             return;
         }
         try {
@@ -2277,7 +2281,7 @@ public class PaperTradingService {
                     "【预案失效】%s · %s · %s\n%s\n当日盘中恢复临场判断（守门员/盯盘）接管，"
                             + "下一交易日 15:30 委员会重签预案。",
                     strategy.getName(), strategy.getSymbol(), CnTime.today(), reason);
-            messageService.saveReport(strategy.getUser(),
+            messageService.saveReport(owner,
                     StrategyHealthWatchService.TYPE_STRATEGY_SENTINEL,
                     "plan-invalidated:" + strategy.getId() + ":" + CnTime.today(),
                     strategy.getSymbol(), clipText(content, 2000));
@@ -2290,7 +2294,8 @@ public class PaperTradingService {
     private void planExecutedMessageQuietly(Strategy strategy,
                                             PaperTradePlan plan,
                                             String action, JsonNode verdict, LocalDate today) {
-        if (messageService == null || strategy.getUser() == null) {
+        User owner = ownerOf(strategy);
+        if (messageService == null || owner == null) {
             return;
         }
         try {
@@ -2304,7 +2309,7 @@ public class PaperTradingService {
                     "【预案触发】%s · %s · %s\n预注册条件命中，按预案执行%s\n判定：%s",
                     strategy.getName(), strategy.getSymbol(), today, fill,
                     textOr(verdict.get("detail"), ""));
-            messageService.saveReport(strategy.getUser(),
+            messageService.saveReport(owner,
                     StrategyHealthWatchService.TYPE_STRATEGY_SENTINEL,
                     "plan-executed:" + strategy.getId() + ":" + today + ":" + action,
                     strategy.getSymbol(), clipText(content, 2000));
@@ -3424,12 +3429,13 @@ public class PaperTradingService {
     /** flag（盯盘标记给 15:30 委员会）与越界建议的推送旁路：失败只记日志。 */
     private void notifyWatchFlag(Strategy strategy, JsonNode result, List<String> eventTypes,
                                  JsonNode watch) {
-        if (pushService == null || strategy.getUser() == null) {
+        User owner = ownerOf(strategy);
+        if (pushService == null || owner == null) {
             return;
         }
         try {
             String reason = watch == null ? "" : watch.path("reason").asText("");
-            pushService.push(strategy.getUser().getUsername(),
+            pushService.push(owner.getUsername(),
                     "盯盘标记：" + strategy.getName() + " " + strategy.getSymbol(),
                     String.format("事件 %s；盯盘判断：%s（不下单，已标记给 15:30 委员会）",
                             String.join("/", eventTypes), reason));
@@ -3598,6 +3604,25 @@ public class PaperTradingService {
             return null;
         }
         return text.length() <= limit ? text : text.substring(0, limit);
+    }
+
+    /**
+     * 结算/旁路路径里拿策略属主的可靠方式。{@code strategy.getUser()} 是懒代理：
+     * 结算刻意不在长会话里跑（见 evaluateStrategy 的注释），脱离会话把它传给会触碰
+     * 非 id 字段的方法（saveReport / 用户名解析）就是 LazyInitializationException——
+     * 2026-11-12 的实发事故：首份预案发布通知与两条结算摘要全部静默死在这里。
+     * 代理的 {@code getId()} 不触发初始化，按 id 重新加载一个初始化完成的实体最稳。
+     */
+    private User ownerOf(Strategy strategy) {
+        if (strategy == null || strategy.getUser() == null) {
+            return null;
+        }
+        try {
+            return userRepository.findById(strategy.getUser().getId()).orElse(null);
+        } catch (Exception e) {
+            log.debug("ownerOf 加载失败 strategy id={}：{}", strategy.getId(), e.toString());
+            return null;
+        }
     }
 
     /**
@@ -3979,7 +4004,8 @@ public class PaperTradingService {
      * （幂等键带小时桶，saveReport 去重即节流），恢复后下一条自然不再发。
      */
     private void alertLlmDegradedQuietly(Strategy strategy, String detail) {
-        if (messageService == null || strategy.getUser() == null) {
+        User owner = ownerOf(strategy);
+        if (messageService == null || owner == null) {
             return;
         }
         try {
@@ -3995,7 +4021,7 @@ public class PaperTradingService {
                             + "此告警每小时最多一条，恢复后不再发。",
                     strategy.getName(), strategy.getSymbol(),
                     detail == null ? "调用超时或服务过载" : detail);
-            messageService.saveReport(strategy.getUser(),
+            messageService.saveReport(owner,
                     StrategyHealthWatchService.TYPE_STRATEGY_SENTINEL,
                     "llm_degraded:" + strategy.getId() + ":" + hourBucket,
                     strategy.getSymbol(), content);
@@ -4014,7 +4040,8 @@ public class PaperTradingService {
      * （/paper/trades）与痕迹页承担。
      */
     private void notifyFill(Strategy strategy, PaperTrade trade) {
-        if (strategy.getUser() == null) {
+        User owner = ownerOf(strategy);
+        if (owner == null) {
             return;
         }
         try {
@@ -4026,7 +4053,7 @@ public class PaperTradingService {
                     trade.getPrice() == null ? "-" : trade.getPrice().toPlainString(),
                     ExecutionContract.normalizeDecisionMode(strategy.getDecisionMode()));
             if (pushService != null) {
-                pushService.push(strategy.getUser().getUsername(), title, body);
+                pushService.push(owner.getUsername(), title, body);
             }
         } catch (Exception e) {
             log.debug("fill push failed for strategy {}: {}", strategy.getId(), e.getMessage());
