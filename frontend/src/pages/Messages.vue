@@ -1,6 +1,7 @@
 <script setup>
 /**
- * 消息中心（口径：CENTER_TYPES = 预警 + 策略哨兵/策略信 + 新闻预警，见 messageBus）。
+ * 消息中心（口径：CENTER_TYPES = 预警 + 模拟盘结算/哨兵/策略信 + 新闻预警，见 messageBus）。
+ * 三个视图：全部（除预警——高频预警不再淹没模拟盘消息）/ 模拟盘 / 预警。
  * 逻辑自旧版原样移植：tab 竞态防护（loadSeq）、本地时间窗口、整卡已读按钮层、
  * SSE 增量 + 断线重连补拉首页、滚动到底自动加载。
  */
@@ -37,8 +38,12 @@ const timeRange = ref('all')
 
 const tabs = [
   { key: 'all', label: '全部' },
+  { key: 'paper', label: '模拟盘' },
   { key: 'alert', label: '预警' },
 ]
+
+/** 各 tab 的类型口径（与服务端过滤同源；"全部"=除预警外的消息中心口径） */
+const PAPER_TAB_TYPES = ['PAPER_SETTLE', 'STRATEGY_SENTINEL', 'STRATEGY_REVIEW']
 
 const timeRanges = [
   { key: '7d', label: '最近 7 天', days: 7 },
@@ -55,6 +60,7 @@ const typeMeta = (type) => {
     case 'CHAT_BOT': return { icon: Bot, label: '智能助手' }
     case 'CHAT_USER': return { icon: MessageSquare, label: '我' }
     case 'PAPER_REPORT': return { icon: CandlestickChart, label: '模拟盘复盘' }
+    case 'PAPER_SETTLE': return { icon: CandlestickChart, label: '模拟盘结算' }
     case 'STRATEGY_SENTINEL': return { icon: Megaphone, label: '策略哨兵' }
     default: return { icon: Info, label: '系统通知' }
   }
@@ -105,12 +111,17 @@ const formatTime = (iso) => {
   return sameDay ? hm : `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`
 }
 
-// 客户端 tab 过滤（type）
+// 客户端 tab 过滤（type）：SSE 增量插进来的消息也要按当前 tab 过滤，
+// 否则预警会在"全部"tab 里凭空弹出（服务端分页已按 tab 过滤，这里兜 SSE 的漏）
 const filtered = computed(() => {
   if (activeTab.value === 'alert') {
     return messages.value.filter((m) => m.type === 'ALERT')
   }
-  return messages.value
+  if (activeTab.value === 'paper') {
+    return messages.value.filter((m) => PAPER_TAB_TYPES.includes(m.type))
+  }
+  // "全部"= 除预警外的消息中心口径：高频预警不再淹没模拟盘/哨兵消息
+  return messages.value.filter((m) => m.type !== 'ALERT')
 })
 
 const symbolFiltered = computed(() => {
@@ -147,7 +158,14 @@ const loadPage = async (seq = loadSeq) => {
   loadingMore.value = true
   try {
     const params = { page: page.value, size }
-    if (activeTab.value === 'alert') params.type = 'ALERT'
+    if (activeTab.value === 'alert') {
+      params.type = 'ALERT'
+    } else if (activeTab.value === 'paper') {
+      params.type = PAPER_TAB_TYPES.join(',')
+    } else {
+      // "全部"tab 排除预警（预警有自己的 tab）：高频预警不再淹没低频的模拟盘消息
+      params.excludeType = 'ALERT'
+    }
 
     const range = timeRanges.find((r) => r.key === timeRange.value)
     if (range && range.days) {

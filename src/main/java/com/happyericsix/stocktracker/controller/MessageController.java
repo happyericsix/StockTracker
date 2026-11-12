@@ -29,6 +29,7 @@ public class MessageController {
     @GetMapping
     public PagedResponse<MessageResponse> getMessages(
             @RequestParam(required = false) String type,
+            @RequestParam(required = false) String excludeType,  // type 缺省时排除的类型（"全部"tab 排除 ALERT）
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size,
             @RequestParam(required = false) String since,  // ISO 格式：2025-08-01T00:00:00
@@ -41,7 +42,7 @@ public class MessageController {
                 // 解析失败忽略，按"不限时间"处理
             }
         }
-        return messageService.getMessagesPaged(authentication.getName(), page, size, type, sinceTime);
+        return messageService.getMessagesPaged(authentication.getName(), page, size, type, excludeType, sinceTime);
     }
 
     @GetMapping("/unread-count")

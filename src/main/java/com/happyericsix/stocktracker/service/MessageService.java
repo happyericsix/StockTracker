@@ -58,30 +58,43 @@ public class MessageService {
     }
 
     /**
-     * 消息中心的类型口径（2026-10-10 收窄）：**只收预警与系统级告警**。
+     * 消息中心的类型口径（2026-10-10 收窄；2026-11-12 二轮修订）。
      *
-     * <p>为什么收窄：聊天回复用户在聊天界面当场看过了、模拟盘日报/哨兵观察
-     * 活在模拟盘页面（配合策略调整）—— 它们再进消息中心就是同一件事说第二遍，
-     * 而重复通知是用户关掉通知的第一原因。聊天/日报数据本身仍照常落库
-     * （聊天历史、审计与回放都靠它），只是不再出现在消息中心与未读角标里。
+     * <p>为什么收窄：聊天回复用户在聊天界面当场看过了——再进消息中心就是同一件事
+     * 说第二遍，而重复通知是用户关掉通知的第一原因。聊天数据本身仍照常落库。
+     *
+     * <p>二轮修订（用户实跑反馈"全部消息被预警淹没、模拟盘一点声音都没有"）：
+     * <ul>
+     *   <li>PAPER_SETTLE（模拟盘结算摘要）：**每个结算日每策略一条**——成交说成交，
+     *       不动就用人话写明原因。当初收窄砍掉的"日报"以"结算结果"的形态回来了：
+     *       它不是页面上能看的东西再说一遍，而是"今天结果是什么"的主动告知，
+     *       用户点名要的（"就算不交易也要告诉我以及原因"）；</li>
+     *   <li>前端"全部"tab 排除 ALERT（预警有自己的 tab）——高频预警不再淹没
+     *       低频但重要的模拟盘/哨兵消息。</li>
+     * </ul>
      *
      * <p>STRATEGY_REVIEW（2026-10-15）是收窄原则下的**刻意的例外**：月度小结/季度
-     * 策略信是用户点名要的"提醒"——频率是每策略每月最多一条，不属于日报级噪声；
-     * 而且它不是"页面上能看的东西再说一遍"，复盘页面并不展示它。
+     * 策略信是用户点名要的"提醒"——频率是每策略每月最多一条，不属于日报级噪声。
      */
-    private static final List<String> CENTER_TYPES = List.of("ALERT", "STRATEGY_SENTINEL", "STRATEGY_REVIEW", "NEWS_ALERT");
+    static final String TYPE_PAPER_SETTLE = "PAPER_SETTLE";
+    private static final List<String> CENTER_TYPES =
+            List.of("ALERT", TYPE_PAPER_SETTLE, "STRATEGY_SENTINEL", "STRATEGY_REVIEW", "NEWS_ALERT");
 
     /**
      * 分页查询（消息中心主用）
-     * @param page   页码（0-based）
-     * @param size   每页条数
-     * @param type   可选过滤，必须落在消息中心口径内（通常就是 ALERT）
-     * @param since  可选时间范围：只返回 createdAt >= since 的消息；null=不限
+     * @param page        页码（0-based）
+     * @param size        每页条数
+     * @param type        可选过滤：单类型或逗号分隔多类型（如"模拟盘"tab），
+     *                    必须落在消息中心口径内
+     * @param excludeType 可选排除：type 缺省时从口径里剔除的类型（"全部"tab 排除 ALERT）
+     * @param since       可选时间范围：只返回 createdAt >= since 的消息；null=不限
      */
-    public PagedResponse<MessageResponse> getMessagesPaged(String username, int page, int size, String type, java.time.LocalDateTime since) {
+    public PagedResponse<MessageResponse> getMessagesPaged(String username, int page, int size,
+                                                           String type, String excludeType,
+                                                           java.time.LocalDateTime since) {
         User user = getUser(username);
         Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
-        List<String> types = centerTypes(type);
+        List<String> types = centerTypes(type, excludeType);
         boolean hasSince = since != null;
 
         Page<Message> result;
@@ -106,12 +119,26 @@ public class MessageService {
         );
     }
 
-    /** 口径与请求 type 的交集：type 不在口径内 → 空列表（返回空页而不是破例放行）。 */
-    private static List<String> centerTypes(String type) {
+    /**
+     * 口径与请求 type 的交集：type 不在口径内 → 空列表（返回空页而不是破例放行）。
+     * type 支持逗号分隔多类型；excludeType 只在 type 缺省时生效（同支持逗号分隔）。
+     * 包级可见给测试（MessageCenterTypesTest 盯着语义）。
+     */
+    static List<String> centerTypes(String type, String excludeType) {
+        List<String> requested;
         if (type == null || type.isBlank()) {
-            return CENTER_TYPES;
+            requested = CENTER_TYPES;
+            if (excludeType != null && !excludeType.isBlank()) {
+                var excluded = java.util.Arrays.stream(excludeType.split(","))
+                        .map(String::trim).filter(s -> !s.isEmpty()).toList();
+                requested = requested.stream().filter(t -> !excluded.contains(t)).toList();
+            }
+            return requested;
         }
-        return CENTER_TYPES.contains(type) ? List.of(type) : List.of();
+        requested = java.util.Arrays.stream(type.split(","))
+                .map(String::trim).filter(s -> !s.isEmpty())
+                .filter(CENTER_TYPES::contains).distinct().toList();
+        return requested;
     }
 
     /** 未读角标同样只算口径内的：聊天与日报不再制造红点。 */

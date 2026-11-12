@@ -7,7 +7,10 @@ import { getUnreadCount } from '../api/messages.js'
  * 这条 SSE 流上还有 CHAT_BOT/CHAT_USER 聊天消息（read=false 也照推，
  * 聊天页实时回复靠它），无差别累加会造出"消息中心里看不见、也点不掉"的幽灵红点。
  */
-export const CENTER_TYPES = ['ALERT', 'STRATEGY_SENTINEL', 'STRATEGY_REVIEW', 'NEWS_ALERT']
+export const CENTER_TYPES = ['ALERT', 'PAPER_SETTLE', 'STRATEGY_SENTINEL', 'STRATEGY_REVIEW', 'NEWS_ALERT']
+
+/** 模拟盘 tab 的类型集（与"模拟盘"tab 的服务端过滤同一口径） */
+export const PAPER_TYPES = ['PAPER_SETTLE', 'STRATEGY_SENTINEL', 'STRATEGY_REVIEW']
 
 /**
  * 站内消息总线（全局单例）

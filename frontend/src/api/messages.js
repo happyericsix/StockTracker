@@ -3,14 +3,16 @@ import request from './request.js'
 /**
  * 分页获取消息
  * @param {object} options
- * @param {number} options.page   页码（0-based）
- * @param {number} options.size   每页条数
- * @param {string} options.type   可选：ALERT / CHAT_USER / CHAT_BOT / SYSTEM
- * @param {string} options.since  可选：ISO 时间字符串，2025-08-01T00:00:00
+ * @param {number} options.page        页码（0-based）
+ * @param {number} options.size        每页条数
+ * @param {string} options.type        可选：单类型或逗号分隔多类型（PAPER_SETTLE,STRATEGY_SENTINEL）
+ * @param {string} options.excludeType 可选：type 缺省时排除的类型（"全部"tab 传 ALERT）
+ * @param {string} options.since       可选：ISO 时间字符串，2025-08-01T00:00:00
  */
-export const getMessages = ({ page = 0, size = 20, type, since } = {}) => {
+export const getMessages = ({ page = 0, size = 20, type, excludeType, since } = {}) => {
   const params = { page, size }
   if (type) params.type = type
+  if (excludeType) params.excludeType = excludeType
   if (since) params.since = since
   return request.get('/messages', { params })
 }

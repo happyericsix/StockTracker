@@ -1448,6 +1448,9 @@ public class PaperTradingService {
         // 今日预案对账：生效中且整天没触发的预案，15:30 落一行 plan_trigger_not_met
         // ——"预注册了但市场没走到"是预案质量复盘的核心样本，不能静默消失。
         planOutcomeQuietly(strategy, today);
+        // 结算摘要（2026-11-12 二轮）：每个结算日每策略一条人话消息——
+        // 成交说成交，不动就写明原因。用户点名要的："就算不交易也要告诉我"。
+        settleDigestQuietly(strategy, result, today);
         recordPaperFacts(strategy, account, today);
         // 到期就回填预期（复用同一批净值快照，不额外查库）。
         // 旁路：写不进去只是少一次回填，绝不影响结算（与 recordPaperFacts 同一条纪律）。
@@ -2164,6 +2167,63 @@ public class PaperTradingService {
             return newsBriefingService.latestShock(strategy.getSymbol(), 24) != null;
         } catch (Exception e) {
             return false;
+        }
+    }
+
+    /**
+     * 结算摘要消息（2026-11-12 二轮，PAPER_SETTLE）：每个结算日每策略一条——
+     * 成交说成交（方向/股数/价格），不动就用痕迹的人话句子写明原因
+     * （sentenceFor 对每个封闭 skip 原因都有翻译，且有测试盯着不缺页）。
+     *
+     * <p>刻意不写的两种日子：bar_date_missing（没结算，别把"没数据"说成"没动作"）
+     * 与 data_unavailable（结算未完成，补跑轮次可能翻盘——终轮失败另有系统告警）。
+     * 幂等键 = 策略×日期：结算重跑/手动触发不重发（saveReport 按 dedupeKey 去重）。
+     */
+    private void settleDigestQuietly(Strategy strategy, JsonNode result, LocalDate today) {
+        if (messageService == null || strategy.getUser() == null || result == null) {
+            return;
+        }
+        try {
+            if (result.has("bar_date_missing") && result.get("bar_date_missing").asBoolean(false)) {
+                return;
+            }
+            String skipReason = textOr(result.get("skip_reason"), null);
+            if (ExecutionContract.SKIP_DATA_UNAVAILABLE.equals(skipReason)) {
+                return;
+            }
+            PaperTradeTrace daily = paperTraceService.listForDay(strategy.getId(), today).stream()
+                    .filter(t -> ExecutionContract.SETTLEMENT_DAILY.equals(t.getSettlementKind()))
+                    .reduce((a, b) -> b)   // 当日最新一条日线痕迹
+                    .orElse(null);
+            if (daily == null) {
+                return;
+            }
+            String sentence = PaperTradeTraceResponse.from(daily).getSummary();
+            StringBuilder content = new StringBuilder(String.format(
+                    "【模拟盘结算】%s · %s · %s%n", strategy.getName(), strategy.getSymbol(), today));
+            if (sentence != null && !sentence.isBlank()) {
+                content.append(sentence.strip()).append('\n');
+            }
+            if (daily.getAgentLlmCalls() != null && daily.getAgentLlmCalls() > 0) {
+                content.append(String.format("委员会今日开会：%d 次调用 / %s tokens。%n",
+                        daily.getAgentLlmCalls(),
+                        daily.getAgentTokens() == null ? "-" : daily.getAgentTokens()));
+            }
+            if (paperTradePlanRepository != null) {
+                var latest = paperTradePlanRepository
+                        .findFirstByStrategyIdOrderByIdDesc(strategy.getId()).orElse(null);
+                if (latest != null && latest.getIssuedAt() != null
+                        && latest.getIssuedAt().toLocalDate().equals(today)) {
+                    content.append(String.format("已签发 %s ~ %s 生效的预案（见【明日预案】消息）。",
+                            latest.getPlanDate(), latest.getValidUntilDate()));
+                }
+            }
+            messageService.saveReport(strategy.getUser(), MessageService.TYPE_PAPER_SETTLE,
+                    "paper-settle:" + strategy.getId() + ":" + today,
+                    strategy.getSymbol(), clipText(content.toString(), 2000));
+        } catch (Exception e) {
+            log.info("结算摘要消息失败 strategy id={}（旁路，不影响结算）：{}",
+                    strategy.getId(), e.toString());
         }
     }
 
