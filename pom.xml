@@ -100,6 +100,17 @@
                         </exclude>
                     </excludes>
                 </configuration>
+                <executions>
+                    <!-- build-info（2026-11-12）：版本与构建时间进 jar 的
+                         META-INF/build-info.properties → BuildProperties Bean。
+                         VersionAnnounceRunner 用它做"服务器更新了"的广播指纹：
+                         构建时间每次打包必变，同一构建重启不重发（幂等键带时间戳）。 -->
+                    <execution>
+                        <goals>
+                            <goal>build-info</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

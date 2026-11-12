@@ -76,9 +76,12 @@ public class MessageService {
      * <p>STRATEGY_REVIEW（2026-10-15）是收窄原则下的**刻意的例外**：月度小结/季度
      * 策略信是用户点名要的"提醒"——频率是每策略每月最多一条，不属于日报级噪声。
      */
-    static final String TYPE_PAPER_SETTLE = "PAPER_SETTLE";
+    public static final String TYPE_PAPER_SETTLE = "PAPER_SETTLE";
+    /** 系统更新广播（2026-11-12）：新构建启动时向全部用户发一条——部署不再是无感知事件。 */
+    public static final String TYPE_SYSTEM = "SYSTEM";
     private static final List<String> CENTER_TYPES =
-            List.of("ALERT", TYPE_PAPER_SETTLE, "STRATEGY_SENTINEL", "STRATEGY_REVIEW", "NEWS_ALERT");
+            List.of("ALERT", TYPE_PAPER_SETTLE, "STRATEGY_SENTINEL", "STRATEGY_REVIEW", "NEWS_ALERT",
+                    TYPE_SYSTEM);
 
     /**
      * 分页查询（消息中心主用）

@@ -8,7 +8,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  Bell, Bot, MessageSquare, CandlestickChart, Megaphone, Info, Newspaper,
+  Bell, Bot, MessageSquare, CandlestickChart, Megaphone, Info, Newspaper, RefreshCw,
   TrendingUp, TrendingDown, Percent, Sun, Snowflake, Sparkles, ArrowDownRight, ChevronRight,
 } from 'lucide-vue-next'
 import { getMessages, markRead, markAllRead } from '../api/messages.js'
@@ -62,6 +62,7 @@ const typeMeta = (type) => {
     case 'PAPER_REPORT': return { icon: CandlestickChart, label: '模拟盘复盘' }
     case 'PAPER_SETTLE': return { icon: CandlestickChart, label: '模拟盘结算' }
     case 'STRATEGY_SENTINEL': return { icon: Megaphone, label: '策略哨兵' }
+    case 'SYSTEM': return { icon: RefreshCw, label: '系统更新' }
     default: return { icon: Info, label: '系统通知' }
   }
 }

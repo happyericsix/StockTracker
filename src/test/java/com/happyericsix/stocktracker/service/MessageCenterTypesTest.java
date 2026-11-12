@@ -30,7 +30,14 @@ class MessageCenterTypesTest {
     void allTabExcludesAlertOnly() {
         List<String> types = MessageService.centerTypes(null, "ALERT");
         assertThat(types).doesNotContain("ALERT");
-        assertThat(types).contains("PAPER_SETTLE", "STRATEGY_SENTINEL", "STRATEGY_REVIEW", "NEWS_ALERT");
+        assertThat(types).contains("PAPER_SETTLE", "STRATEGY_SENTINEL", "STRATEGY_REVIEW",
+                "NEWS_ALERT", "SYSTEM");
+    }
+
+    @Test
+    void systemVersionBroadcastIsInCenterTypes() {
+        // "服务器更新了"必须进消息中心与未读角标——部署不再是无感知事件
+        assertThat(MessageService.centerTypes("SYSTEM", null)).containsExactly("SYSTEM");
     }
 
     @Test

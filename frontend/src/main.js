@@ -106,9 +106,11 @@ const checkVersion = async () => {
   activateWaitingWorker()   // 上一会话可能已留下装好的 waiting worker，直接喊它上岗
 }
 
-// 12 小时至多拉一次 version.json（2026-10-26）：localStorage 记上次检查时间。
-// 存不了（隐私模式等）就退化为「定时器到期即查」——interval 本身已是半小时级。
-const VERSION_CHECK_MIN_GAP = 12 * 60 * 60 * 1000
+// 30 分钟至多拉一次 version.json（2026-11-12 从 12h 收紧）：一次几十字节的
+// no-store GET 代价可忽略；而 12h 的旧间隔让部署后最长半天看不到更新提示——
+// 用户实跑反馈"服务器更新没有任何通知"的根因就在这。localStorage 记上次检查
+// 时间，存不了（隐私模式等）就退化为「定时器到期即查」。
+const VERSION_CHECK_MIN_GAP = 30 * 60 * 1000
 const VERSION_CHECK_TS_KEY = 'pwa-last-version-check'
 const maybeCheckVersion = () => {
   try {
