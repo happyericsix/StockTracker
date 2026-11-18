@@ -11,7 +11,7 @@
 
 - 上游：https://github.com/djj45/thspypc
 - 来源：`main` 分支的 tar.gz
-- 拉取脚本：`python-data-service/_fetch_ths.py`（可重复运行，会覆盖本目录）
+- 拉取脚本：`python-data-service/scripts/_fetch_ths.py`（可重复运行，会覆盖本目录）
 - 本项目只用到它的 4 个能力：
 
   | 能力 | 位置 |
