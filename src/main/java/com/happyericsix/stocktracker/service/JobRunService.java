@@ -51,6 +51,8 @@ public class JobRunService {
     public static final String JOB_PAPER_DAILY = "paper-daily";
     /** 结算重试（16:10 / 17:10）：17:10 那轮是当天最后一次机会。 */
     public static final String JOB_PAPER_RETRY = "paper-retry";
+    /** 净值补账（20:30 + 启动时）：后端 15:30 没活着的日子，用痕迹回填/历史收盘价补曲线（不补交易）。 */
+    public static final String JOB_PAPER_EQUITY_BACKFILL = "paper-equity-backfill";
     /** 周复盘（周五 16:30）：样本外验证 + 空转摘要。 */
     public static final String JOB_PAPER_WEEKLY = "paper-weekly";
     /** 月度/季度复盘（周五 16:40，按月幂等）：月度小结 + 季度策略信。 */

@@ -2,6 +2,7 @@ package com.happyericsix.stocktracker.job;
 
 import com.happyericsix.stocktracker.service.JobRunService;
 import com.happyericsix.stocktracker.service.MarketStatusService;
+import com.happyericsix.stocktracker.service.PaperEquityBackfillService;
 import com.happyericsix.stocktracker.service.PaperTradingService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,13 +16,16 @@ public class PaperTradingJob {
     private final PaperTradingService paperTradingService;
     private final MarketStatusService marketStatusService;
     private final JobRunService jobRunService;
+    private final PaperEquityBackfillService paperEquityBackfillService;
 
     public PaperTradingJob(PaperTradingService paperTradingService,
                            MarketStatusService marketStatusService,
-                           JobRunService jobRunService) {
+                           JobRunService jobRunService,
+                           PaperEquityBackfillService paperEquityBackfillService) {
         this.paperTradingService = paperTradingService;
         this.marketStatusService = marketStatusService;
         this.jobRunService = jobRunService;
+        this.paperEquityBackfillService = paperEquityBackfillService;
     }
 
     @Scheduled(cron = "0 30 15 * * MON-FRI", zone = "Asia/Shanghai")
@@ -35,8 +39,11 @@ public class PaperTradingJob {
                 log.info("Skip daily paper settlement: not a trading day");
                 return "非交易日，跳过";
             }
+            // 顺手扫过期提案（人工授权闭环）：过期即作废收尾 + 消息告知，
+            // 亏损的兜底是列表读取时的惰性过期 —— 这里保证无人访问也最终一致。
+            int expired = paperTradingService.expireStaleProposals();
             paperTradingService.evaluateDaily();
-            return null;
+            return expired > 0 ? expired + " 条提案过期作废" : null;
         });
     }
 
@@ -80,5 +87,18 @@ public class PaperTradingJob {
             return paperTradingService.retryFailedDailySettlements(finalAttemptOfDay)
                     + (finalAttemptOfDay ? "（终轮）" : "（中间轮）");
         });
+    }
+
+    /**
+     * 净值补账（2026-11-18）：终轮重试之后跑——后端白天（含 15:30 结算口）没活着
+     * 的日子没有任何痕迹，既有补跑判不到，只能在这里用历史收盘价补曲线
+     * （见 {@link PaperEquityBackfillService} 的"为什么必须有它"）。
+     * 不看日历闸：补的是**过去的**缺口，今天是不是交易日与它无关
+     * （非交易日调用只会发现没有缺格，空转即回）。
+     */
+    @Scheduled(cron = "0 30 20 * * MON-FRI", zone = "Asia/Shanghai")
+    public void backfillPaperEquity() {
+        jobRunService.runWithHeartbeat(JobRunService.JOB_PAPER_EQUITY_BACKFILL,
+                paperEquityBackfillService::catchUpAll);
     }
 }

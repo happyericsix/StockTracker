@@ -19,6 +19,16 @@ public interface PaperTradeTraceRepository extends JpaRepository<PaperTradeTrace
 
     List<PaperTradeTrace> findByStrategyIdAndTradeDateOrderByCreatedAtAsc(Long strategyId, LocalDate tradeDate);
 
+    /**
+     * 某策略全部<b>日线结算</b>痕迹按日正序（净值补账用，2026-11-18）。
+     *
+     * <p>只取 daily：realtime 一天可写几十条，全量拉会把回填撑爆；
+     * daily 痕迹每天至多几条，量被交易日数天然封顶。equityAfter 等字段
+     * 是"当天结算后的账户终态"，正是回填快照要照抄的数字。
+     */
+    List<PaperTradeTrace> findByStrategyIdAndSettlementKindOrderByTradeDateAscCreatedAtAsc(
+            Long strategyId, String settlementKind);
+
     long countByStrategyId(Long strategyId);
 
     /**

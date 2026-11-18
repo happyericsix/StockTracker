@@ -43,6 +43,8 @@ class MarketSessionGateTest {
     private PaperTradingService paperTradingService;
     @Mock
     private com.happyericsix.stocktracker.service.JobRunService jobRunService;
+    @Mock
+    private com.happyericsix.stocktracker.service.PaperEquityBackfillService paperEquityBackfillService;
 
     @BeforeEach
     void executeHeartbeatWrappers() {
@@ -109,7 +111,7 @@ class MarketSessionGateTest {
 
     @Test
     void dailySettlementIsSkippedOnConfirmedHoliday() {
-        PaperTradingJob job = new PaperTradingJob(paperTradingService, marketStatus, jobRunService);
+        PaperTradingJob job = new PaperTradingJob(paperTradingService, marketStatus, jobRunService, paperEquityBackfillService);
         when(marketStatus.current()).thenReturn(status(false, "closed"));
 
         job.runDailyPaper();
@@ -119,7 +121,7 @@ class MarketSessionGateTest {
 
     @Test
     void dailySettlementRunsWhenCalendarUnknown() {
-        PaperTradingJob job = new PaperTradingJob(paperTradingService, marketStatus, jobRunService);
+        PaperTradingJob job = new PaperTradingJob(paperTradingService, marketStatus, jobRunService, paperEquityBackfillService);
         when(marketStatus.current()).thenReturn(status(null, "unknown"));
 
         job.runDailyPaper();

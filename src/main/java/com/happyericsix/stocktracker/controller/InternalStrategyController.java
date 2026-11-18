@@ -5,12 +5,15 @@ import com.happyericsix.stocktracker.dto.PaperEquityResponse;
 import com.happyericsix.stocktracker.dto.PaperTradeResponse;
 import com.happyericsix.stocktracker.dto.PaperTradeTraceResponse;
 import com.happyericsix.stocktracker.dto.TradeJournalResponse;
+import com.happyericsix.stocktracker.entity.PaperAuthorization;
 import com.happyericsix.stocktracker.entity.Strategy;
 import com.happyericsix.stocktracker.service.JobRunService;
 import com.happyericsix.stocktracker.entity.User;
+import com.happyericsix.stocktracker.repository.PaperAuthorizationRepository;
 import com.happyericsix.stocktracker.repository.StrategyRepository;
 import com.happyericsix.stocktracker.repository.UserRepository;
 import com.happyericsix.stocktracker.service.ExpectationService;
+import com.happyericsix.stocktracker.service.PaperEquityBackfillService;
 import com.happyericsix.stocktracker.service.PaperTradingService;
 import com.happyericsix.stocktracker.service.TradeJournalService;
 import org.slf4j.Logger;
@@ -26,12 +29,15 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * 策略模拟盘数据的<b>内部导出接口</b>：给 Python 侧 agent 的复盘工具
@@ -40,7 +46,8 @@ import java.util.Map;
  * <h3>为什么走接口而不是让 Python 直连 MySQL</h3>
  * 与 {@link InternalMemoryController}、{@link InternalNewsController} 同一条纪律：
  * 数据库凭据只存在于 Java 进程，Python 能取到什么被接口形状限制死。
- * 这里导出的是<b>只读快照</b>：策略配置、账户、净值、成交、结算痕迹、决策日志、预期。
+ * 这里导出的是<b>只读快照</b>：策略配置、账户、盘中授权、净值、成交（含每笔实际动用
+ * 比例的推导字段，见 {@link #tradesNode}）、结算痕迹、决策日志、预期。
  *
  * <h3>与前端读接口的关系</h3>
  * 数据口径完全复用 {@link PaperTradingService} / {@link TradeJournalService} /
@@ -75,6 +82,8 @@ public class InternalStrategyController {
     private final TradeJournalService tradeJournalService;
     private final ExpectationService expectationService;
     private final JobRunService jobRunService;
+    private final PaperAuthorizationRepository paperAuthorizationRepository;
+    private final PaperEquityBackfillService paperEquityBackfillService;
     private final String internalToken;
 
     public InternalStrategyController(UserRepository userRepository,
@@ -83,6 +92,8 @@ public class InternalStrategyController {
                                       TradeJournalService tradeJournalService,
                                       ExpectationService expectationService,
                                       JobRunService jobRunService,
+                                      PaperAuthorizationRepository paperAuthorizationRepository,
+                                      PaperEquityBackfillService paperEquityBackfillService,
                                       @Value("${internal.api-token:}") String internalToken) {
         this.userRepository = userRepository;
         this.strategyRepository = strategyRepository;
@@ -90,6 +101,8 @@ public class InternalStrategyController {
         this.tradeJournalService = tradeJournalService;
         this.expectationService = expectationService;
         this.jobRunService = jobRunService;
+        this.paperAuthorizationRepository = paperAuthorizationRepository;
+        this.paperEquityBackfillService = paperEquityBackfillService;
         this.internalToken = internalToken;
     }
 
@@ -160,6 +173,7 @@ public class InternalStrategyController {
         body.put("account", section("account", () ->
                 paperTradingService.getAccount(username, id) == null ? null
                         : accountNode(username, id)));
+        body.put("authorization", section("authorization", () -> authorizationNode(id)));
         body.put("equity", section("equity", () -> equityNode(username, id)));
         body.put("trades", section("trades", () -> tradesNode(username, id)));
         body.put("traces", section("traces", () -> tracesNode(username, id)));
@@ -216,9 +230,29 @@ public class InternalStrategyController {
         return node;
     }
 
+    /**
+     * 成交节（2026-11-17 起每笔带"当时实际动用了多少"的推导字段）。
+     *
+     * <p>为什么要加：只给配置 size_pct 与成交结果时，agent 复盘只能拿通用常识猜
+     * "为什么配 50% 只买了 10%"，把执行引擎的**设计行为**（三层夹取、agent
+     * size_fraction 部分卖出、参与率上限）误诊成系统 bug（2026-11-17 用户实例：
+     * 金新农按比例减仓被断言为"没清仓的故障"）。这里用成交对应痕迹里的
+     * cashBefore/cashAfter、sharesBefore 把两个百分比<b>确定性推出</b>：
+     * cashUsedPct = 买入吃掉当时现金的百分比（含费用），soldSharePct = 卖出占
+     * 当时持仓的百分比 —— "为什么是这个数"从此在数据里可对账，不靠模型编。
+     *
+     * <p>推导字段取不到就整个不出现（成交早于痕迹功能、或对应痕迹已滑出最近窗口）：
+     * 不填 0（会被读成"全额动用"）也不填 null（会被当缺数硬答），键不在就是
+     * "这笔没有推导依据"，与"数据为零"天然区分。
+     */
     private List<Map<String, Object>> tradesNode(String username, Long id) {
+        List<PaperTradeResponse> trades = paperTradingService.getTrades(username, id);
+        Map<Long, PaperTradeTraceResponse> traceById = paperTradingService
+                .getTraces(username, id, RECENT_TRADES * 3).stream()
+                .collect(Collectors.toMap(PaperTradeTraceResponse::getId,
+                        Function.identity(), (a, b) -> a));
         List<Map<String, Object>> rows = new ArrayList<>();
-        for (PaperTradeResponse t : paperTradingService.getTrades(username, id)) {
+        for (PaperTradeResponse t : trades) {
             if (rows.size() >= RECENT_TRADES) {
                 break;
             }
@@ -229,9 +263,54 @@ public class InternalStrategyController {
             row.put("shares", t.getShares());
             row.put("amount", t.getAmount());
             row.put("reason", t.getReason());
+            PaperTradeTraceResponse trace = t.getTraceId() == null ? null
+                    : traceById.get(t.getTraceId());
+            if (trace != null) {
+                if ("BUY".equalsIgnoreCase(t.getSide())) {
+                    BigDecimal cashUsedPct = pctOf(
+                            trace.getCashBefore().subtract(trace.getCashAfter()),
+                            trace.getCashBefore());
+                    if (cashUsedPct != null) {
+                        row.put("cashUsedPct", cashUsedPct);
+                    }
+                } else if ("SELL".equalsIgnoreCase(t.getSide())) {
+                    BigDecimal soldSharePct = pctOf(t.getShares(), trace.getSharesBefore());
+                    if (soldSharePct != null) {
+                        row.put("soldSharePct", soldSharePct);
+                    }
+                }
+            }
             rows.add(row);
         }
         return rows;
+    }
+
+    /** 子量占总量的百分数（1 位小数）。分母缺失或 ≤0 返回 null：宁缺毋假。 */
+    private static BigDecimal pctOf(BigDecimal part, BigDecimal whole) {
+        if (part == null || whole == null || whole.signum() <= 0) {
+            return null;
+        }
+        return BigDecimal.valueOf(100).multiply(part)
+                .divide(whole, 1, java.math.RoundingMode.HALF_UP);
+    }
+
+    /**
+     * 最新盘中授权（三层夹取的最后一层）。让"配置 50% 却只买了 10%"这类问题
+     * 能对上"授权 max_position_pct 只有 10%"的解释，而不是被猜成执行 bug。
+     * 无授权记录 = null（rule 模式的策略本来就没有这一层）。
+     */
+    private Map<String, Object> authorizationNode(Long strategyId) {
+        PaperAuthorization auth = paperAuthorizationRepository.findLatest(strategyId).orElse(null);
+        if (auth == null) {
+            return null;
+        }
+        Map<String, Object> node = new LinkedHashMap<>();
+        node.put("maxPositionPct", auth.getMaxPositionPct());
+        node.put("intradayExecution", auth.getIntradayExecution());
+        node.put("allowOpen", auth.getAllowOpen());
+        node.put("allowClose", auth.getAllowClose());
+        node.put("issuedAt", auth.getIssuedAt() == null ? null : auth.getIssuedAt().toString());
+        return node;
     }
 
     /**
@@ -340,6 +419,24 @@ public class InternalStrategyController {
         String summary = paperTradingService.retryFailedDailySettlements(true);
         jobRunService.record(JobRunService.JOB_PAPER_RETRY, JobRunService.STATUS_OK,
                 "手动补跑：" + summary);
+        return ResponseEntity.ok(Map.of("ok", true, "summary", summary));
+    }
+
+    /**
+     * 手动触发"净值补账"（运维入口，2026-11-18）：与启动钩子/20:30 定时同一入口。
+     * 部署修复后（或本地后端只偶尔开机）跑一次，把曲线缺口补上——
+     * 痕迹回填（精确）+ 缺口补算（估算，限最近 N 个交易日），只补曲线不补交易。
+     * 幂等：(strategy, tradeDate) 唯一，已有即跳过。
+     */
+    @PostMapping("/paper/backfill-equity")
+    public ResponseEntity<Map<String, Object>> backfillEquity(
+            @RequestHeader(value = "X-Internal-Token", required = false) String token) {
+        if (!authorized(token)) {
+            return unauthorized();
+        }
+        String summary = paperEquityBackfillService.catchUpAll();
+        jobRunService.record(JobRunService.JOB_PAPER_EQUITY_BACKFILL, JobRunService.STATUS_OK,
+                "手动补账：" + summary);
         return ResponseEntity.ok(Map.of("ok", true, "summary", summary));
     }
 
