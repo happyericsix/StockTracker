@@ -59,6 +59,7 @@ scp -r stock-tracker root@服务器IP:/opt/   # 只需要这些文件：
 #   docker-compose.yml  nginx.conf  Dockerfile  .env.example
 #   frontend/Dockerfile  python-data-service/Dockerfile  vendor/  secrets/
 # （vendor/ 与 secrets/ 已被 .gitignore，scp 整目录最省事）
+# （nginx.conf 同样不入库：cp nginx-https.conf.example nginx.conf 后填上自己的域名）
 
 # 服务器上
 docker load -i /root/st-images.tar
@@ -185,7 +186,7 @@ PWA 的 manifest / Service Worker / 离线策略前端早已配齐（vite-plugin
 ### 9.2 解析与证书（备案下来当天可完成）
 
 ```bash
-# ① DNS：A 记录 → 120.27.226.47（备案通过前不要解析到大陆服务器对外服务）
+# ① DNS：A 记录 → <你的服务器IP>（备案通过前不要解析到大陆服务器对外服务）
 
 # ② 服务器上装 acme.sh（Let's Encrypt 免费证书，DNS-01 校验：
 #    不依赖 80 端口、不用动 nginx，先签证书后改配置，没有鸡生蛋问题）

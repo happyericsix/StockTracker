@@ -135,3 +135,12 @@ loadtest/bin/
 loadtest/*.log
 loadtest/metrics.csv
 loadtest/stub/.cache/
+
+### 不可再分发 / 部署私有内容（2026-11-18 落实：仓库只公布业务代码） ###
+# vendor：同花顺协议第三方逆向实现，合规上不可再分发（README 指引 scripts/_fetch_ths.py 自行拉取）
+vendor/thspypc_src/
+vendor/qrcode_lib/
+# 旧版前端快照：开源仓库不需要（.gitattributes export-ignore 同款理由）
+frontend-legacy/
+# 真实 nginx 配置（含线上域名）：模板见 nginx-https.conf.example，部署时 cp 后填域名
+nginx.conf

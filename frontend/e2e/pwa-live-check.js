@@ -5,7 +5,7 @@
 //  4. 离线深链（SPA 路由）与在线截图留档
 import { chromium } from '@playwright/test'
 
-const BASE = process.argv[2] || 'https://stocktracker.com.cn'
+const BASE = process.argv[2] || 'http://localhost:5173'
 
 ;(async () => {
   const results = []

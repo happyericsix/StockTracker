@@ -1,10 +1,10 @@
 ﻿# deploy-update.ps1 —— 日常更新某個服务的镜像并推上服务器（一条命令代替 build/save/scp/load/up 五步）
 #
 # 用法：
-#   .\deploy-update.ps1 python-data     # 只更新 Python 服务（改了 python-data-service/ 或 vendor/）
-#   .\deploy-update.ps1 app             # 只更新 Java 后端（改了 src/ 或 pom.xml）
-#   .\deploy-update.ps1 frontend        # 只更新前端（改了 frontend/ 或 nginx.conf）
-#   .\deploy-update.ps1 -ServerIp x.x.x.x app   # 换服务器时指定 IP
+#   .\deploy-update.ps1 -ServerIp x.x.x.x python-data   # 只更新 Python 服务（改了 python-data-service/ 或 vendor/）
+#   .\deploy-update.ps1 -ServerIp x.x.x.x app           # 只更新 Java 后端（改了 src/ 或 pom.xml）
+#   .\deploy-update.ps1 -ServerIp x.x.x.x frontend      # 只更新前端（改了 frontend/ 或 nginx.conf）
+#   # 服务器 IP 必填：仓库是公开的，不携带真实地址（2026-11-18 脱敏）
 #
 # 前提：服务器已按 DEPLOY.md 部署过（/opt/stock-tracker 就位）。
 # 数据安全：镜像更新不碰 mysql-data 卷，服务器上的数据（账号/策略/模拟盘）不受影响。
@@ -13,7 +13,8 @@ param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidateSet("app", "python-data", "frontend")]
     [string]$Service,
-    [string]$ServerIp = "120.27.226.47"
+    [Parameter(Mandatory = $true)]
+    [string]$ServerIp
 )
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path

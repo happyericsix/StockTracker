@@ -16,7 +16,7 @@ export default defineConfig({
   timeout: 60_000,
   retries: 0,
   use: {
-    baseURL: process.env.BASE_URL || 'http://120.27.226.47',
+    baseURL: process.env.BASE_URL || 'http://localhost:5173',
     headless: true,
     viewport: { width: 390, height: 844 }, // 手机优先：错位最先出现在窄屏
     locale: 'zh-CN',

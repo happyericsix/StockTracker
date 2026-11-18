@@ -24,7 +24,7 @@ services:
     container_name: stock-mysql
     # 不发布宿主端口：仅内部网络可达
     environment:
-      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-123456}
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:?请在 .env 配置强密码 MYSQL_ROOT_PASSWORD（弱默认值已移除）}
       - MYSQL_DATABASE=stockdb
       - MYSQL_CHARACTER_SET_SERVER=utf8mb4
       - MYSQL_COLLATION_SERVER=utf8mb4_unicode_ci
@@ -94,11 +94,12 @@ services:
       # CORS 白名单（2026-10-24 线上事故）：代码默认只有 localhost:5173，浏览器 POST
       # 带 Origin 头一律 403 Invalid CORS request——GET 不带 Origin 页面看似正常，
       # 极具迷惑性。域名/www/IP/本地开发四个 origin 与服务器保持一致。
-      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-https://stocktracker.com.cn,https://www.stocktracker.com.cn,http://120.27.226.47,http://localhost:5173}
+      # 默认值只留本地开发：真实域名/IP 由服务器 .env 注入（仓库公开，不携带部署地址）
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
       - SPRING_DATA_REDIS_PORT=6379
       - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/stockdb?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai
       - SPRING_DATASOURCE_USERNAME=root
-      - SPRING_DATASOURCE_PASSWORD=${MYSQL_ROOT_PASSWORD:-123456}
+      - SPRING_DATASOURCE_PASSWORD=${MYSQL_ROOT_PASSWORD:?请在 .env 配置强密码 MYSQL_ROOT_PASSWORD（弱默认值已移除）}
       - AKSHARE_API_BASE_URL=http://python-data:8000
       - INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN:?请在 .env 配置 INTERNAL_API_TOKEN（cp .env.example .env）}
       # 公网部署：自己注册完设为 false（开放注册 = 陌生人烧你的 LLM 额度）

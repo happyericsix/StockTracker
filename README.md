@@ -170,7 +170,8 @@ curl http://localhost/api/v1/market/status # 401：API 通（未登录）
 出于合规考虑，本仓库**不含**同花顺协议的第三方实现代码（`vendor/thspypc_src`）。需要扫码绑定/自选同步时，自行拉取后即可启用：
 
 ```bash
-python python-data-service/_fetch_ths.py   # 拉取上游源码到 vendor/
+python python-data-service/scripts/_fetch_ths.py     # 拉取上游源码到 vendor/
+python python-data-service/scripts/_fetch_qrcode.py  # 同花顺扫码依赖的二维码库
 ```
 
 不拉取不影响其他所有功能（`ths_client` 会给出清晰提示）。
